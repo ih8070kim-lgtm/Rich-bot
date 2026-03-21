@@ -1,0 +1,10 @@
+# AI가 읽지 않게 하여 비용을 아끼는 목록
+*.log
+*.csv
+*.json
+*.tmp
+__pycache__/
+.git/
+node_modules/
+api.env
+*.env

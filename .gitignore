@@ -1,0 +1,72 @@
+@"
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+.env
+.env.*
+*.env
+api.env
+
+# logs / runtime
+logs/
+*.log
+*.jsonl
+heartbeat.txt
+
+# runtime state
+*_state.json
+*.bak
+_supervisor_pids.json
+_telegram_deploy_offset.json
+daily_stats.json
+
+# deploy/runtime folders
+_deploy_backups/
+_deploy_reports/
+_tg_done/
+_tg_failed/
+_tg_tmp/
+
+# build artifacts
+build/
+dist/
+*.spec
+
+# local clones / backups
+Rich-bot/
+*_backup
+*.backup
+
+# databases
+*.sqlite
+*.sqlite3
+
+# archives / office files
+*.zip
+*.xlsx
+*.xls
+*.bmp
+
+# secrets / keys
+*.key
+*.pem
+*.p12
+
+# extra local/runtime files
+v9_logs/
+github/
+90'
+python
+self.total_max_slots
+wallets.json
+trinity_wallets_v70.json
+"@ | Add-Content .gitignore
+
+
+# editor
+.vscode/
+.idea/
+"@ | Set-Content -Encoding utf8 .gitignore
+
