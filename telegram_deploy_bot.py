@@ -29,7 +29,11 @@ from dotenv import load_dotenv
 # 기본 경로 / ENV
 # =========================================================
 
-PROJECT_DIR = Path(r"C:\Trinity").resolve()
+# ★ v10.12: 크로스 플랫폼 경로
+if os.name == "nt":
+    PROJECT_DIR = Path(r"C:\Trinity").resolve()
+else:
+    PROJECT_DIR = Path.home() / "Rich-bot"
 ENV_PATH = PROJECT_DIR / "deploy_api.env"
 
 if not ENV_PATH.exists():

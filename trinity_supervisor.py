@@ -32,7 +32,11 @@ if hasattr(sys.stderr, "reconfigure"):
 # 기본 경로 / ENV
 # =========================================================
 
-BASE_DIR = Path(r"C:\Trinity").resolve()
+# ★ v10.12: 크로스 플랫폼 경로
+if os.name == "nt":
+    BASE_DIR = Path(r"C:\Trinity").resolve()
+else:
+    BASE_DIR = Path.home() / "Rich-bot"
 DEPLOY_ENV = BASE_DIR / "deploy_api.env"
 
 if not DEPLOY_ENV.exists():
@@ -188,6 +192,7 @@ class ManagedProcess:
             env=child_env,
             creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
                            if os.name == "nt" else 0),
+            **({"preexec_fn": os.setsid} if os.name != "nt" else {}),
         )
 
         print_log(f"{self.name} started | pid={self.proc.pid}")
@@ -225,14 +230,18 @@ class ManagedProcess:
             if self.proc.poll() is None:
                 print_log(f"Stopping {self.name} pid={self.proc.pid}")
                 if os.name == "nt":
-                    # ★ 프로세스 트리 kill (/T 옵션)
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
                 else:
-                    self.proc.terminate()
+                    import signal as _sig
+                    try:
+                        os.killpg(os.getpgid(self.proc.pid), _sig.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        self.proc.terminate()
         except Exception as e:
             print_log(f"Stop failed {self.name}: {e}")
 
@@ -258,61 +267,72 @@ def log_consumer():
 
 def kill_existing_instances():
     """supervisor 시작 전, 이전 실행의 잔여 프로세스를 모두 kill."""
-    if os.name != "nt":
-        return []
-
-    import csv as _csv
-    import io as _io
-
+    import signal as _signal
     my_pid = os.getpid()
     killed = []
-
-    # 관리 대상 스크립트 목록
     targets = [cfg["cmd"][-1].lower() for cfg in PROGRAMS]
-    # supervisor 자신도 중복 실행 방지
     targets.append("trinity_supervisor.py")
 
-    try:
-        out = subprocess.check_output(
-            ["wmic", "process", "get",
-             "ProcessId,Name,CommandLine", "/FORMAT:CSV"],
-            text=True, stderr=subprocess.DEVNULL,
-            encoding="utf-8", errors="ignore",
-        )
-        rows = list(_csv.DictReader(_io.StringIO(out)))
-    except Exception as e:
-        print_log(f"[CLEANUP] wmic 실패: {e}")
-        return killed
-
-    for row in rows:
+    if os.name == "nt":
+        import csv as _csv
+        import io as _io
         try:
-            pid = int((row.get("ProcessId") or "").strip())
-        except Exception:
-            continue
-
-        if pid == my_pid:
-            continue
-
-        cmdline = (row.get("CommandLine") or "").lower()
-        name = (row.get("Name") or "").lower()
-
-        if name not in ("python.exe", "pythonw.exe"):
-            continue
-
-        for target in targets:
-            if target in cmdline:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    killed.append((pid, target))
-                    print_log(f"[CLEANUP] killed pid={pid} ({target})")
-                except Exception:
-                    pass
-                break
-
+            out = subprocess.check_output(
+                ["wmic", "process", "get",
+                 "ProcessId,Name,CommandLine", "/FORMAT:CSV"],
+                text=True, stderr=subprocess.DEVNULL,
+                encoding="utf-8", errors="ignore",
+            )
+            rows = list(_csv.DictReader(_io.StringIO(out)))
+        except Exception as e:
+            print_log(f"[CLEANUP] wmic 실패: {e}")
+            return killed
+        for row in rows:
+            try:
+                pid = int((row.get("ProcessId") or "").strip())
+            except Exception:
+                continue
+            if pid == my_pid:
+                continue
+            cmdline = (row.get("CommandLine") or "").lower()
+            name = (row.get("Name") or "").lower()
+            if name not in ("python.exe", "pythonw.exe"):
+                continue
+            for target in targets:
+                if target in cmdline:
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                        killed.append((pid, target))
+                        print_log(f"[CLEANUP] killed pid={pid} ({target})")
+                    except Exception:
+                        pass
+                    break
+    else:
+        # ★ Linux: /proc 기반
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            pid = int(proc_dir.name)
+            if pid == my_pid:
+                continue
+            try:
+                cmdline = (proc_dir / "cmdline").read_text().replace("\x00", " ").lower()
+            except Exception:
+                continue
+            if "python" not in cmdline:
+                continue
+            for target in targets:
+                if target in cmdline:
+                    try:
+                        os.kill(pid, _signal.SIGTERM)
+                        killed.append((pid, target))
+                        print_log(f"[CLEANUP] killed pid={pid} ({target})")
+                    except Exception:
+                        pass
+                    break
     return killed
 
 
