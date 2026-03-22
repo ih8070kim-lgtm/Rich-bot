@@ -146,6 +146,13 @@ def apply_order_results(
                 if tier == 5:
                     p["t5_entry_price"] = avg_px
                     p["max_dca_reached"] = True
+                # ★ v10.12: 각 tier entry price 기록 (entry 기준 독립게임 TP1용)
+                if tier == 2:
+                    p["t2_entry_price"] = avg_px
+                if tier == 3:
+                    p["t3_entry_price"] = avg_px
+                if tier == 4:
+                    p["t4_entry_price"] = avg_px
                 if tier >= 5:
                     p.setdefault("hedge_rolling_count", 0)
                 p["pending_dca"] = None

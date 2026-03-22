@@ -32,7 +32,7 @@ if hasattr(sys.stderr, "reconfigure"):
 # 기본 경로 / ENV
 # =========================================================
 
-BASE_DIR = Path(r"C:\Users\김익현\OneDrive\Desktop\부자만들기").resolve()
+BASE_DIR = Path(r"C:\Trinity").resolve()
 DEPLOY_ENV = BASE_DIR / "deploy_api.env"
 
 if not DEPLOY_ENV.exists():

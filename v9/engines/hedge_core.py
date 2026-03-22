@@ -99,11 +99,17 @@ def plan_hedge_core_entry(
         # ★ v10.11b: T5 소스에는 헷지 안 붙임 (T5 독립게임)
         if int(hp.get("dca_level", 1) or 1) >= 5:
             continue
+        # ★ v10.12: T1 소스 제외 (진입 초기, 구조적 스큐 판단 이름)
+        if int(hp.get("dca_level", 1) or 1) <= 1:
+            continue
         cp = float((snapshot.all_prices or {}).get(sym, 0.0))
         if cp <= 0:
             continue
         roi = calc_roi_pct(float(hp.get("ep", 0)), cp, heavy_side, LEVERAGE)
         dca = int(hp.get("dca_level", 1) or 1)
+        # ★ v10.12: T2~T4 소스는 ROI ≤ -1.2%일 때만 (DCA -1.5% 전에 발동, MDD 개선)
+        if roi > -1.2:
+            continue
         src_candidates.append((sym, hp, cp, roi, dca))
 
     # DCA 깊은 순 → ROI 낮은 순
@@ -114,14 +120,15 @@ def plan_hedge_core_entry(
     weak_max = MAX_SHORT if hedge_side == "sell" else MAX_LONG
 
     for src_sym, src_p, src_cp, src_roi, src_dca in src_candidates:
+        # ★ v10.12: 슬롯 없으면 시도조차 안 함
         if weak_count >= weak_max or weak_count >= 4:
             break
         if src_sym in asym_syms:
             continue
 
-        # 반대방향에 이미 포지션 있으면 스킵
-        opp_ex = get_p(st.get(src_sym, {}), hedge_side)
-        if isinstance(opp_ex, dict):
+        # ★ v10.12: 같은 심볼 반대방향에 이미 포지션 있으면 스킵
+        _existing = get_p(st.get(src_sym, {}), hedge_side)
+        if isinstance(_existing, dict):
             continue
 
         # T2 사이즈 (T1+T2 누적 비중)
@@ -212,6 +219,47 @@ def plan_hedge_core_manage(
             source_tp1 = isinstance(src_p, dict) and bool(src_p.get("tp1_done", False))
 
             if not source_gone and not source_tp1:
+                # ★ v10.12: 듀얼 프로핏 TP1 — 양쪽 ROI ≥ 0.3% → 40% 확정 + 60% trailing
+                DUAL_PROFIT_THRESH = 0.3
+                src_ep = float(src_p.get("ep", 0.0) or 0.0) if isinstance(src_p, dict) else 0
+                src_roi = calc_roi_pct(src_ep, cp, source_side, LEVERAGE) if src_ep > 0 else 0.0
+
+                if src_roi >= DUAL_PROFIT_THRESH and hedge_roi >= DUAL_PROFIT_THRESH:
+                    _TP1_RATIO = 0.40
+                    # 소스 TP1
+                    src_amt = float(src_p.get("amt", 0.0))
+                    src_close_qty = src_amt * _TP1_RATIO
+                    src_close_side = "sell" if source_side == "buy" else "buy"
+                    if src_close_qty > 0 and not src_p.get("tp1_done"):
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.TP1,
+                            symbol=source_sym,
+                            side=src_close_side,
+                            qty=src_close_qty,
+                            price=cp,
+                            reason=f"DUAL_PROFIT_SRC(s={src_roi:+.1f}%,h={hedge_roi:+.1f}%)",
+                            metadata={"roi_gross": src_roi, "_expected_role": src_p.get("role", "")},
+                        ))
+                    # 헷지 TP1
+                    hedge_amt = float(hedge.get("amt", 0.0))
+                    hedge_close_qty = hedge_amt * _TP1_RATIO
+                    hedge_close_side = "sell" if pos_side == "buy" else "buy"
+                    if hedge_close_qty > 0 and not hedge.get("tp1_done"):
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.TP1,
+                            symbol=sym,
+                            side=hedge_close_side,
+                            qty=hedge_close_qty,
+                            price=cp,
+                            reason=f"DUAL_PROFIT_HDG(s={src_roi:+.1f}%,h={hedge_roi:+.1f}%)",
+                            metadata={"roi_gross": hedge_roi, "_expected_role": "CORE_HEDGE"},
+                        ))
+                    if src_close_qty > 0 or hedge_close_qty > 0:
+                        print(f"[DUAL_PROFIT] {sym} src_roi={src_roi:+.1f}% hedge_roi={hedge_roi:+.1f}% "
+                              f"→ 양쪽 TP1 (40% 확정 + 60% trailing)")
+
                 # ★ v10.11b: 소스 T5 + 헷지 ROI ≥ 5% → 헷지 익절
                 # 소스는 T5 독립게임으로, 헷지 수익 확정
                 src_dca = int(src_p.get("dca_level", 1) or 1) if isinstance(src_p, dict) else 0

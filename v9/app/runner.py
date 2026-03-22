@@ -108,6 +108,27 @@ async def _sync_positions_with_exchange(ex, st):
                 old_ep = book_ep
                 if qty_diff:
                     book_p['amt'] = ex_qty
+                    # ★ v10.12: qty 증가 시 dca_level 역추정
+                    if ex_qty > book_qty * 1.05:
+                        from v9.config import DCA_WEIGHTS as _DW, LEVERAGE as _LV, TOTAL_MAX_SLOTS as _TS
+                        _cur_dca = int(book_p.get('dca_level', 1) or 1)
+                        _bal_est = float(getattr(snapshot, 'real_balance_usdt', 4000) or 4000) if 'snapshot' in dir() else 4000
+                        _grid_est = (_bal_est / _TS) * _LV
+                        _tw = sum(_DW)
+                        _notional = ex_qty * (ex_ep if ex_ep > 0 else old_ep)
+                        _cum = 0; _est_dca = 1
+                        for _wi in range(len(_DW)):
+                            _cum += _DW[_wi] / _tw
+                            if _notional <= _grid_est * _cum * 1.15:
+                                _est_dca = _wi + 1; break
+                            _est_dca = _wi + 1
+                        _est_dca = min(_est_dca, 5)
+                        if _est_dca > _cur_dca:
+                            print(f"[SYNC] ★ {sym} {side} dca_level 역추정: "
+                                  f"{_cur_dca}→{_est_dca} (notional=${_notional:.0f} grid=${_grid_est:.0f})")
+                            book_p['dca_level'] = _est_dca
+                            if _est_dca >= 5:
+                                book_p['max_dca_reached'] = True
                 if ep_diff and ex_ep > 0:
                     book_p['ep'] = ex_ep
                 _what = []
@@ -398,6 +419,36 @@ async def _main_loop(ex_init, dry_run: bool):
     start_ts           = time.time()
     _prev_balance      = 0.0   # ★ 잔고 급변 방어용
     _leverage_set      = False  # ★ 레버리지 초기화 플래그
+
+    # ★ v10.12: 부팅 시각 기록 (INSURANCE_SH 오발동 방지)
+    system_state["_boot_ts"] = start_ts
+
+    # ★ v10.12: 부팅 시 미체결 주문 전량 취소
+    # 이전 세션에서 limit 주문이 남아있으면 체결 시 포지션북 미반영 → dca_level 꼬임
+    try:
+        from v9.config import MAJOR_UNIVERSE as _CANCEL_SYMS
+        _cancel_count = 0
+        for _csym in _CANCEL_SYMS:
+            try:
+                _open_orders = await asyncio.to_thread(ex.fetch_open_orders, _csym)
+                for _oo in _open_orders:
+                    _oid = _oo.get('id')
+                    if _oid:
+                        await asyncio.to_thread(ex.cancel_order, _oid, _csym)
+                        _cancel_count += 1
+                        print(f"[STARTUP] {_csym} 미체결 주문 취소: {_oid} "
+                              f"({_oo.get('side','')} {_oo.get('amount','')} @ {_oo.get('price','')})")
+            except Exception as _co_e:
+                if '2011' not in str(_co_e):  # Unknown order = 이미 체결/취소
+                    print(f"[STARTUP] {_csym} 주문 조회/취소 오류(무시): {str(_co_e)[:60]}")
+            await asyncio.sleep(0.05)  # rate limit 방지
+        if _cancel_count > 0:
+            print(f"[STARTUP] ★ 미체결 주문 {_cancel_count}건 취소 완료")
+            save_position_book(st, cooldowns, system_state)
+        else:
+            print(f"[STARTUP] 미체결 주문 없음")
+    except Exception as _startup_e:
+        print(f"[STARTUP] 미체결 주문 정리 실패(무시): {_startup_e}")
 
     while True:
         now = time.time()

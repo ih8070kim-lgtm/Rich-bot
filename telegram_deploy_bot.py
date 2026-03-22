@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 # 기본 경로 / ENV
 # =========================================================
 
-PROJECT_DIR = Path(r"C:\Users\김익현\OneDrive\Desktop\부자만들기").resolve()
+PROJECT_DIR = Path(r"C:\Trinity").resolve()
 ENV_PATH = PROJECT_DIR / "deploy_api.env"
 
 if not ENV_PATH.exists():

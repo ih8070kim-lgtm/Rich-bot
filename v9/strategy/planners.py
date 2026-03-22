@@ -148,17 +148,19 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
 # ═════════════════════════════════════════════════════════════════
 # BTC Crash Filter  (★ v10.6)
 # ═════════════════════════════════════════════════════════════════
-BTC_CRASH_THRESHOLD = -0.008   # 3분(3봉) -0.8%
-BTC_CRASH_FREEZE_SEC = 180     # 차단 3분
+# ★ v10.12: 2중 크래시 감지
+BTC_CRASH_1M_THRESHOLD = -0.004  # 1봉(1분) -0.4% — 순간 급락 (백테스트: 10분후 61% ★★)
+BTC_CRASH_3M_THRESHOLD = -0.008  # 3봉(3분) -0.8% — 지속 하락 (검증완료 61%)
+BTC_CRASH_FREEZE_SEC = 180       # 차단 3분
 
 def _check_btc_crash(snapshot: "MarketSnapshot", system_state: dict) -> bool:
     """
-    BTC 1m 최근 3봉 수익률이 -0.8% 이하이면 crash 플래그 세팅.
-    crash 발동 후 180초간 신규 OPEN + DCA 차단.
-    Returns: True = 차단 중
+    ★ v10.12: 2중 크래시 감지
+      1) 1분봉 1봉 -0.4% → 순간 급락 (0.8/일, 오탐 적음)
+      2) 1분봉 3봉 -0.8% → 지속 하락
+    어느 쪽이든 발동 시 180초간 신규 OPEN + DCA 차단.
     """
     now = time.time()
-    # 기존 freeze 체크
     _freeze_until = float(system_state.get("btc_crash_freeze_until", 0.0) or 0.0)
     if now < _freeze_until:
         return True
@@ -168,17 +170,25 @@ def _check_btc_crash(snapshot: "MarketSnapshot", system_state: dict) -> bool:
     if len(ohlcv_1m) < 4:
         return False
 
-    # 최근 3봉 수익률
     _p_now = float(ohlcv_1m[-1][4])
-    _p_3ago = float(ohlcv_1m[-4][4])
-    if _p_3ago <= 0:
-        return False
-    _btc_ret_3m = (_p_now - _p_3ago) / _p_3ago
 
-    if _btc_ret_3m <= BTC_CRASH_THRESHOLD:
-        system_state["btc_crash_freeze_until"] = now + BTC_CRASH_FREEZE_SEC
-        print(f"[BTC_CRASH] 3분 수익률 {_btc_ret_3m*100:.2f}% → {BTC_CRASH_FREEZE_SEC}초 진입 차단")
-        return True
+    # ── 조건1: 1분 -0.5% (플래시 크래시) ──
+    _p_1ago = float(ohlcv_1m[-2][4])
+    if _p_1ago > 0:
+        _ret_1m = (_p_now - _p_1ago) / _p_1ago
+        if _ret_1m <= BTC_CRASH_1M_THRESHOLD:
+            system_state["btc_crash_freeze_until"] = now + BTC_CRASH_FREEZE_SEC
+            print(f"[BTC_CRASH] ★ 1분 급락 {_ret_1m*100:.2f}% → {BTC_CRASH_FREEZE_SEC}초 차단")
+            return True
+
+    # ── 조건2: 3분 -0.8% (지속 하락) ──
+    _p_3ago = float(ohlcv_1m[-4][4])
+    if _p_3ago > 0:
+        _ret_3m = (_p_now - _p_3ago) / _p_3ago
+        if _ret_3m <= BTC_CRASH_3M_THRESHOLD:
+            system_state["btc_crash_freeze_until"] = now + BTC_CRASH_FREEZE_SEC
+            print(f"[BTC_CRASH] 3분 하락 {_ret_3m*100:.2f}% → {BTC_CRASH_FREEZE_SEC}초 차단")
+            return True
 
     return False
 
@@ -927,10 +937,10 @@ def plan_open(
     # ★ v10.9: BTC Crash Filter — 급락 시 롱만 차단 (숏 MR은 허용)
     _btc_crash_active = _check_btc_crash(snapshot, system_state)
 
-    if _btc_regime == "LOW":
-        _btc_atr_mult = 2.8
-    else:
-        _btc_atr_mult = 2.4    # ★ v10.10: HIGH/NORMAL 통합 2.4
+    # ★ v10.12: 롱/숏 ATR 분리 (백테스트 최적화)
+    # 롱: 2.4 통일 (레짐 무관), 숏: 1.8 고정
+    _long_atr_base = 2.4
+    _short_atr_base = 1.8
 
     # ── SOURCE_LINKED_HEDGE_CORE (v10.11: hedge_core 모듈) ───
     _skew, _long_margin, _short_margin = calc_skew(st, total_cap)
@@ -953,76 +963,10 @@ def plan_open(
     _slhc_count = len(_hc_intents)
 
     # ════════════════════════════════════════════════════════════
-    # [2순위] FORCE_BALANCE — HEDGE_CORE와 독립 실행
-    # 추세장에서 trail 중 2~3개 동시 out 가능 → 제한 없이 운영
+    # [2순위] FORCE_BALANCE — ★ v10.12: 비활성화
+    # 11건 $+1.38 (10승 +$12, 1패 -$11) — 실질 제로
+    # CORE_HEDGE만으로 스큐 관리 충분, 이상한 타이밍 진입 방지
     # ════════════════════════════════════════════════════════════
-    if _skew >= 0.12:
-        _force_side = "sell" if _long_margin > _short_margin else "buy"
-        _force_targets = short_targets if _force_side == "sell" else long_targets
-        _fb_max_entries = 2  # 기존 유지
-
-        # 스큐 티어별 사이즈
-        if _skew >= 0.30:
-            _bal_dca = 4
-        elif _skew >= 0.21:
-            _bal_dca = 3
-        else:
-            _bal_dca = 2
-
-        _fb_grid_notional = (total_cap / TOTAL_MAX_SLOTS) * LEVERAGE
-        _cum_w = sum(DCA_WEIGHTS[:_bal_dca]) / sum(DCA_WEIGHTS)
-
-        _fb_candidates = []
-        _fb_cooldowns = system_state.get("_fb_cooldowns", {})
-        for _fb_sym in _force_targets:
-            if _fb_sym in _asym_syms:
-                continue
-            if time.time() < _fb_cooldowns.get(_fb_sym, 0):
-                continue
-            _fb_st = st.get(_fb_sym, {})
-            if isinstance(get_p(_fb_st, _force_side), dict):
-                continue
-            if get_pending_entry(_fb_st, _force_side):
-                continue
-            _fb_pool = (snapshot.ohlcv_pool or {}).get(_fb_sym, {})
-            _fb_1m = _fb_pool.get("1m", [])
-            if len(_fb_1m) < 15:
-                continue
-            _fb_p = float((snapshot.all_prices or {}).get(_fb_sym, 0.0))
-            if _fb_p <= 0:
-                continue
-            _fb_atr = atr_from_ohlcv(_fb_1m[-15:], period=10) / _fb_p
-            _fb_candidates.append((_fb_sym, _fb_atr, _fb_p))
-
-        _fb_candidates.sort(key=lambda x: -x[1])
-        for _fb_sym, _fb_atr, _fb_price in _fb_candidates[:_fb_max_entries]:
-            _fb_notional = _fb_grid_notional * _cum_w
-            _fb_qty = _fb_notional / _fb_price
-            _fb_all_targets = _build_dca_targets(_fb_price, _force_side, _fb_grid_notional, _btc_regime)
-            _fb_dca_targets = [t for t in _fb_all_targets if t.get("tier", 0) > _bal_dca]
-            if _fb_qty > 0:
-                intents.append(Intent(
-                    trace_id=_tid(),
-                    intent_type=IntentType.OPEN,
-                    symbol=_fb_sym,
-                    side=_force_side,
-                    qty=_fb_qty,
-                    price=_fb_price,
-                    reason=f"FORCE_BALANCE(L{_core_long}/S{_core_short},skew={_skew*100:.0f}%,dca={_bal_dca})",
-                    metadata={
-                        "atr": _fb_atr,
-                        "dca_targets": _fb_dca_targets,
-                        "role": "CORE_BALANCE",
-                        "entry_type": "BALANCE",
-                        "dca_level": _bal_dca,
-                        "positionSide": "LONG" if _force_side == "buy" else "SHORT",
-                        "locked_regime": _btc_regime,
-                    },
-                ))
-                _asym_syms.add(_fb_sym)
-                _fb_cooldowns[_fb_sym] = time.time() + 180
-                print(f"[FORCE_BALANCE] {_fb_sym} {_force_side} skew={_skew*100:.0f}% dca={_bal_dca}")
-        system_state["_fb_cooldowns"] = _fb_cooldowns
 
     # ── 일반 OPEN 루프 ────────────────────────────────────────────
     for symbol in list(set(long_targets + short_targets)):
@@ -1110,12 +1054,14 @@ def plan_open(
         if not (can_long or can_short):
             continue
 
-        # ── (4) 15m EMA20 + 5m EMA20 + 15m EMA10 (숏 전용)
+        # ── (4) 15m EMA — 롱 EMA10, 숏 EMA5  ★ v10.12
         closes_15m  = [float(x[4]) for x in ohlcv_15m]
         ema_period  = 20 if len(closes_15m) >= 20 else max(5, len(closes_15m))
         ema_20_15m  = calc_ema(closes_15m, period=ema_period)
-        # ★ v10.11: 숏 전용 EMA10 (하락장에서 빠르게 추적)
+        # ★ v10.12: 롱 전용 EMA10
         ema_10_15m  = calc_ema(closes_15m, period=10) if len(closes_15m) >= 10 else ema_20_15m
+        # ★ v10.12: 숏 전용 EMA5 (빠른 추적)
+        ema_5_15m   = calc_ema(closes_15m, period=5) if len(closes_15m) >= 5 else ema_10_15m
 
         closes_5m_all = [float(x[4]) for x in ohlcv_5m]
         ema_20_5m     = calc_ema(closes_5m_all, period=20) if len(closes_5m_all) >= 20 else 0.0
@@ -1123,21 +1069,20 @@ def plan_open(
         # MR ATR 배수: 추세 강도에 따라 스무스 조절
         # EMA 괴리율로 추세 강도 측정
         _ema_gap = abs(ema_20_5m - ema_20_15m) / ema_20_15m if ema_20_15m > 0 else 0.0
-        # ★ v10.11b: 동적 ATR — 순수 CORE_MR 슬롯 0이면 0.4 낮춤 (헷지 제외)
-        # _core_long/_core_short: CORE_HEDGE/INSURANCE_SH/trailing 제외 카운트 (위에서 계산)
+        # ★ v10.12: 롱/숏 ATR 독립 — 동적 부스트 유지
         _atr_boost_long  = -0.4 if _core_long  == 0 else 0
         _atr_boost_short = -0.4 if _core_short == 0 else 0
-        _mr_atr_mult_long  = _btc_atr_mult + _atr_boost_long
-        _mr_atr_mult_short = _btc_atr_mult + _atr_boost_short
+        _mr_atr_mult_long  = _long_atr_base + _atr_boost_long
+        _mr_atr_mult_short = _short_atr_base + _atr_boost_short
         if _atr_boost_long != 0 or _atr_boost_short != 0:
             print(f"[DYN_ATR] coreMR L={_core_long} S={_core_short} → "
                   f"atrL={_mr_atr_mult_long:.1f} atrS={_mr_atr_mult_short:.1f}")
 
         # ★ v10.7: Skew 완화는 plan_soft_hedge에서 미러링으로 처리 (진입조건 왜곡 제거)
 
-        mr_long_ok  = can_long  and ema_20_15m > 0 and (curr_p < ema_20_15m - atr_coin * _mr_atr_mult_long)
-        # ★ v10.11: 숏 EMA10 — 하락장에서 빠르게 추적, 작은 반등에도 숏 신호
-        mr_short_ok = can_short and ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult_short)
+        # ★ v10.12: 롱 EMA10, 숏 EMA5
+        mr_long_ok  = can_long  and ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult_long)
+        mr_short_ok = can_short and ema_5_15m  > 0 and (curr_p > ema_5_15m  + atr_coin * _mr_atr_mult_short)
 
         # ★ v10.7: TDECAY 제거 — ZOMBIE로 통합
 
@@ -1175,14 +1120,11 @@ def plan_open(
                     and _btc_regime in ("HIGH", "NORMAL")
                     and _vol_ratio >= _bo_vol_thresh)
 
-        _bo_long_final  = (can_long  and _bo_gate
-                           and ema_20_5m > ema_20_15m             # 단기 EMA 리드 (상승 모멘텀)
-                           and _highest_5m > 0 and curr_p > _highest_5m  # 20봉 고점 돌파
-                           and micro_long_ok)
-        _bo_short_final = (can_short and _bo_gate
-                           and ema_20_5m < ema_20_15m             # 단기 EMA 열위 (하락 모멘텀)
-                           and _lowest_5m  > 0 and curr_p < _lowest_5m   # 20봉 저점 이탈
-                           and micro_short_ok)
+        # ★ v10.12: Breakout 제거 — MR 전략만 사용
+        # 3/16~17 BREAKOUT 진입이 HARD_SL 연타로 -$20+ 손실 발생
+        # MR이 충분히 커버하므로 Breakout 불필요
+        _bo_long_final  = False
+        _bo_short_final = False
 
         # 최종 트리거 — MR 우선, Breakout은 MR 미발동 시에만
         _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok
@@ -1344,17 +1286,19 @@ def plan_dca(
     intents: List[Intent] = []
     now = time.time()
 
-    # ★ v10.11b: BTC Crash Filter — 롱 DCA만 차단 (숏은 급락 수혜)
+    # ★ v10.12: BTC Crash Filter — 롱 DCA만 차단 (2중 감지)
     _btc_pool_dca = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
     _btc_1m_dca = _btc_pool_dca.get("1m", [])
     _btc_crash_dca = False
     if len(_btc_1m_dca) >= 4:
         _btc_now = float(_btc_1m_dca[-1][4])
+        _btc_1ago = float(_btc_1m_dca[-2][4])
         _btc_3ago = float(_btc_1m_dca[-4][4])
-        if _btc_3ago > 0:
-            _btc_ret = (_btc_now - _btc_3ago) / _btc_3ago
-            if _btc_ret <= BTC_CRASH_THRESHOLD:
-                _btc_crash_dca = True  # 개별 포지션에서 롱만 필터링
+        # 1분 -0.5% OR 3분 -0.8%
+        if _btc_1ago > 0 and (_btc_now - _btc_1ago) / _btc_1ago <= BTC_CRASH_1M_THRESHOLD:
+            _btc_crash_dca = True
+        elif _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_3M_THRESHOLD:
+            _btc_crash_dca = True
 
     for symbol, p in _pos_items(st):
 
@@ -1590,18 +1534,37 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
         else:
-            # ★ v10.11b: T5 독립 게임 — t5_entry_price 기준 +1.5% ROI
+            # ★ v10.12: entry 기준 독립게임 TP1 (T1~T4 통일 +2.0%)
+            # T5는 기존 t5_entry 기준 +1.5% 유지
             if dca_level >= 5:
                 _t5ep = float(p.get("t5_entry_price", 0.0) or 0.0)
                 if _t5ep > 0:
                     roi_gross = calc_roi_pct(_t5ep, curr_p, p.get("side", ""), LEVERAGE)
-                    tp1_thresh = 1.5  # t5_entry 기준 ROI 1.5% (가격 0.5% 반등)
+                    tp1_thresh = 1.5  # t5_entry 기준 ROI 1.5%
                 else:
                     roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
                     tp1_thresh = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
             else:
-                roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
-                tp1_thresh = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
+                # ★ v10.12: 각 tier entry 기준 +2.0%
+                _ENTRY_TP1_PCT = 2.0
+                if dca_level <= 1:
+                    _tp_ref = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
+                elif dca_level == 2:
+                    _tp_ref = float(p.get("t2_entry_price", 0.0) or 0.0)
+                elif dca_level == 3:
+                    _tp_ref = float(p.get("t3_entry_price", 0.0) or 0.0)
+                elif dca_level == 4:
+                    _tp_ref = float(p.get("t4_entry_price", 0.0) or 0.0)
+                else:
+                    _tp_ref = 0.0
+                # fallback: entry 기록 없으면 ep 기준
+                if _tp_ref <= 0:
+                    _tp_ref = float(p.get("ep", 0.0))
+                    roi_gross = calc_roi_pct(_tp_ref, curr_p, p.get("side", ""), LEVERAGE)
+                    tp1_thresh = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
+                else:
+                    roi_gross = calc_roi_pct(_tp_ref, curr_p, p.get("side", ""), LEVERAGE)
+                    tp1_thresh = _ENTRY_TP1_PCT
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
@@ -1730,10 +1693,8 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             _is_hedge_trail = p.get("role") in ("HEDGE", "SOFT_HEDGE")
             if _is_hedge_trail:
                 _trail_squeeze = 0.7
-            elif dca_level >= 3:
-                _trail_squeeze = 0.3  # T3+ 극타이트
             else:
-                _trail_squeeze = 0.5  # T1/T2 타이트
+                _trail_squeeze = 0.3  # ★ v10.12: 전 tier 0.3 (백테스트 검증: +$764)
 
             PROFIT_CAP_TRIGGER = 6.0
             PROFIT_CAP_EXIT    = 5.0
@@ -1767,12 +1728,13 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 if p.get("role") == "SOFT_HEDGE" and (now - _trail_ts) < 120:
                     tp1_floor = -1.0  # 유예 중 -1%까지 허용
             else:
-                # ★ v10.11b: floor = effective TP의 절반 (전 티어 통일)
+                # ★ v10.12: entry floor 제거 (백테스트: FL 0.0/0.3/0.5 동일 결과)
+                # squeeze 0.3이 항상 먼저 발동하므로 floor 불필요
                 if dca_level >= 5:
-                    _eff_tp = 1.5  # T5 독립게임: t5_entry 기준 1.5% TP
+                    _eff_tp = 1.5
+                    tp1_floor = max(0.3, _eff_tp * 0.5)
                 else:
-                    _eff_tp = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
-                tp1_floor = max(0.3, _eff_tp * 0.5)
+                    tp1_floor = 0.1  # ep 기준 최소 마지노선만 유지
             if roi_pct <= tp1_floor:
                 trailing_triggered = True
                 trail_reason = f"TP1_FLOOR_{tp1_floor:.1f}PCT"
@@ -1913,6 +1875,13 @@ def plan_force_close(
         force  = False
         reason = ""
 
+        # ★ v10.12: 잔량 정리 — notional < $5이면 즉시 market 청산
+        _res_amt = float(p.get("amt", 0.0) or 0.0)
+        _res_notional = _res_amt * curr_p
+        if 0 < _res_notional < 5.0:
+            force  = True
+            reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f})"
+
         # ★ v10.10: DD_SHUTDOWN — 출혈 중인 CORE만 청산
         # HEDGE/INSURANCE_SH: 폭락 방어 중 → 살려야 함
         # trailing(step>=1): 수익 확정 중 → 살려야 함
@@ -1940,23 +1909,14 @@ def plan_force_close(
                 force  = True
                 reason = _h_reason
 
-        # ★ v10.10: INSURANCE_SH — timecut 청산 + 30초 방향 체크
+        # ★ v10.10: INSURANCE_SH — timecut 청산
         elif p.get("role") == "INSURANCE_SH":
             _ins_time = float(p.get("time", now) or now)
             _ins_timecut = float(p.get("insurance_timecut", 300) or 300)
             _ins_age = now - _ins_time
 
-            # ★ v10.11b: 30초 경과 후 ROI < 0.1% → 방향 틀림 → 즉시 청산
-            if _ins_age >= 30 and not p.get("_ins_direction_ok"):
-                _ins_roi = calc_roi_pct(
-                    float(p.get("ep", 0) or 0), curr_p,
-                    p.get("side", ""), LEVERAGE
-                ) if float(p.get("ep", 0) or 0) > 0 else 0.0
-                if _ins_roi < 0.1:
-                    force = True
-                    reason = f"INSURANCE_SH_EARLY_EXIT(30s,roi={_ins_roi:.2f}%)"
-                else:
-                    p["_ins_direction_ok"] = True  # 방향 확인됨 → 3분까지 유지
+            # ★ v10.12: 30초 방향 체크 제거 — timecut까지 유지
+            # 폭락 시 일시 반등으로 오판하여 보험을 30초에 버리는 문제 수정
 
             # 기존 timecut
             if not force and _ins_age >= _ins_timecut:
@@ -1971,18 +1931,22 @@ def plan_force_close(
             _atr_mult = (_atr / curr_p) / HARD_SL_ATR_BASE if (curr_p > 0 and _atr > 0) else 1.0
             _factor   = max(HARD_SL_FACTOR_MIN, min(HARD_SL_FACTOR_MAX, _atr_mult))
 
-            # ★ v10.11b: HARD_SL — T5는 독립 게임 (t5_entry 기준 -2.0%)
+            # ★ v10.12: HARD_SL — entry 기준 -5.0% 통일 (T1~T4), T5 독립 -2.0%
             _dca_lv_sl = int(p.get("dca_level", 1) or 1)
-            _DCA_SL_MAP = {1: -4.5, 2: -6.0, 3: -7.5, 4: -9.0, 5: -2.0}
-            _sl_thresh = _DCA_SL_MAP.get(_dca_lv_sl, -6.5)
 
-            # T5는 t5_entry_price 기준, T1~T4는 original_ep 기준
             if _dca_lv_sl >= 5:
+                # T5: t5_entry 기준 -2.0%
+                _sl_thresh = -2.0
                 _sl_ep = float(p.get("t5_entry_price", 0.0) or 0.0)
                 if _sl_ep <= 0:
                     _sl_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
             else:
-                _sl_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
+                # T1~T4: entry 기준 -5.0% (백테스트 최적)
+                _sl_thresh = -5.0
+                _entry_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
+                _sl_ep = float(p.get(_entry_keys.get(_dca_lv_sl, ""), 0.0) or 0.0)
+                if _sl_ep <= 0:
+                    _sl_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
 
             if _sl_ep > 0:
                 _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
@@ -2042,14 +2006,17 @@ def _scan_dca_blocked_insurance(
     now = time.time()
     mr_now = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0)
 
-    # BTC crash 감지
+    # ★ v10.12: BTC crash 2중 감지 (보험용)
     _btc_crash = False
     _btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
     _btc_1m = _btc_pool.get("1m", [])
     if len(_btc_1m) >= 4:
         _btc_now = float(_btc_1m[-1][4])
+        _btc_1ago = float(_btc_1m[-2][4])
         _btc_3ago = float(_btc_1m[-4][4])
-        if _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_THRESHOLD:
+        if _btc_1ago > 0 and (_btc_now - _btc_1ago) / _btc_1ago <= BTC_CRASH_1M_THRESHOLD:
+            _btc_crash = True
+        elif _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_3M_THRESHOLD:
             _btc_crash = True
     _btc_freeze = float(system_state.get("btc_crash_freeze_until", 0.0) or 0.0) > now
     _killswitch = mr_now >= 0.8
@@ -2089,17 +2056,22 @@ def _scan_dca_blocked_insurance(
 
         # ROI 도달 + 차단 사유 확인
         _block = None
+        _cur_dca = int(p.get("dca_level", 1) or 1)
         if _btc_crash or _btc_freeze:
-            _block = "BTC_CRASH"
+            _block = "BTC_CRASH"        # 전 tier 발동
         elif _killswitch:
-            _block = "KILLSWITCH"
+            _block = "KILLSWITCH"       # 전 tier 발동
         else:
             # 쿨다운 체크
             _next_tier = min((_t["tier"] for _t in dca_targets), default=2)
             _tier_cd = DCA_COOLDOWN_BY_TIER.get(_next_tier, DCA_COOLDOWN_SEC)
             _since = now - p.get("last_dca_time", p.get("time", now))
             if _since < _tier_cd:
-                _block = "COOLDOWN"
+                # ★ v10.12: COOLDOWN 보험은 T1/T2만 (T3+ 쿨다운은 노이즈)
+                # ep 기준 DCA에서 체결 직후 다음 트리거가 즉시 도달 → T3/T4에서 오발동
+                # BTC_CRASH/KILLSWITCH는 전 tier 즉시 발동
+                if _cur_dca <= 2 and _since >= 120:
+                    _block = "COOLDOWN"
 
         if _block and not p.get("insurance_sh_trigger"):
             p["insurance_sh_trigger"] = _block
@@ -2115,9 +2087,23 @@ def plan_insurance_sh(
     DCA 차단 보험 SH — 3~5분 순수 timecut.
     trailing 없음. 소스 영향 없음.
     ★ v10.11b: 같은 심볼 5분 재발동 쿨다운 + DCA 레벨당 1회 제한
+    ★ v10.12: 부팅 후 300초간 발동 차단 (재시작 시 오발동 방지)
     """
     intents: List[Intent] = []
     now = time.time()
+
+    # ★ v10.12: 부팅 후 300초간 보험 스킵
+    _boot_ts = float(system_state.get("_boot_ts", 0.0) or 0.0)
+    if _boot_ts > 0 and (now - _boot_ts) < 300:
+        # 플래그만 소비하고 전부 스킵
+        for sym, sym_st in st.items():
+            if not isinstance(sym_st, dict):
+                continue
+            for _, src_p in iter_positions(sym_st):
+                if isinstance(src_p, dict) and src_p.get("insurance_sh_trigger"):
+                    src_p["insurance_sh_trigger"] = None
+        return intents
+
     _ins_cd = system_state.setdefault("_insurance_cooldowns", {})
     _ins_dca = system_state.setdefault("_insurance_last_dca", {})  # {sym: last_fired_dca_level}
 

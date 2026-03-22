@@ -138,10 +138,11 @@ async def execute_intents(
                 )
                 continue
 
-        # Tick Limit 체크 (HEDGE role은 면제)
-        _is_hedge_intent = (itype == IntentType.OPEN and (intent.metadata or {}).get("role") == "HEDGE")
+        # Tick Limit 체크 (HEDGE/CORE_HEDGE/INSURANCE_SH role은 면제)
+        _intent_role = (intent.metadata or {}).get("role", "")
+        _is_exempt = (itype == IntentType.OPEN and _intent_role in ("HEDGE", "CORE_HEDGE", "INSURANCE_SH"))
         limit = _TICK_LIMITS.get(itype, None)
-        if limit is not None and not _is_hedge_intent:
+        if limit is not None and not _is_exempt:
             current_count = tick_counts.get(itype, 0)
             if current_count >= limit:
                 print(f"[execution_engine] SKIP_TICK_LIMIT {sym} {itype.value} (limit={limit})")
