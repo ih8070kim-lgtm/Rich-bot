@@ -56,20 +56,23 @@ if not BOT_TOKEN or not CHAT_ID:
 # 실행 대상
 # =========================================================
 
+# ★ v10.12: sys.executable = systemd가 실행한 venv python 경로
+_PYTHON = sys.executable
+
 PROGRAMS = [
     {
         "name": "DEPLOY_BOT",
-        "cmd": ["python", "telegram_deploy_bot.py"],
+        "cmd": [_PYTHON, "telegram_deploy_bot.py"],
         "restart": True,
     },
     {
         "name": "WATCHDOG",
-        "cmd": ["python", "watchdog.py"],
+        "cmd": [_PYTHON, "watchdog.py"],
         "restart": True,
     },
     {
         "name": "TELEGRAM_BOT",
-        "cmd": ["python", "telegram_bot.py"],
+        "cmd": [_PYTHON, "telegram_bot.py"],
         "restart": True,
     },
 ]
