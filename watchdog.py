@@ -1,9 +1,13 @@
 import os
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
+
+# ★ v10.12: venv python 경로 자동 감지
+_PYTHON = sys.executable
 
 # api.env 파일에서 텔레그램 정보 직접 파싱 (추가 라이브러리 의존성 제거)
 BOT_TOKEN = ""
@@ -30,6 +34,7 @@ def send_alert(msg):
 def main():
     print("========================================")
     print("🛡️ [Watchdog] 시스템 무중단 관제 모듈 가동")
+    print(f"    Python: {_PYTHON}")
     print("========================================")
     
     HEARTBEAT_FILE = "heartbeat.txt"
@@ -38,8 +43,8 @@ def main():
 
     while True:
         print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ▶ 메인 엔진(main.py) 프로세스 생성...")
-        # 메인 스크립트를 하위 프로세스로 실행
-        process = subprocess.Popen(["python", "main.py"])
+        # ★ v10.12: sys.executable 사용
+        process = subprocess.Popen([_PYTHON, "main.py"])
         send_alert("🛡️ [Watchdog] 메인 엔진을 (재)가동합니다.")
 
         while True:
