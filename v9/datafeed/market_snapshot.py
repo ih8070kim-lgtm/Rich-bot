@@ -79,16 +79,26 @@ async def fetch_market_snapshot(
         fetch_syms.add('BTC/USDT')
         fetch_syms.discard('')
 
-        for sym in fetch_syms:
-            try:
-                o_1m  = await asyncio.to_thread(ex.fetch_ohlcv, sym, '1m',  limit=70)
-                o_5m  = await asyncio.to_thread(ex.fetch_ohlcv, sym, '5m',  limit=50)
-                o_15m = await asyncio.to_thread(ex.fetch_ohlcv, sym, '15m', limit=60)  # ★ v9.9: Pullback EMA50_15m 계산용 60봉
-                o_1h  = await asyncio.to_thread(ex.fetch_ohlcv, sym, '1h',  limit=55)  # EMA50 계산용
-                # [★진입0 FIX] 5m 추가 — plan_open/ASYM_FORCE가 5m RSI Hook 사용
-                ohlcv_pool[sym] = {'1m': o_1m, '5m': o_5m, '15m': o_15m, '1h': o_1h}
-            except Exception:
-                pass
+        # ★ v10.12: 병렬 OHLCV fetch (108 순차 → 배치 병렬, 21초 → 3~5초)
+        _sem = asyncio.Semaphore(12)  # 동시 12건 (rate limit 안전)
+
+        async def _fetch_sym(sym):
+            async with _sem:
+                try:
+                    o_1m, o_5m, o_15m, o_1h = await asyncio.gather(
+                        asyncio.to_thread(ex.fetch_ohlcv, sym, '1m',  limit=70),
+                        asyncio.to_thread(ex.fetch_ohlcv, sym, '5m',  limit=50),
+                        asyncio.to_thread(ex.fetch_ohlcv, sym, '15m', limit=60),
+                        asyncio.to_thread(ex.fetch_ohlcv, sym, '1h',  limit=55),
+                    )
+                    return sym, {'1m': o_1m, '5m': o_5m, '15m': o_15m, '1h': o_1h}
+                except Exception:
+                    return sym, None
+
+        _results = await asyncio.gather(*[_fetch_sym(s) for s in fetch_syms])
+        for sym, data in _results:
+            if data is not None:
+                ohlcv_pool[sym] = data
         last_ohlcv_ts = ts
 
     # ── BTC 지표 계산 ────────────────────────────────────────────

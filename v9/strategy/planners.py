@@ -1069,9 +1069,11 @@ def plan_open(
         # MR ATR 배수: 추세 강도에 따라 스무스 조절
         # EMA 괴리율로 추세 강도 측정
         _ema_gap = abs(ema_20_5m - ema_20_15m) / ema_20_15m if ema_20_15m > 0 else 0.0
-        # ★ v10.12: 롱/숏 ATR 독립 — 동적 부스트 유지
-        _atr_boost_long  = -0.4 if _core_long  == 0 else 0
-        _atr_boost_short = -0.4 if _core_short == 0 else 0
+        # ★ v10.12: gradual ATR -0.2 (백테스트 1위: +$895, MDD -3.33%)
+        # 불균형에 비례해서 부드럽게 부스트 — binary 0/1 대비 +$467 개선
+        _imbalance_ls = _core_short - _core_long   # 양수=롱 부족
+        _atr_boost_long  = min(0, -0.2 * max(0, _imbalance_ls) / 3)
+        _atr_boost_short = min(0, -0.2 * max(0, -_imbalance_ls) / 3)
         _mr_atr_mult_long  = _long_atr_base + _atr_boost_long
         _mr_atr_mult_short = _short_atr_base + _atr_boost_short
         if _atr_boost_long != 0 or _atr_boost_short != 0:
