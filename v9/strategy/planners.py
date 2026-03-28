@@ -38,6 +38,14 @@ _regime_cache_snap_id = None  # ★ v10.9: 틱당 1회 캐싱
 _regime_cache_result = "NORMAL"
 _high_enter_ts = 0.0  # ★ v10.15: HIGH sticky 진입 시각
 
+# ★ BAD 모드 (T1 스캘핑) — 히스테리시스
+# score < 0.25 → BAD ON / score ≥ 0.50 → BAD OFF / 0.25~0.50 유지
+_bad_mode_active = False
+BAD_ENTER_THRESH = 0.25   # BAD 진입 (퍼센타일 25% 미만)
+BAD_EXIT_THRESH  = 0.50   # BAD 해제 (NORMAL 이상)
+BAD_T1_TP1_PCT   = 2.0    # BAD T1 고정 TP1 (%)
+BAD_T1_DCA_ROI   = -1.5   # BAD T1→T2 DCA 트리거 (%)
+
 def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     """
     ★ v10.10: BTC 변동성 레짐 — 멀티 타임프레임 점수제
@@ -151,6 +159,18 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
         print(f"[REGIME] {_regime_last} → {new} "
               f"(score={_p:.3f} | 5m={pctl_5m:.2f} 15m={pctl_15m:.2f} 1h={pctl_1h:.2f})")
 
+    # ★ BAD 모드 히스테리시스
+    global _bad_mode_active
+    _bad_prev = _bad_mode_active
+    if _p < BAD_ENTER_THRESH:
+        _bad_mode_active = True
+    elif _p >= BAD_EXIT_THRESH:
+        _bad_mode_active = False
+    # 0.25~0.50 구간은 현재 상태 유지 (히스테리시스)
+    if _bad_mode_active != _bad_prev:
+        print(f"[BAD_MODE] {'ON' if _bad_mode_active else 'OFF'} "
+              f"(score={_p:.3f}, thresh={BAD_ENTER_THRESH}/{BAD_EXIT_THRESH})")
+
     _regime_last = new
     _regime_cache_snap_id = _snap_id
     _regime_cache_result = new
@@ -233,7 +253,6 @@ from v9.config import (
     PULLBACK_DIST_ATR, ASYM_OPEN_RATIO, HEDGE_MODE,
     REBOUND_ALPHA,  # ★ v10.14c: min_roi 반등 TP1
     OPEN_CORR_MIN,  # ★ PATCH: config 통합
-    # SKEW_MR_TRIGGER 등 제거 (최종 아키텍처: SKEW_MR 삭제)
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1455,6 +1474,12 @@ def plan_dca(
         for target in dca_targets:
             # avg_ep 기준 ROI 트리거 (T2:-3.5% / T3:-5.0% / T4:-5.5%)
             roi_trig = DCA_ROI_TRIGGERS.get(target.get("tier", 2), -8.25)  # ★ PATCH: 항상 config 기준 (저장값 무시 → 런타임 변경 즉시 반영)
+
+            # ★ BAD 모드 T1 스캘핑: T1→T2 DCA를 -1.5%로 얕게
+            _curr_dca_check = int(p.get("dca_level", 1) or 1)
+            if _bad_mode_active and _curr_dca_check == 1 and target.get("tier") == 2:
+                roi_trig = BAD_T1_DCA_ROI
+
             is_hit = roi_now <= roi_trig
             if not is_hit:
                 continue
@@ -1635,10 +1660,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # T1/T2: α=2.0 (넉넉히, 기존 고정TP와 유사)
             # T3~T5: α=1.5 (DCA 깊은 구간, 바닥 대비 빠른 탈출)
             # ★ PATCH: t5_mini_alpha 있으면 우선 사용 (미니게임 alpha=1.0)
-            _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
             roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
-            _worst = float(p.get("worst_roi", 0.0) or 0.0)
-            tp1_thresh = _worst + _alpha
+
+            # ★ BAD 모드 T1 스캘핑: 고정 TP1 2.0%
+            if _bad_mode_active and dca_level == 1:
+                tp1_thresh = BAD_T1_TP1_PCT
+            else:
+                _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
+                _worst = float(p.get("worst_roi", 0.0) or 0.0)
+                tp1_thresh = _worst + _alpha
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
@@ -1660,8 +1690,12 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 side="sell" if is_long else "buy",
                 qty=close_qty,
                 price=curr_p,
-                reason=f"TP1_RB(w={_worst:.1f}+a={_alpha}={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}",
-                metadata={"roi_gross": roi_gross, "worst_roi": _worst, "alpha": _alpha},
+                reason=(f"TP1_BAD(fixed={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"
+                        if _bad_mode_active and dca_level == 1
+                        else f"TP1_RB(w={_worst:.1f}+a={_alpha}={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"),
+                metadata={"roi_gross": roi_gross,
+                           "worst_roi": _worst if not (_bad_mode_active and dca_level == 1) else 0.0,
+                           "alpha": _alpha if not (_bad_mode_active and dca_level == 1) else BAD_T1_TP1_PCT},
             ))
     return intents
 
