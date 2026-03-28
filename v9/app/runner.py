@@ -1067,6 +1067,32 @@ async def _main_loop(ex_init, dry_run: bool):
     except Exception as _startup_e:
         print(f"[STARTUP] 미체결 주문 정리 실패(무시): {_startup_e}")
 
+    # ★ FIX-1: 부팅 시 pending_entry + tp1_preorder_id 전부 클리어
+    # 이전 세션의 limit 주문은 위에서 전부 취소했으므로, state에 남은 건 전부 유령
+    _startup_clear_count = 0
+    for _sc_sym, _sc_ss in st.items():
+        if not isinstance(_sc_ss, dict):
+            continue
+        for _sc_key in ('pending_entry_long', 'pending_entry_short'):
+            if _sc_ss.get(_sc_key):
+                _sc_ss[_sc_key] = None
+                _startup_clear_count += 1
+        for _sc_side_key in ('p_long', 'p_short'):
+            _sc_p = _sc_ss.get(_sc_side_key)
+            if isinstance(_sc_p, dict) and _sc_p.get('tp1_preorder_id'):
+                _sc_p['tp1_preorder_id'] = None
+                _sc_p['tp1_preorder_price'] = None
+                _sc_p['tp1_preorder_ts'] = None
+                _startup_clear_count += 1
+            # pending_dca도 클리어 (이전 limit DCA 미체결 잔여)
+            if isinstance(_sc_p, dict) and _sc_p.get('pending_dca'):
+                _sc_p['pending_dca'] = None
+                _startup_clear_count += 1
+    if _startup_clear_count > 0:
+        print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
+              f"(pending_entry + tp1_preorder + pending_dca)")
+        save_position_book(st, cooldowns, system_state)
+
     while True:
         now = time.time()
         loop_start = now
@@ -1337,13 +1363,30 @@ async def _main_loop(ex_init, dry_run: bool):
             # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)
             await _sync_positions_with_exchange(ex, st, snapshot)
 
-            # ★ v10.14b: 유령 pending_entry 일괄 정리 (매틱 유지)
+            # ★ FIX-2: 유령 pending_entry 일괄 정리 (조건 확장)
+            # 기존: 포지션+pending 동시 → 클리어
+            # 추가: pending만 남은 경우도 클리어 (in-memory에 대응 주문 없으면 유령)
+            try:
+                from v9.execution.order_router import get_pending_limits as _gpl_ghost
+                _live_oids = {str(info.get("order_id","")) for info in _gpl_ghost().values()}
+            except Exception:
+                _live_oids = set()
             for _pe_sym, _pe_ss in st.items():
                 if not isinstance(_pe_ss, dict):
                     continue
                 for _pe_side in ("buy", "sell"):
-                    if get_p(_pe_ss, _pe_side) is not None and get_pending_entry(_pe_ss, _pe_side) is not None:
+                    _pe_val = get_pending_entry(_pe_ss, _pe_side)
+                    if _pe_val is None:
+                        continue
+                    # 케이스1: 포지션 있는데 pending도 있음 (기존 로직)
+                    if get_p(_pe_ss, _pe_side) is not None:
                         set_pending_entry(_pe_ss, _pe_side, None)
+                        continue
+                    # 케이스2: 포지션 없고 pending만 있는데, in-memory 추적에 없음 → 유령
+                    _pe_oid = str((_pe_val or {}).get("order_id", "")) if isinstance(_pe_val, dict) else ""
+                    if _pe_oid and _pe_oid not in _live_oids:
+                        set_pending_entry(_pe_ss, _pe_side, None)
+                        print(f"[GHOST] {_pe_sym} {_pe_side} 유령 pending_entry 클리어 (oid={_pe_oid})")
 
             # ── [BUG-5 FIX] 체결 알림 ─────────────────────────
             if _TELEGRAM_OK:
