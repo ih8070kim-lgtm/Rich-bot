@@ -766,7 +766,8 @@ def deploy_zip(zip_path: Path) -> tuple:
         release_deploy_lock()
 
 
-
+def deploy_file(incoming: Path) -> tuple:
+    """단일 .py 파일을 프로젝트에 배포."""
     filename = incoming.name
 
     if filename.lower() in DEPLOY_BLOCKED_FILENAMES:
