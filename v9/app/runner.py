@@ -468,6 +468,7 @@ def _calc_tp1_params(p: dict) -> tuple:
     """
     ★ v10.14c: min_roi 반등 기반 TP1 선주문 가격 계산.
     target_roi = worst_roi + α → ep 기준 가격 역산.
+    ★ BAD 모드: T1이면 고정 2.0% TP1
     반환: (target_price, close_qty, ref_ep, alpha) 또는 (None,)*4
     """
     from v9.config import REBOUND_ALPHA, TP1_PARTIAL_RATIO
@@ -478,9 +479,21 @@ def _calc_tp1_params(p: dict) -> tuple:
     if amt <= 0 or ep <= 0:
         return None, None, None, None
 
-    alpha = REBOUND_ALPHA.get(dca_level, 2.0)
-    worst = float(p.get("worst_roi", 0.0) or 0.0)
-    target_roi = worst + alpha  # leveraged %
+    # ★ BAD 모드 T1: 고정 TP1
+    _is_bad_t1 = False
+    try:
+        from v9.strategy.planners import _bad_mode_active, BAD_T1_TP1_PCT
+        _is_bad_t1 = _bad_mode_active and dca_level == 1
+    except ImportError:
+        pass
+
+    if _is_bad_t1:
+        target_roi = BAD_T1_TP1_PCT
+        alpha = BAD_T1_TP1_PCT
+    else:
+        alpha = REBOUND_ALPHA.get(dca_level, 2.0)
+        worst = float(p.get("worst_roi", 0.0) or 0.0)
+        target_roi = worst + alpha  # leveraged %
 
     # ROI → 가격 역산: roi = ((cp-ep)/ep)*LEV*100 → cp = ep*(1+roi/LEV/100)
     lev = 3.0
