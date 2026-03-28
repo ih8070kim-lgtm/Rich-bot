@@ -22,7 +22,56 @@ import json
 import os
 import time
 
-from v9.config import STATE_FILE
+from v9.config import STATE_FILE, MINROI_FILE
+
+
+# ── MinROI 상태 저장/로드 (v10.15) ──────────────────────────────
+
+def load_minroi() -> dict:
+    """minroi.json 로드 → {(sym, side): {worst_roi, worst_roi_t4, worst_roi_t5}}"""
+    if not os.path.exists(MINROI_FILE):
+        return {}
+    try:
+        with open(MINROI_FILE, encoding='utf-8') as f:
+            raw = json.load(f)
+        # key: "SYM|side" → (sym, side)
+        result = {}
+        for k, v in raw.items():
+            parts = k.split("|")
+            if len(parts) == 2:
+                result[(parts[0], parts[1])] = v
+        return result
+    except Exception as e:
+        print(f"[minroi] load 실패: {e}")
+        return {}
+
+
+def save_minroi(data: dict):
+    """minroi 상태 저장. data = {(sym, side): {worst_roi, ...}}"""
+    try:
+        serializable = {}
+        for (sym, side), v in data.items():
+            serializable[f"{sym}|{side}"] = v
+        tmp = MINROI_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(serializable, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, MINROI_FILE)
+    except Exception as e:
+        print(f"[minroi] save 실패: {e}")
+
+
+def update_minroi(minroi: dict, sym: str, side: str, roi: float, dca_level: int):
+    """매틱 minroi 갱신. 포지션별 worst_roi + tier별 worst 추적."""
+    key = (sym, side)
+    if key not in minroi:
+        minroi[key] = {"worst_roi": 0.0, "worst_roi_t4": 0.0, "worst_roi_t5": 0.0}
+    entry = minroi[key]
+    if roi < entry.get("worst_roi", 0.0):
+        entry["worst_roi"] = roi
+    if dca_level >= 4 and roi < entry.get("worst_roi_t4", 0.0):
+        entry["worst_roi_t4"] = roi
+    if dca_level >= 5 and roi < entry.get("worst_roi_t5", 0.0):
+        entry["worst_roi_t5"] = roi
 
 
 # ── 슬롯 기본 구조 (v10.0) ───────────────────────────────────────

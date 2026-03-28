@@ -1,17 +1,16 @@
 """
-V9 Execution - Order Router  (v10.11b)
+V9 Execution - Order Router  (v10.13)
 주문 라우팅:
   매수(OPEN/DCA): limit 5분 → 미체결 시 취소 (시장가 전환 없음)
   매도(TP1/TRAIL/FC): 즉시 시장가
-  HEDGE_CORE 진입: 즉시 시장가
+  CORE_HEDGE 진입: limit (v10.13: maker 전환)
   INSURANCE_SH: 즉시 시장가
 """
 import asyncio
 import time
 
 from v9.config import LEVERAGE
-# ── 매수 limit 대기 시간: 5분 → 미체결 시 취소 ──
-BUY_LIMIT_TIMEOUT_SEC = 300
+# ── ★ v10.14: limit 블로킹 제거 — runner._manage_pending_limits가 추적 ──
 from v9.logging.logger_csv import log_fill, log_order
 from v9.types import Intent, OrderResult
 from v9.execution.position_book import get_p
@@ -53,6 +52,53 @@ async def cancel_pending_orders(ex, sym: str):
 #       5초 TTL이면 같은 심볼을 5초 후에 다시 OPEN 가능 → 중복매수 원인
 DEDUP_TTL = 300
 
+# ── v10.13: 비동기 limit 추적 레지스트리 ──────────────────────
+# runner._manage_pending_limits()가 주기적으로 체결/타임아웃 확인
+# {order_id: {sym, side, qty, price, trace_id, tag, placed_at, intent_type, positionSide}}
+_PENDING_LIMITS: dict = {}
+PENDING_LIMIT_TIMEOUT_SEC = 300  # 5분 미체결 시 취소
+
+
+def _register_pending_limit(trace_id, sym, side, qty, price, order_id, tag, intent):
+    """limit 주문을 PENDING 레지스트리에 등록 — runner가 추적
+    ★ v10.14: full metadata 저장 (_apply_pending_fill 완전 반영용)
+    """
+    _meta = dict(intent.metadata) if (intent and intent.metadata) else {}
+    _PENDING_LIMITS[str(order_id)] = {
+        "sym": sym,
+        "side": side,
+        "qty": qty,
+        "price": price,
+        "trace_id": trace_id,
+        "tag": tag,
+        "placed_at": time.time(),
+        "intent_type": intent.intent_type.value if intent else "UNKNOWN",
+        "positionSide": _meta.get("positionSide", ""),
+        "role": _meta.get("role", ""),
+        # ★ v10.14: DCA/OPEN 완전 반영에 필요한 메타데이터
+        "tier": _meta.get("tier", 0),
+        "dca_targets": _meta.get("dca_targets", []),
+        "locked_regime": _meta.get("locked_regime", "LOW"),
+        "source_sym": _meta.get("source_sym", ""),
+        "source_side": _meta.get("source_side", ""),
+        "entry_type": _meta.get("entry_type", "MR"),
+        "atr": _meta.get("atr", 0.0),
+        "insurance_timecut": _meta.get("insurance_timecut", 0),
+        "dca_level": _meta.get("dca_level", 1),
+        "_expected_role": _meta.get("_expected_role", ""),
+    }
+    print(f"[order_router] PENDING_LIMIT registered: {sym} {side} {qty}@{price} oid={order_id}")
+
+
+def get_pending_limits() -> dict:
+    """runner에서 접근용"""
+    return _PENDING_LIMITS
+
+
+def remove_pending_limit(order_id: str):
+    """체결/취소 완료 시 제거"""
+    _PENDING_LIMITS.pop(str(order_id), None)
+
 
 async def route_order(
     ex,
@@ -61,10 +107,10 @@ async def route_order(
     st: dict = None,
 ) -> OrderResult:
     """
-    Intent를 실제 주문으로 라우팅 (v10.11b).
-    - 매수(OPEN/DCA 일반): limit 5분 → 미체결 시 취소 (fallback 없음)
+    Intent를 실제 주문으로 라우팅 (v10.13).
+    - 매수(OPEN/DCA/CORE_HEDGE): limit 5분 → 미체결 시 취소
     - 매도(TP1/TRAIL/FC): 즉시 시장가
-    - HEDGE_CORE/INSURANCE_SH 진입: 즉시 시장가
+    - INSURANCE_SH 진입: 즉시 시장가
     """
     sym       = intent.symbol
     side      = intent.side
@@ -73,13 +119,14 @@ async def route_order(
     trace_id  = intent.trace_id
     tag       = f"V9_{intent.intent_type.value}_{sym}"
 
-    # ── v10.11b: 라우팅 모드 결정 ──
+    # ── v10.13: 라우팅 모드 결정 ──
     _meta_role = (intent.metadata or {}).get("role", "")
     _meta_entry = (intent.metadata or {}).get("entry_type", "")
     _force_market = (
         _is_reduce(intent)                           # TP1, TRAIL_ON, FORCE_CLOSE → 시장가
-        or _meta_role in ("CORE_HEDGE", "INSURANCE_SH")  # 헷지/보험 진입 → 시장가
-        or _meta_entry == "HEDGE_CORE"               # 헷지 진입 → 시장가
+        or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")  # ★ PATCH: 헷지 진입도 시장가 (limit → 체결 전 SL 방지)
+        # ★ v10.15: HIGH 레짐 DCA → metadata에서 force_market=True
+        or bool((intent.metadata or {}).get("force_market", False))
     )
     order_type = 'market' if (_force_market or not price) else 'limit'
 
@@ -99,7 +146,7 @@ async def route_order(
     ts = _DEDUP_CACHE.get(idem_key)
     if ts:
         if (now_ts - ts) < DEDUP_TTL:
-            print(f"[order_router] DEDUP {sym} {intent.intent_type.value} key={idem_key}")
+            # ★ v10.14: print 제거 (CSV 로그는 유지, 콘솔 노이즈 감소)
             log_order(trace_id, sym, side, order_type, qty, price, tag, None, "DEDUP")
             return _fail(trace_id, sym, side, qty, order_type, tag, f"DEDUP:{idem_key}")
         else:
@@ -186,76 +233,16 @@ async def route_order(
             log_order(trace_id, sym, side, 'limit', safe_qty, safe_price, tag, order_id, 'placed')
             _register_pending(sym, order_id, intent.intent_type.value)
 
-            # ── v10.11b: 5분 대기 → 미체결 시 취소 (market fallback 없음) ──
-            deadline = time.time() + BUY_LIMIT_TIMEOUT_SEC
-            filled_qty = 0.0
-            avg_price  = 0.0
-
-            while time.time() < deadline:
-                await asyncio.sleep(5)
-                try:
-                    info = await asyncio.to_thread(ex.fetch_order, order_id, sym)
-                    status = info.get('status', '')
-                    filled_qty = float(info.get('filled', 0.0) or 0.0)
-                    avg_price  = float(info.get('average', 0.0) or price or 0.0)
-                    if status == 'closed':
-                        _clear_pending(sym)
-                        log_fill(trace_id, sym, side, avg_price, filled_qty, tag, order_id)
-                        return OrderResult(
-                            trace_id=trace_id, success=True, order_id=order_id,
-                            symbol=sym, side=side, qty=safe_qty,
-                            avg_price=avg_price, filled_qty=filled_qty,
-                            order_type='limit', tag=tag,
-                        )
-                    if status in ('canceled', 'rejected'):
-                        break
-                except Exception:
-                    continue  # 폴링 실패 시 재시도 (break→continue)
-
-            # ── 타임아웃: 취소만, market 전환 없음 ──
-            try:
-                await asyncio.to_thread(ex.cancel_order, order_id, sym)
-                print(f"[order_router] {sym} limit 5분 미체결 → 취소 (fallback 없음)")
-                # cancel 성공 후에도 부분 체결 확인
-                try:
-                    info = await asyncio.to_thread(ex.fetch_order, order_id, sym)
-                    filled_qty = float(info.get('filled', 0.0) or 0.0)
-                    avg_price = float(info.get('average', 0.0) or price or 0.0)
-                except Exception:
-                    pass
-            except Exception:
-                # cancel 실패 → 이미 체결됐을 수 있음 → 재확인
-                try:
-                    info = await asyncio.to_thread(ex.fetch_order, order_id, sym)
-                    status = info.get('status', '')
-                    if status == 'closed':
-                        filled_qty = float(info.get('filled', 0.0) or 0.0)
-                        avg_price = float(info.get('average', 0.0) or price or 0.0)
-                        print(f"[order_router] {sym} cancel 실패 → 이미 체결됨! qty={filled_qty}")
-                        _clear_pending(sym)
-                        log_fill(trace_id, sym, side, avg_price, filled_qty, tag, order_id)
-                        return OrderResult(
-                            trace_id=trace_id, success=True, order_id=order_id,
-                            symbol=sym, side=side, qty=safe_qty,
-                            avg_price=avg_price, filled_qty=filled_qty,
-                            order_type='limit', tag=tag,
-                        )
-                except Exception:
-                    pass
-            _clear_pending(sym)
-
-            if filled_qty > 0:
-                # 부분 체결된 양만 반환
-                log_fill(trace_id, sym, side, avg_price, filled_qty, tag + "_PARTIAL", order_id)
-                return OrderResult(
-                    trace_id=trace_id, success=True, order_id=order_id,
-                    symbol=sym, side=side, qty=safe_qty,
-                    avg_price=avg_price, filled_qty=filled_qty,
-                    order_type='limit_partial', tag=tag,
-                )
-
-            # 완전 미체결 → 실패 반환 (진입 안 함)
-            return _fail(trace_id, sym, side, qty, order_type, tag, "limit 5min no fill — cancelled")
+            # ── ★ v10.14: fire-and-register — 블로킹 제거 ──
+            # limit 배치 후 즉시 리턴, runner._manage_pending_limits가 체결 추적
+            # filled_qty=0 → apply_order_results에서 스킵
+            _register_pending_limit(trace_id, sym, side, safe_qty, safe_price, order_id, tag, intent)
+            return OrderResult(
+                trace_id=trace_id, success=True, order_id=order_id,
+                symbol=sym, side=side, qty=safe_qty,
+                avg_price=0.0, filled_qty=0.0,
+                order_type='limit_pending', tag=tag,
+            )
 
         else:
             # [BUG-2 FIX] TRAIL_ON/FORCE_CLOSE: pending limit 선취소 후 전량 market

@@ -43,6 +43,22 @@ def apply_order_results(
     for result in results:
         if not result.success:
             continue
+        # ★ v10.14: limit_pending (fire-and-register) — filled=0은 runner가 추적
+        # 단, OPEN intent는 pending_entry 세팅 필요 (다음 틱 중복 진입 방지)
+        if result.filled_qty <= 0:
+            intent_pend = intents_map.get(result.trace_id)
+            if (intent_pend and intent_pend.intent_type == IntentType.OPEN
+                    and getattr(result, 'order_type', '') == 'limit_pending'):
+                _pend_sym = result.symbol
+                _pend_side = intent_pend.side
+                ensure_slot(st, _pend_sym)
+                set_pending_entry(st[_pend_sym], _pend_side, {
+                    "side": _pend_side,
+                    "trace_id": result.trace_id,
+                    "order_id": result.order_id,
+                    "ts": now,
+                })
+            continue
         intent = intents_map.get(result.trace_id)
         if not intent:
             continue
@@ -95,6 +111,7 @@ def apply_order_results(
                 "dca_level":        meta.get("dca_level", 1),
                 "dca_targets":      meta.get("dca_targets", []),
                 "max_roi_seen":     0.0,
+                "worst_roi":        0.0,  # ★ v10.14c: min_roi 반등 TP1용
                 "pending_dca":      None,
                 "trailing_on_time": None,
                 "hedge_mode":       False,
@@ -146,6 +163,34 @@ def apply_order_results(
                 if tier == 5:
                     p["t5_entry_price"] = avg_px
                     p["max_dca_reached"] = True
+                    # ★ PATCH: T5 도달 즉시 헷지 미니게임 전환 (소스 청산 대기 X)
+                    _opp_side = "sell" if pos_side == "buy" else "buy"
+                    _opp_p = get_p(sym_st, _opp_side)
+                    if isinstance(_opp_p, dict) and _opp_p.get("role") == "CORE_HEDGE":
+                        _opp_p["t5_split"] = True
+                        # 미니게임 즉시 시작
+                        _opp_cp = float((snapshot.all_prices or {}).get(sym, 0.0) or 0.0)
+                        if not _opp_p.get("t5_mini_active") and _opp_cp > 0:
+                            from v9.utils.utils_math import calc_roi_pct as _crp
+                            _opp_roi = _crp(
+                                float(_opp_p.get("ep", 0) or 0),
+                                _opp_cp,
+                                _opp_p.get("side", "buy"),
+                                3.0
+                            )
+                            _opp_p["t5_mini_active"] = True
+                            _opp_p["t5_mini_start_price"] = _opp_cp
+                            _opp_p["role"] = "CORE_MR"
+                            _opp_p["source_sym"] = ""
+                            _opp_p["source_side"] = ""
+                            _opp_p["entry_type"] = "MR"
+                            _opp_p["dca_targets"] = []
+                            _opp_p["max_dca_reached"] = True
+                            _opp_p["t5_mini_alpha"] = 1.0
+                            _opp_p["worst_roi"] = _opp_roi
+                            _opp_p["max_roi_seen"] = max(_opp_roi, float(_opp_p.get("max_roi_seen", 0) or 0))
+                            print(f"[T5_MINI] {sym} 소스 T5 도달 → 헷지 {_opp_side} 미니게임 즉시 시작 "
+                                  f"roi={_opp_roi:+.1f}% start_p={_opp_cp:.4f}")
                 # ★ v10.12: 각 tier entry price 기록 (entry 기준 독립게임 TP1용)
                 if tier == 2:
                     p["t2_entry_price"] = avg_px
@@ -156,6 +201,8 @@ def apply_order_results(
                 if tier >= 5:
                     p.setdefault("hedge_rolling_count", 0)
                 p["pending_dca"] = None
+                # ★ v10.15: DCA 체결 → insurance trigger 클리어 (정상 경로 도달)
+                p["insurance_sh_trigger"] = None
                 _cur_regime = meta.get("locked_regime", "")
                 if _cur_regime:
                     from v9.strategy.planners import _wider_regime
@@ -166,6 +213,20 @@ def apply_order_results(
                 print(f"[DCA_APPLIED] {sym} {pos_side} T{tier}: "
                       f"qty {_dca_pre_amt:.1f}+{filled:.1f}={p['amt']:.1f} "
                       f"ep {_dca_pre_ep:.4f}→{p['ep']:.4f}")
+                # ★ PATCH BUG2: DCA 체결 후 worst_roi 새 ep 기준으로 리셋
+                # 구 ep 기준 worst_roi가 그대로 남으면 tp1_thresh가 비정상적으로 낮아져
+                # DCA 직후 TP1이 즉시 발동하는 버그 방지
+                try:
+                    from v9.utils.utils_math import calc_roi_pct as _crp
+                    _dca_new_roi = _crp(p["ep"], avg_px, p.get("side", "buy"), 3.0)
+                    p["worst_roi"] = _dca_new_roi
+                    # max_roi_seen도 새 ep 기준으로 재계산 (상단으로 올라온 경우 방지)
+                    _dca_new_max = _crp(p["ep"], avg_px, p.get("side", "buy"), 3.0)
+                    p["max_roi_seen"] = max(0.0, _dca_new_max)
+                    print(f"[DCA_PATCH_WORST] {sym} {pos_side} T{tier}: "
+                          f"worst_roi 리셋 {p.get('worst_roi',0):.2f}% (새 ep={p['ep']:.4f})")
+                except Exception as _e:
+                    print(f"[DCA_PATCH_WORST] worst_roi 리셋 실패(무시): {_e}")
                 # ★ v10.10: sh_trigger 제거 — DCA_BLOCKED_INSURANCE로 대체
                 _log_pos(result.trace_id, sym, p, snapshot)
             else:

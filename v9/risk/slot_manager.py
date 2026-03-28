@@ -24,10 +24,12 @@ from v9.execution.position_book import iter_positions, get_pending_entry, is_act
 # ─────────────────────────────────────────────────────────────────
 # count_slots
 # ─────────────────────────────────────────────────────────────────
-def count_slots(st: Dict) -> SlotCounts:
+def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
     """
-    슬롯 카운트. (v10.0 — hedge mode 지원)
-    심볼당 Long/Short 각각 독립 카운트.
+    슬롯 카운트. (v10.15)
+    role_filter=None: 전체 카운트 (기존 동작)
+    role_filter="CORE_MR": CORE_MR만 카운트 (plan_open용)
+    role_filter="CORE_HEDGE": CORE_HEDGE만 카운트 (hedge_core용)
     """
     hard_total = 0
     hard_long  = 0
@@ -47,6 +49,13 @@ def count_slots(st: Dict) -> SlotCounts:
             step = int((p or {}).get("step", 0) or 0)
             if step >= 1:
                 continue   # 트레일링 → HARD/RISK 모두 제외
+            # ★ v10.15: role 필터
+            if role_filter:
+                _role = (p or {}).get("role", "CORE_MR")
+                if role_filter == "CORE_MR" and _role != "CORE_MR":
+                    continue
+                if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
+                    continue
             hard_total += 1
             if side == "buy":  hard_long  += 1
             else:              hard_short += 1
@@ -55,18 +64,19 @@ def count_slots(st: Dict) -> SlotCounts:
             else:              risk_short_f += 1.0
 
         # ── pending_entry ────────────────────────────────────────
-        for pe_side in ("buy", "sell"):
-            pe = get_pending_entry(sd, pe_side)
-            if not pe:
-                continue
-            hard_total += 1
-            risk_total_f += 1.0
-            if pe_side == "buy":
-                hard_long    += 1
-                risk_long_f  += 1.0
-            else:
-                hard_short   += 1
-                risk_short_f += 1.0
+        if not role_filter:  # pending은 전체 카운트에서만
+            for pe_side in ("buy", "sell"):
+                pe = get_pending_entry(sd, pe_side)
+                if not pe:
+                    continue
+                hard_total += 1
+                risk_total_f += 1.0
+                if pe_side == "buy":
+                    hard_long    += 1
+                    risk_long_f  += 1.0
+                else:
+                    hard_short   += 1
+                    risk_short_f += 1.0
 
     import math
     risk_total = math.ceil(risk_total_f - 0.0001) if risk_total_f > 0 else 0

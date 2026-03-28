@@ -36,6 +36,7 @@ _regime_ema_pctl = None  # 모듈 레벨 EMA 상태
 _regime_last = "NORMAL"  # 마지막 레짐 (히스테리시스용)
 _regime_cache_snap_id = None  # ★ v10.9: 틱당 1회 캐싱
 _regime_cache_result = "NORMAL"
+_high_enter_ts = 0.0  # ★ v10.15: HIGH sticky 진입 시각
 
 def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     """
@@ -123,17 +124,28 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     _p = _regime_ema_pctl
 
     # ── 히스테리시스 + 레짐 결정 ──────────────────────────
-    # BAD < 20% | LOW 20~55% | NORMAL 55~75% | HIGH > 75%
-    if _regime_last == "BAD":
-        new = "BAD" if _p < 0.25 else ("LOW" if _p < 0.55 else ("NORMAL" if _p < 0.75 else "HIGH"))
-    elif _regime_last == "LOW":
-        new = "BAD" if _p < 0.15 else ("LOW" if _p < 0.60 else ("NORMAL" if _p < 0.75 else "HIGH"))
+    # ★ v10.13b: BAD 제거 → 3단 레짐 (LOW / NORMAL / HIGH)
+    # 백테스트: BAD 제거 시 $760→$1751 (+130%), MDD -6.5%
+    # BAD 구간 = 변동성 극대 = MR 최적 사냥터 → 차단이 오히려 손해
+    if _regime_last == "LOW":
+        new = "LOW" if _p < 0.60 else ("NORMAL" if _p < 0.70 else "HIGH")
     elif _regime_last == "NORMAL":
-        new = "BAD" if _p < 0.15 else ("LOW" if _p < 0.50 else ("NORMAL" if _p < 0.80 else "HIGH"))
+        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.73 else "HIGH")
     elif _regime_last == "HIGH":
-        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.70 else "HIGH")
+        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.67 else "HIGH")
     else:
-        new = "BAD" if _p < 0.20 else ("LOW" if _p < 0.55 else ("NORMAL" if _p < 0.75 else "HIGH"))
+        new = "LOW" if _p < 0.55 else ("NORMAL" if _p < 0.70 else "HIGH")
+
+    # ★ v10.15: HIGH sticky — HIGH 진입 후 5분 유지
+    global _high_enter_ts
+    from v9.config import HIGH_STICKY_SEC
+    _now_ts = time.time()
+
+    if new == "HIGH":
+        _high_enter_ts = _now_ts  # 타이머 갱신 (재진입도 리셋)
+    elif _high_enter_ts > 0 and (_now_ts - _high_enter_ts) < HIGH_STICKY_SEC:
+        # HIGH에서 내려왔지만 5분 미경과 → HIGH 유지
+        new = "HIGH"
 
     if new != _regime_last:
         print(f"[REGIME] {_regime_last} → {new} "
@@ -212,13 +224,16 @@ from v9.config import (
     TP2_PCT, TP2_PARTIAL_RATIO,
     TRAILING_TIMEOUT_MIN,
     DCA_COOLDOWN_BY_TIER, DCA_COOLDOWN_SEC,
-    TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT,
+    TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT, GRID_DIVISOR, MAX_MR_PER_SIDE,
     HEDGE_OPEN_CORR_MIN, HEDGE_STAGE1_MULTIPLIER,
     HARD_SL_BASE, HARD_SL_FACTOR_MIN, HARD_SL_FACTOR_MAX, HARD_SL_ATR_BASE,
     TREND_FILTER_ENABLED, TREND_FILTER_DEADZONE, TREND_FILTER_MIN_BARS,
     DCA_MIN_CORR, ASYM_MAX_DCA_LEVEL,
     FALLING_KNIFE_BARS, FALLING_KNIFE_THRESHOLD,
     PULLBACK_DIST_ATR, ASYM_OPEN_RATIO, HEDGE_MODE,
+    REBOUND_ALPHA,  # ★ v10.14c: min_roi 반등 TP1
+    OPEN_CORR_MIN,  # ★ PATCH: config 통합
+    # SKEW_MR_TRIGGER 등 제거 (최종 아키텍처: SKEW_MR 삭제)
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -232,7 +247,7 @@ OPEN_RSI_SHIFT           = 3
 OPEN_SYMBOL_COOLDOWN_SEC = 10 * 60
 OPEN_WAIT_NEXT_BAR       = False
 OPEN_PENDING_TTL_SEC     = 5 * 60
-OPEN_CORR_MIN            = 0.50   # ★ v10.11b: 유니버스와 동일 (베타 필터가 커버)
+
 
 ASYM_PENDING_TTL_SEC     = 3 * 60   # ASYM armed 최대 대기
 
@@ -301,14 +316,14 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # ═════════════════════════════════════════════════════════════════
 # DCA ROI 트리거 (avg_ep 기준 실시간 ROI)
 # T2: -3.5% / T3: -5.0% / T4: -5.5%
-DCA_ROI_TRIGGERS = {2: -1.5, 3: -1.5, 4: -1.5, 5: -1.5}  # ★ v10.11b: 현재 ep 기준 균등 간격
+DCA_ROI_TRIGGERS = {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25}  # ★ 최종: -1.5×5.0×1.1 통일
 
-# ★ v10.8: 레짐 4단계 × DCA 5단 (현재 ep 기준 -1.5% 균등)
+# ★ 최종 아키텍처: 전 레짐 동일 간격
 REGIME_DCA_TRIGGERS = {
-    "BAD":    {2: -1.5, 3: -1.5, 4: -1.5, 5: -1.5},
-    "LOW":    {2: -1.5, 3: -1.5, 4: -1.5, 5: -1.5},
-    "NORMAL": {2: -1.5, 3: -1.5, 4: -1.5, 5: -1.5},
-    "HIGH":   {2: -1.5, 3: -1.5, 4: -1.5, 5: -1.5},
+    "BAD":    {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
+    "LOW":    {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
+    "NORMAL": {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
+    "HIGH":   {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
 }
 REGIME_HEDGE_TRIGGER = {"BAD": -4.0, "LOW": -4.0, "NORMAL": -5.5, "HIGH": -7.0}
 REGIME_HEDGE_DCA     = {"BAD": -4.5, "LOW": -4.5, "NORMAL": -6.0, "HIGH": -7.5}
@@ -466,7 +481,7 @@ def _plan_open_asymmetric(
     now_ts    = time.time()
     cd_map    = system_state.get("open_symbol_cd_until", {})
     total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-    base_alloc    = total_cap / TOTAL_MAX_SLOTS if TOTAL_MAX_SLOTS > 0 else 0.0
+    base_alloc    = total_cap / GRID_DIVISOR if GRID_DIVISOR > 0 else 0.0
 
     # ASYM 사이즈 = imbalance × ASYM_SIZE_RATIO (0.75)
     # imbalance: 손실 방향 노출 슬롯 수 - 반대 방향 노출 슬롯 수
@@ -657,7 +672,7 @@ def _plan_open_asymmetric(
             continue
 
         total_cap2  = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-        grid_not2   = (total_cap2 / TOTAL_MAX_SLOTS) * LEVERAGE if TOTAL_MAX_SLOTS > 0 else 0.0
+        grid_not2   = (total_cap2 / GRID_DIVISOR) * LEVERAGE if GRID_DIVISOR > 0 else 0.0
         dca_w2      = DCA_WEIGHTS
         total_w2    = sum(dca_w2)
 
@@ -931,16 +946,19 @@ def plan_open(
 
     # ★ v10.9: 레짐 판정을 먼저 (크래시보다 선행)
     _btc_regime = _btc_vol_regime(snapshot)
-    if _btc_regime == "BAD":
-        return intents  # BAD 레짐 → 신규 진입 전면 차단
+    # ★ v10.13b: BAD 제거됨 — 이 조건은 더 이상 발동하지 않음
 
     # ★ v10.9: BTC Crash Filter — 급락 시 롱만 차단 (숏 MR은 허용)
     _btc_crash_active = _check_btc_crash(snapshot, system_state)
 
     # ★ v10.12: 롱/숏 ATR 분리 (백테스트 최적화)
     # 롱: 2.4 통일 (레짐 무관), 숏: 1.8 고정
+    # ★ v10.13: HIGH 레짐에서 ATR +0.6 강화 (백테스트 $690→$797)
     _long_atr_base = 2.4
     _short_atr_base = 1.8
+    if _btc_regime == "HIGH":
+        _long_atr_base += 0.6   # 3.0
+        _short_atr_base += 0.6  # 2.4
 
     # ── SOURCE_LINKED_HEDGE_CORE (v10.11: hedge_core 모듈) ───
     _skew, _long_margin, _short_margin = calc_skew(st, total_cap)
@@ -955,9 +973,10 @@ def plan_open(
             if _fb_side=="buy": _core_long+=1
             else: _core_short+=1
 
+    from v9.config import SKEW_HEDGE_TRIGGER
     _hc_intents = plan_hedge_core_entry(
         snapshot, st, _skew, _long_margin, _short_margin,
-        total_cap, _btc_regime, _asym_syms, skew_thresh=0.12,
+        total_cap, _btc_regime, _asym_syms, skew_thresh=SKEW_HEDGE_TRIGGER,
     )
     intents += _hc_intents
     _slhc_count = len(_hc_intents)
@@ -969,10 +988,38 @@ def plan_open(
     # ════════════════════════════════════════════════════════════
 
     # ── 일반 OPEN 루프 ────────────────────────────────────────────
+    # ★ v10.15: MR 슬롯은 CORE_MR만 카운트 (HEDGE는 별도 관리)
+    # 전체 하드캡 5는 모든 포지션 카운트
+    _slots_all = count_slots(st)
+    if _slots_all.risk_total >= TOTAL_MAX_SLOTS:
+        return intents  # 전체 5개 꽉 참
+    _slots_mr = count_slots(st, role_filter="CORE_MR")
+    if _slots_mr.risk_long >= MAX_MR_PER_SIDE:
+        long_targets = []
+    if _slots_mr.risk_short >= MAX_MR_PER_SIDE:
+        short_targets = []
+    if not long_targets and not short_targets:
+        return intents
+
+    # ★ v10.14: ATR 불균형 부스트 사전 계산 (루프 밖 1회, 변경시만 로그)
+    _imbalance_ls = _core_short - _core_long
+    _atr_boost_long  = min(0, -0.2 * max(0, _imbalance_ls) / 3)
+    _atr_boost_short = min(0, -0.2 * max(0, -_imbalance_ls) / 3)
+    _mr_atr_mult_long  = _long_atr_base + _atr_boost_long
+    _mr_atr_mult_short = _short_atr_base + _atr_boost_short
+    _dyn_atr_key = (round(_mr_atr_mult_long, 2), round(_mr_atr_mult_short, 2))
+    if (_atr_boost_long != 0 or _atr_boost_short != 0):
+        _prev = getattr(plan_open, '_last_dyn_atr', None)
+        if _prev != _dyn_atr_key:
+            print(f"[DYN_ATR] coreMR L={_core_long} S={_core_short} → "
+                  f"atrL={_mr_atr_mult_long:.1f} atrS={_mr_atr_mult_short:.1f}")
+            plan_open._last_dyn_atr = _dyn_atr_key
+
     for symbol in list(set(long_targets + short_targets)):
         # [UnboundLocalError 방지] Python 스코프 선점 — 반드시 루프 최상단
         can_long  = False
         can_short = False
+        _pend_entry_type = None  # ★ v10.14: 스코프 오염 방지 (dir() 제거)
 
         if symbol in _asym_syms:
             continue
@@ -990,12 +1037,13 @@ def plan_open(
         if float(sym_st.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
             continue
 
-        # ★ 버그픽스: 슬롯 사전 체크 — risk_manager 도달 전 과다 intent 방지
+        # ★ v10.15: MR 슬롯은 CORE_MR만, 전체 하드캡 5
         _slots_pre = count_slots(st)
         if _slots_pre.risk_total >= TOTAL_MAX_SLOTS:
-            break  # 전체 슬롯 꽉 참 → 이하 모든 심볼도 불필요
-        _can_long  = symbol in long_targets  and _slots_pre.risk_long  < MAX_LONG
-        _can_short = symbol in short_targets and _slots_pre.risk_short < MAX_SHORT
+            break  # 전체 5개 꽉 참
+        _slots_mr_pre = count_slots(st, role_filter="CORE_MR")
+        _can_long  = symbol in long_targets  and _slots_mr_pre.risk_long  < MAX_MR_PER_SIDE
+        _can_short = symbol in short_targets and _slots_mr_pre.risk_short < MAX_MR_PER_SIDE
         if not (_can_long or _can_short):
             continue
 
@@ -1069,22 +1117,18 @@ def plan_open(
         # MR ATR 배수: 추세 강도에 따라 스무스 조절
         # EMA 괴리율로 추세 강도 측정
         _ema_gap = abs(ema_20_5m - ema_20_15m) / ema_20_15m if ema_20_15m > 0 else 0.0
-        # ★ v10.12: gradual ATR -0.2 (백테스트 1위: +$895, MDD -3.33%)
-        # 불균형에 비례해서 부드럽게 부스트 — binary 0/1 대비 +$467 개선
-        _imbalance_ls = _core_short - _core_long   # 양수=롱 부족
-        _atr_boost_long  = min(0, -0.2 * max(0, _imbalance_ls) / 3)
-        _atr_boost_short = min(0, -0.2 * max(0, -_imbalance_ls) / 3)
-        _mr_atr_mult_long  = _long_atr_base + _atr_boost_long
-        _mr_atr_mult_short = _short_atr_base + _atr_boost_short
-        if _atr_boost_long != 0 or _atr_boost_short != 0:
-            print(f"[DYN_ATR] coreMR L={_core_long} S={_core_short} → "
-                  f"atrL={_mr_atr_mult_long:.1f} atrS={_mr_atr_mult_short:.1f}")
+        # ★ v10.14: ATR 부스트는 루프 밖에서 사전 계산됨 → 바로 사용
 
         # ★ v10.7: Skew 완화는 plan_soft_hedge에서 미러링으로 처리 (진입조건 왜곡 제거)
 
         # ★ v10.12: 롱 EMA10, 숏 EMA5
         mr_long_ok  = can_long  and ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult_long)
-        mr_short_ok = can_short and ema_5_15m  > 0 and (curr_p > ema_5_15m  + atr_coin * _mr_atr_mult_short)
+        # ★ PATCH: 숏 OR 조건 — 기존(EMA5+1.8×) OR 롱 미러링(EMA10+2.4×)
+        # 횡보장에서 EMA5가 너무 빠르게 따라와 기존 조건이 거의 안 충족됨
+        # EMA10 기준 미러링은 롱과 동일한 거리 감지 → 대칭적 MR 포착
+        _mr_short_ema5  = ema_5_15m  > 0 and curr_p > ema_5_15m  + atr_coin * _mr_atr_mult_short
+        _mr_short_ema10 = ema_10_15m > 0 and curr_p > ema_10_15m + atr_coin * _mr_atr_mult_long
+        mr_short_ok = can_short and (_mr_short_ema5 or _mr_short_ema10)
 
         # ★ v10.7: TDECAY 제거 — ZOMBIE로 통합
 
@@ -1218,7 +1262,7 @@ def plan_open(
             continue
 
         # ── entry_type 확정 ─────────────────────────────────────
-        if "_pend_entry_type" in dir() and _pend_entry_type:
+        if _pend_entry_type is not None:
             entry_type_tag = _pend_entry_type   # pending 발화: armed 시점 값 사용
         else:
             if (trigger_side == "buy"  and _mr_long_final) or \
@@ -1233,7 +1277,7 @@ def plan_open(
 
         # ── 수량 계산 ───────────────────────────────────────────
         total_cap     = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-        grid_notional = (total_cap / TOTAL_MAX_SLOTS) * LEVERAGE
+        grid_notional = (total_cap / GRID_DIVISOR) * LEVERAGE
 
         # MR: 동일 비중, 물타기 DCA
         dca_w       = DCA_WEIGHTS
@@ -1302,11 +1346,10 @@ def plan_dca(
         elif _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_3M_THRESHOLD:
             _btc_crash_dca = True
 
-    for symbol, p in _pos_items(st):
+    # ★ v10.13: killswitch 감지 (보험 시그널용)
+    _killswitch_dca = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0) >= 0.8
 
-        # ★ v10.11b: BTC 급락 시 롱 DCA만 차단 (숏은 수혜 방향이라 허용)
-        if _btc_crash_dca and p.get("side") == "buy":
-            continue
+    for symbol, p in _pos_items(st):
 
         # ★ v10.11: CORE_HEDGE 수익 중이면 DCA 금지 (보험→본체 방지)
         if is_hedge_dca_blocked(p, snapshot, symbol):
@@ -1322,17 +1365,33 @@ def plan_dca(
         # 3) 노셔널이 grid의 95% 이상이면 스킵
         _total_cap_dca = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
         if _total_cap_dca > 0:
-            _grid_max = (_total_cap_dca / TOTAL_MAX_SLOTS) * LEVERAGE
+            _grid_max = (_total_cap_dca / GRID_DIVISOR) * LEVERAGE
             _cur_notional = float(p.get("amt", 0)) * float(p.get("ep", 0))
             if _cur_notional >= _grid_max * 0.95:
                 continue
 
         # pending_dca 타임아웃: 3분 초과 시 자동 해제
+        # ★ v10.14: pending limit가 아직 활성이면 해제하지 않음 (중복 DCA 방지)
         pd = p.get("pending_dca")
         if pd:
             pd_ts = pd.get("ts", 0) if isinstance(pd, dict) else 0
+            pd_tier = pd.get("tier", 0) if isinstance(pd, dict) else 0
             if time.time() - pd_ts < 180:
                 continue
+            # 180초 초과 — pending limit 레지스트리 확인
+            _has_pending_limit = False
+            try:
+                from v9.execution.order_router import get_pending_limits
+                for _pl_info in get_pending_limits().values():
+                    if (_pl_info.get("sym") == symbol and _pl_info.get("side") == p.get("side", "")
+                            and _pl_info.get("intent_type") == "DCA"
+                            and _pl_info.get("tier") == pd_tier):
+                        _has_pending_limit = True
+                        break
+            except Exception:
+                pass
+            if _has_pending_limit:
+                continue  # limit 주문 아직 활성 → pending_dca 유지
             p["pending_dca"] = None
 
         dca_targets = p.get("dca_targets", [])
@@ -1369,18 +1428,12 @@ def plan_dca(
         _has_hedge = isinstance(_opp_p, dict) and _opp_p.get("role") == "HEDGE"
 
         is_long       = p.get("side", "") == "buy"
-        # ★ v9.9: 티어별 쿨다운 — 다음 진입할 티어 기준 적용
-        next_tier_cd  = min(
-            (t["tier"] for t in dca_targets), default=2
-        )
-        tier_cooldown = DCA_COOLDOWN_BY_TIER.get(next_tier_cd, DCA_COOLDOWN_SEC)
+        # ★ v9.9: 티어별 쿨다운 — 루프 내부(tier_now 기준)에서 계산 (PATCH BUG3)
         time_since_last = now - p.get("last_dca_time", p.get("time", now))
-        if time_since_last < tier_cooldown:
-            continue
+        # ★ v10.13: 쿨다운 early-exit 제거 → ROI 도달 후 보험 시그널용으로 사용
 
+        # ★ v10.13: corr 체크를 DCA 진입 직전으로 이동 (보험 플래그는 corr 무관)
         corr = (snapshot.correlations or {}).get(symbol, 1.0)
-        if corr < DCA_MIN_CORR:
-            continue
 
         pool      = (snapshot.ohlcv_pool or {}).get(symbol, {})
         ohlcv_1m  = pool.get("1m", [])
@@ -1401,19 +1454,52 @@ def plan_dca(
 
         for target in dca_targets:
             # avg_ep 기준 ROI 트리거 (T2:-3.5% / T3:-5.0% / T4:-5.5%)
-            roi_trig = target.get("roi_trigger", DCA_ROI_TRIGGERS.get(target.get("tier", 2), -3.5))
+            roi_trig = DCA_ROI_TRIGGERS.get(target.get("tier", 2), -8.25)  # ★ PATCH: 항상 config 기준 (저장값 무시 → 런타임 변경 즉시 반영)
             is_hit = roi_now <= roi_trig
             if not is_hit:
                 continue
 
             tier_now = target.get("tier", 2)
+            # ★ PATCH BUG3: 루프 내부에서 tier_now 기준 쿨다운 계산
+            tier_cooldown = DCA_COOLDOWN_BY_TIER.get(tier_now, DCA_COOLDOWN_SEC)
 
             # ★ v10.11b: 이미 완료된 tier 스킵 (JSON 잔여 타겟 방어)
             _curr_dca_level = int(p.get("dca_level", 1) or 1)
             if tier_now <= _curr_dca_level:
                 continue
 
-            # ★ v10.2: 소스에 HEDGE 붙으면 T3/T4 DCA 차단 (소스 동결)
+            # ★ v10.13: DCA 조건 도달 — 차단 여부 확인 → 보험 시그널
+            # plan_dca에서 직접 판단 (기존 _scan_dca_blocked_insurance 제거)
+            # ep 기준 ROI 불일치 버그 원천 해결
+            _block = None
+            if _btc_crash_dca and is_long:
+                _block = "BTC_CRASH"
+            elif _killswitch_dca:
+                _block = "KILLSWITCH"
+            elif time_since_last < tier_cooldown:
+                # ★ PATCH BUG3: T3+도 보험 트리거 대상
+                # 기존: T3+ else break → DCA도 없고 보험도 없이 통과 → HARD_SL 직행
+                # 수정: 최소 60초 경과 후 쿨다운 차단 시 보험 발동 (tier 무관)
+                _min_elapsed = 60 if _curr_dca_level >= 3 else 120
+                if time_since_last >= _min_elapsed:
+                    _block = "COOLDOWN"
+                else:
+                    continue  # 60초도 안 됨 → 이번 틱 skip (break 아님, 다음 tier 시도)
+            if _block:
+                if not p.get("insurance_sh_trigger"):
+                    p["insurance_sh_trigger"] = _block
+                    print(f"[INSURANCE] {symbol} DCA T{tier_now} ROI hit "
+                          f"(ep={_ref_ep:.4f} roi={roi_now:.2f}%) "
+                          f"but blocked ({_block})")
+                break  # 플래그 세팅 완료 → 다음 심볼
+
+            # ── 차단 아님 → 품질 필터 + DCA 진입 ──
+            # ★ v10.14c: corr 부족도 보험 트리거 (기존: 보험 없이 DCA만 스킵 → SL 직행)
+            if corr < DCA_MIN_CORR:
+                if not p.get("insurance_sh_trigger"):
+                    p["insurance_sh_trigger"] = "CORR_LOW"
+                    print(f"[INSURANCE] {symbol} DCA T{tier_now} corr={corr:.2f}<{DCA_MIN_CORR} → 보험")
+                break
             if _has_hedge and tier_now >= 3:
                 continue
             # ★ v10.8: SH 소스는 DCA 허용 — DCA 체결 시 SH trailing 전환
@@ -1451,6 +1537,10 @@ def plan_dca(
             if target["tier"] == 4:
                 p["t4_entry_price"] = curr_p
 
+            # ★ v10.15: HIGH 레짐에서 DCA는 시장가 (체결 지연 방지)
+            _dca_regime = _btc_vol_regime(snapshot)
+            _force_mkt = (_dca_regime == "HIGH")
+
             intents.append(Intent(
                 trace_id=_tid(),
                 intent_type=IntentType.DCA,
@@ -1460,8 +1550,9 @@ def plan_dca(
                 price=curr_p,
                 reason=f"DCA_T{target['tier']}",
                 metadata={"tier": target["tier"], "target": target,
-                          "locked_regime": _btc_vol_regime(snapshot),
-                          "_expected_role": p.get("role", "CORE_MR")},
+                          "locked_regime": _dca_regime,
+                          "_expected_role": p.get("role", "CORE_MR"),
+                          "force_market": _force_mkt},
             ))
             # ★ v10.9: ML 피처 로깅
             try:
@@ -1488,7 +1579,7 @@ def plan_dca(
                     curr_roi=roi_now, max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
                     hold_sec=time.time()-float(p.get("time", time.time()) or time.time()),
                     vol_ratio_5m=calc_vol_ratio_5m(ohlcv_5m_dca),
-                    src_ep=_t1_ep, curr_p=curr_p, ema20_15m=_ml_ema15, ema20_5m=ema20_5m_live,
+                    src_ep=_ref_ep, curr_p=curr_p, ema20_15m=_ml_ema15, ema20_5m=ema20_5m_live,
                 )
             except Exception as _ml_e:
                 print(f"[ML_LOG] DCA 피처 기록 오류(무시): {_ml_e}")
@@ -1507,6 +1598,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             continue
         # ★ v10.8: pending 주문 있으면 스킵 (TP1 295회 반복 방지)
         if p.get("pending_close"):
+            continue
+        # ★ v10.13: TP1 선주문 활성이면 plan_tp1 스킵 (runner가 관리)
+        if p.get("tp1_preorder_id"):
             continue
 
         curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
@@ -1536,48 +1630,21 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
         else:
-            # ★ v10.12: entry 기준 독립게임 TP1 (T1~T4 통일 +2.0%)
-            # T5는 기존 t5_entry 기준 +1.5% 유지
-            if dca_level >= 5:
-                _t5ep = float(p.get("t5_entry_price", 0.0) or 0.0)
-                if _t5ep > 0:
-                    roi_gross = calc_roi_pct(_t5ep, curr_p, p.get("side", ""), LEVERAGE)
-                    tp1_thresh = 1.5  # t5_entry 기준 ROI 1.5%
-                else:
-                    roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
-                    tp1_thresh = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
-            else:
-                # ★ v10.12: 각 tier entry 기준 +2.0%
-                _ENTRY_TP1_PCT = 2.0
-                if dca_level <= 1:
-                    _tp_ref = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
-                elif dca_level == 2:
-                    _tp_ref = float(p.get("t2_entry_price", 0.0) or 0.0)
-                elif dca_level == 3:
-                    _tp_ref = float(p.get("t3_entry_price", 0.0) or 0.0)
-                elif dca_level == 4:
-                    _tp_ref = float(p.get("t4_entry_price", 0.0) or 0.0)
-                else:
-                    _tp_ref = 0.0
-                # fallback: entry 기록 없으면 ep 기준
-                if _tp_ref <= 0:
-                    _tp_ref = float(p.get("ep", 0.0))
-                    roi_gross = calc_roi_pct(_tp_ref, curr_p, p.get("side", ""), LEVERAGE)
-                    tp1_thresh = TP1_PCT_BY_DCA.get(dca_level, TP1_PCT)
-                else:
-                    roi_gross = calc_roi_pct(_tp_ref, curr_p, p.get("side", ""), LEVERAGE)
-                    tp1_thresh = _ENTRY_TP1_PCT
+            # ★ v10.14c: min_roi 반등 TP1
+            # current_roi(ep 기준) ≥ worst_roi + α → TP1 발동
+            # T1/T2: α=2.0 (넉넉히, 기존 고정TP와 유사)
+            # T3~T5: α=1.5 (DCA 깊은 구간, 바닥 대비 빠른 탈출)
+            # ★ PATCH: t5_mini_alpha 있으면 우선 사용 (미니게임 alpha=1.0)
+            _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
+            roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
+            _worst = float(p.get("worst_roi", 0.0) or 0.0)
+            tp1_thresh = _worst + _alpha
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
-            # ★ v10.11b: T5 독립게임 → 전량 청산 (t5_entry 기준이라 trail 불가)
-            #            T1~T4 → 40% 부분익절 + 60% progressive trail
-            if dca_level >= 5:
-                close_qty = total_qty
-            else:
-                close_qty  = total_qty * TP1_PARTIAL_RATIO
+            # ★ v10.13: T1~T5 전부 40% 부분익절 + 60% trailing
+            close_qty  = total_qty * TP1_PARTIAL_RATIO
             # ★ v10.5 fix: 부분청산 qty < 최소수량 시 전량청산으로 전환 (무한루프 방지)
-            # 고가코인(ETH/BNB 등) 최소수량은 0.001 수준 — markets 정보 없으면 보수적으로 적용
             _sym_min_qty = {
                 "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
                 "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
@@ -1593,8 +1660,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 side="sell" if is_long else "buy",
                 qty=close_qty,
                 price=curr_p,
-                reason=f"TP1_{tp1_thresh:.1f}pct_DCA{dca_level}" + ("_T5GAME" if dca_level >= 5 else ""),
-                metadata={"roi_gross": roi_gross},
+                reason=f"TP1_RB(w={_worst:.1f}+a={_alpha}={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}",
+                metadata={"roi_gross": roi_gross, "worst_roi": _worst, "alpha": _alpha},
             ))
     return intents
 
@@ -1936,15 +2003,21 @@ def plan_force_close(
             # ★ v10.12: HARD_SL — entry 기준 -5.0% 통일 (T1~T4), T5 독립 -2.0%
             _dca_lv_sl = int(p.get("dca_level", 1) or 1)
 
-            if _dca_lv_sl >= 5:
-                # T5: t5_entry 기준 -2.0%
-                _sl_thresh = -2.0
+            # ★ PATCH: 미니게임 SL — 시작 가격 기준 -0.5% (ROI -1.5%)
+            if p.get("t5_mini_active"):
+                _sl_thresh = -1.5
+                _sl_ep = float(p.get("t5_mini_start_price", 0.0) or 0.0)
+                if _sl_ep <= 0:
+                    _sl_ep = float(p.get("ep", 0.0))
+            elif _dca_lv_sl >= 5:
+                # ★ 최종 아키텍처: T5 SL -10.0% ROI
+                _sl_thresh = -10.0
                 _sl_ep = float(p.get("t5_entry_price", 0.0) or 0.0)
                 if _sl_ep <= 0:
                     _sl_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
             else:
-                # T1~T4: entry 기준 -5.0% (백테스트 최적)
-                _sl_thresh = -5.0
+                # ★ 최종 아키텍처: T1~T4 SL -11.2% ROI
+                _sl_thresh = -11.2
                 _entry_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
                 _sl_ep = float(p.get(_entry_keys.get(_dca_lv_sl, ""), 0.0) or 0.0)
                 if _sl_ep <= 0:
@@ -2002,82 +2075,11 @@ def _scan_dca_blocked_insurance(
     system_state: Dict,
 ) -> None:
     """
-    DCA ROI 도달했지만 차단된 포지션에 insurance_sh_trigger 플래그 세팅.
-    plan_dca 호출 전에 실행. 플래그는 plan_insurance_sh가 소비.
+    ★ v10.13: 제거됨 — plan_dca에서 직접 insurance_sh_trigger 세팅.
+    기존 버그: original_ep 기준 ROI ≠ plan_dca의 ep 기준 ROI → 오발동.
+    이 함수는 호환성을 위해 no-op으로 유지 (generate_all_intents 호출부 방어).
     """
-    now = time.time()
-    mr_now = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0)
-
-    # ★ v10.12: BTC crash 2중 감지 (보험용)
-    _btc_crash = False
-    _btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
-    _btc_1m = _btc_pool.get("1m", [])
-    if len(_btc_1m) >= 4:
-        _btc_now = float(_btc_1m[-1][4])
-        _btc_1ago = float(_btc_1m[-2][4])
-        _btc_3ago = float(_btc_1m[-4][4])
-        if _btc_1ago > 0 and (_btc_now - _btc_1ago) / _btc_1ago <= BTC_CRASH_1M_THRESHOLD:
-            _btc_crash = True
-        elif _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_3M_THRESHOLD:
-            _btc_crash = True
-    _btc_freeze = float(system_state.get("btc_crash_freeze_until", 0.0) or 0.0) > now
-    _killswitch = mr_now >= 0.8
-
-    for sym, p in _pos_items(st):
-        # 대상 필터: CORE step=0만
-        if int(p.get("dca_level", 1) or 1) >= 5:
-            continue
-        if p.get("step", 0) >= 1:
-            continue
-        if p.get("role") in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
-            continue
-        if p.get("max_dca_reached"):
-            continue
-
-        dca_targets = p.get("dca_targets", [])
-        if not dca_targets:
-            continue
-
-        curr_p = float((snapshot.all_prices or {}).get(sym, 0.0))
-        if curr_p <= 0:
-            continue
-
-        _t1_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
-        if _t1_ep <= 0:
-            continue
-        roi_now = calc_roi_pct(_t1_ep, curr_p, p.get("side", ""), LEVERAGE)
-
-        # DCA ROI 도달 체크
-        _hit = False
-        for _t in dca_targets:
-            if roi_now <= _t.get("roi_trigger", -3.5):
-                _hit = True
-                break
-        if not _hit:
-            continue
-
-        # ROI 도달 + 차단 사유 확인
-        _block = None
-        _cur_dca = int(p.get("dca_level", 1) or 1)
-        if _btc_crash or _btc_freeze:
-            _block = "BTC_CRASH"        # 전 tier 발동
-        elif _killswitch:
-            _block = "KILLSWITCH"       # 전 tier 발동
-        else:
-            # 쿨다운 체크
-            _next_tier = min((_t["tier"] for _t in dca_targets), default=2)
-            _tier_cd = DCA_COOLDOWN_BY_TIER.get(_next_tier, DCA_COOLDOWN_SEC)
-            _since = now - p.get("last_dca_time", p.get("time", now))
-            if _since < _tier_cd:
-                # ★ v10.12: COOLDOWN 보험은 T1/T2만 (T3+ 쿨다운은 노이즈)
-                # ep 기준 DCA에서 체결 직후 다음 트리거가 즉시 도달 → T3/T4에서 오발동
-                # BTC_CRASH/KILLSWITCH는 전 tier 즉시 발동
-                if _cur_dca <= 2 and _since >= 120:
-                    _block = "COOLDOWN"
-
-        if _block and not p.get("insurance_sh_trigger"):
-            p["insurance_sh_trigger"] = _block
-            print(f"[INSURANCE] {sym} DCA ROI hit but blocked ({_block})")
+    pass
 
 
 def plan_insurance_sh(
@@ -2097,13 +2099,10 @@ def plan_insurance_sh(
     # ★ v10.12: 부팅 후 300초간 보험 스킵
     _boot_ts = float(system_state.get("_boot_ts", 0.0) or 0.0)
     if _boot_ts > 0 and (now - _boot_ts) < 300:
-        # 플래그만 소비하고 전부 스킵
-        for sym, sym_st in st.items():
-            if not isinstance(sym_st, dict):
-                continue
-            for _, src_p in iter_positions(sym_st):
-                if isinstance(src_p, dict) and src_p.get("insurance_sh_trigger"):
-                    src_p["insurance_sh_trigger"] = None
+        # ★ PATCH: 부팅 가드 중 trigger 클리어 제거
+        # 기존: 클리어 → 300s 내 BTC_CRASH 발생 시 보험 영구 소멸
+        # 수정: trigger 유지 → 300s 경과 후 다음 틱에서 발동
+        # (단, V9_RECOVERED 재시작 직후 오발동 방지는 DCA 쿨다운이 담당)
         return intents
 
     _ins_cd = system_state.setdefault("_insurance_cooldowns", {})
@@ -2115,10 +2114,7 @@ def plan_insurance_sh(
 
         # ★ v10.11b: 같은 심볼 쿨다운 체크 (5분)
         if now < _ins_cd.get(sym, 0):
-            # 플래그만 소비하고 스킵
-            for _, src_p in iter_positions(sym_st):
-                if isinstance(src_p, dict) and src_p.get("insurance_sh_trigger"):
-                    src_p["insurance_sh_trigger"] = None
+            # ★ v10.15: trigger 유지 (plan_dca 재세팅 방지)
             continue
 
         for src_side, src_p in iter_positions(sym_st):
@@ -2127,7 +2123,9 @@ def plan_insurance_sh(
             trigger = src_p.get("insurance_sh_trigger")
             if not trigger:
                 continue
-            src_p["insurance_sh_trigger"] = None  # 플래그 소비
+            # ★ v10.15: trigger 클리어하지 않음 (DCA 체결/포지션 청산 시만 클리어)
+            # 이전: 소비 후 None → plan_dca 재세팅 → 무한루프
+            # 수정: 유지 → plan_dca 가드(if not trigger)가 재세팅 방지
 
             # ★ v10.11b: 같은 DCA 레벨에서 이미 보험 발동했으면 스킵
             _src_dca = int(src_p.get("dca_level", 1) or 1)
@@ -2151,13 +2149,11 @@ def plan_insurance_sh(
             if src_amt <= 0 or curr_p <= 0:
                 continue
 
-            # 사이즈 + 타임컷: 강한 신호(BTC_CRASH/KILLSWITCH) vs 약한(COOLDOWN)
-            if trigger in ("BTC_CRASH", "KILLSWITCH"):
-                qty = src_amt           # 100%
-                timecut = 300           # 5분
-            else:
-                qty = src_amt * 0.6     # 60%
-                timecut = 180           # 3분
+            # ★ PATCH: 반대 포지션 없는 포지션은 항상 100% (헷지 없는 노출 전체 커버)
+            # 이 지점까지 오면 opp 체크 통과 = 반대 포지션 확실히 없음
+            # 기존 60%는 반대 포지션 있을 때를 위한 로직이었으나, 없으면 의미 없음
+            qty = src_amt  # 100% always
+            timecut = 300 if trigger in ("BTC_CRASH", "KILLSWITCH") else 180
 
             intents.append(Intent(
                 trace_id=_tid(),
@@ -2197,14 +2193,16 @@ def generate_all_intents(
     system_state: Dict,
 ) -> List[Intent]:
     """
-    ★ v10.11 실행 순서:
+    ★ v10.14d 실행 순서:
       1. plan_force_close       → HARD_SL / DD_SHUTDOWN / HEDGE_EXIT / ZOMBIE / INSURANCE_TIMECUT
       2. plan_hedge_core_manage → CORE_HEDGE 소스 연동 (청산/CORE_MR 전환)
       3. plan_tp1               → TP1 부분익절 (40%) — CORE_HEDGE 제외
       4. plan_trail_on          → 트레일링 스탑 (잔량 60%)
-      5. _scan_dca_blocked      → DCA 차단 보험 플래그 세팅
-      6. plan_insurance_sh      → 차단 보험 SH 진입
+      5. plan_dca               → ★ 이동! DCA 진입 + 차단 시 insurance_sh_trigger 세팅
+      6. plan_insurance_sh      → DCA 차단 보험 (5에서 세팅된 trigger 소비)
       7. plan_open              → MR 신규 진입 + HEDGE_CORE + BALANCE fallback
+    ★ v10.14d: plan_dca를 plan_insurance_sh 앞으로 이동
+      급락 시 DCA 차단 + SL 동시 발생 → 같은 틱에서 보험 발동 가능
     """
     import time as _time
     _snap_ts = _time.time()
@@ -2213,8 +2211,9 @@ def generate_all_intents(
     intents += plan_hedge_core_manage(snapshot, st)
     intents += plan_tp1(snapshot, st)
     intents += plan_trail_on(snapshot, st)
-    # ★ v10.10: DCA 차단 보험 (기존 SH 대체)
-    _scan_dca_blocked_insurance(snapshot, st, system_state)
+    # ★ v10.14d: plan_dca를 먼저 실행 → insurance_sh_trigger 세팅
+    intents += plan_dca(snapshot, st, cooldowns)
+    # ★ plan_insurance_sh가 바로 trigger 소비 (같은 틱!)
     intents += plan_insurance_sh(snapshot, st, system_state)
     intents += plan_open(snapshot, st, cooldowns, system_state)
     for _i in intents:

@@ -16,11 +16,14 @@ from typing import Dict, List, Tuple, Optional
 from v9.types import Intent, IntentType, MarketSnapshot
 from v9.config import (
     LEVERAGE, DCA_WEIGHTS,
-    TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT,
+    TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT, GRID_DIVISOR,
 )
 from v9.execution.position_book import get_p, iter_positions
 from v9.risk.slot_manager import count_slots
 from v9.utils.utils_math import calc_roi_pct
+
+# ★ v10.15: HEDGE_CORE 심볼별 쿨다운 (스팸 방지)
+_hedge_core_cooldowns: dict = {}  # {sym: next_allowed_ts}
 
 
 def _tid():
@@ -42,19 +45,27 @@ def _build_hedge_dca_targets(entry_p: float, side: str, grid_notional: float, re
 
 def calc_skew(st: dict, total_cap: float) -> Tuple[float, float, float]:
     """롱/숏 마진 비율 → 스큐 반환.
+    ★ PATCH: CORE_HEDGE / INSURANCE_SH 제외 — 헷지 포지션이 포함되면
+    short_margin이 과대계산되어 SKEW_MR light_side가 반대로 뒤집히는 버그 수정.
+    순수 CORE_MR / CORE_BREAKOUT / BALANCE 포지션만으로 스큐 판단.
     Returns: (skew, long_margin_ratio, short_margin_ratio)
     """
+    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
     if total_cap <= 0:
         return 0.0, 0.0, 0.0
     long_m = sum(
         float(get_p(st.get(s, {}), "buy").get("amt", 0)) *
         float(get_p(st.get(s, {}), "buy").get("ep", 0)) / LEVERAGE
-        for s in st if isinstance(get_p(st.get(s, {}), "buy"), dict)
+        for s in st
+        if isinstance(get_p(st.get(s, {}), "buy"), dict)
+        and get_p(st.get(s, {}), "buy").get("role", "") not in _HEDGE_ROLES
     ) / total_cap
     short_m = sum(
         float(get_p(st.get(s, {}), "sell").get("amt", 0)) *
         float(get_p(st.get(s, {}), "sell").get("ep", 0)) / LEVERAGE
-        for s in st if isinstance(get_p(st.get(s, {}), "sell"), dict)
+        for s in st
+        if isinstance(get_p(st.get(s, {}), "sell"), dict)
+        and get_p(st.get(s, {}), "sell").get("role", "") not in _HEDGE_ROLES
     ) / total_cap
     return abs(long_m - short_m), long_m, short_m
 
@@ -72,7 +83,7 @@ def plan_hedge_core_entry(
     total_cap: float,
     btc_regime: str,
     asym_syms: set,
-    skew_thresh: float = 0.12,
+    skew_thresh: float = 0.15,  # ★ v10.15: 15%p (config.SKEW_HEDGE_TRIGGER)
 ) -> List[Intent]:
     """스큐 기반 CORE_HEDGE 진입.
     Returns: intents 리스트 + asym_syms 업데이트
@@ -99,8 +110,9 @@ def plan_hedge_core_entry(
         # ★ v10.11b: T5 소스에는 헷지 안 붙임 (T5 독립게임)
         if int(hp.get("dca_level", 1) or 1) >= 5:
             continue
-        # ★ v10.12: T1 소스 제외 (진입 초기, 구조적 스큐 판단 이름)
-        if int(hp.get("dca_level", 1) or 1) <= 1:
+        # ★ 최종 아키텍처: T2만 소스 허용 (T1/T3+ 제외)
+        _src_dca_lv = int(hp.get("dca_level", 1) or 1)
+        if _src_dca_lv != 2:
             continue
         cp = float((snapshot.all_prices or {}).get(sym, 0.0))
         if cp <= 0:
@@ -108,31 +120,42 @@ def plan_hedge_core_entry(
         roi = calc_roi_pct(float(hp.get("ep", 0)), cp, heavy_side, LEVERAGE)
         dca = int(hp.get("dca_level", 1) or 1)
         # ★ v10.12: T2~T4 소스는 ROI ≤ -1.2%일 때만 (DCA -1.5% 전에 발동, MDD 개선)
-        if roi > -1.2:
+        if roi > -6.0:  # ★ 최종: T2 진입 후 -6% 이상 손실 시만 헷지
             continue
         src_candidates.append((sym, hp, cp, roi, dca))
 
     # DCA 깊은 순 → ROI 낮은 순
     src_candidates.sort(key=lambda x: (-x[4], x[3]))
 
-    slots = count_slots(st)
-    weak_count = slots.risk_short if hedge_side == "sell" else slots.risk_long
-    weak_max = MAX_SHORT if hedge_side == "sell" else MAX_LONG
+    # ★ v10.15: HEDGE 슬롯 = CORE_HEDGE만 카운트, 최대 3개
+    from v9.config import MAX_HEDGE_SLOTS
+    slots_all = count_slots(st)
+    slots_hedge = count_slots(st, role_filter="CORE_HEDGE")
+    _hedge_count = slots_hedge.risk_total
 
     for src_sym, src_p, src_cp, src_roi, src_dca in src_candidates:
-        # ★ v10.12: 슬롯 없으면 시도조차 안 함
-        if weak_count >= weak_max or weak_count >= 4:
+        # 전체 하드캡 OR 헷지 상한 도달 → 중단
+        if slots_all.risk_total >= TOTAL_MAX_SLOTS or _hedge_count >= MAX_HEDGE_SLOTS:
             break
         if src_sym in asym_syms:
+            continue
+
+        # ★ v10.15: 심볼별 헷지 쿨다운 (60초) — 스팸 방지
+        _hc_cd = _hedge_core_cooldowns.get(src_sym, 0)
+        if time.time() < _hc_cd:
             continue
 
         # ★ v10.12: 같은 심볼 반대방향에 이미 포지션 있으면 스킵
         _existing = get_p(st.get(src_sym, {}), hedge_side)
         if isinstance(_existing, dict):
             continue
+        # ★ v10.14b: pending_entry(limit 대기중)도 체크 — 스팸 OPEN 방지
+        from v9.execution.position_book import get_pending_entry as _gpe_hc
+        if _gpe_hc(st.get(src_sym, {}), hedge_side):
+            continue
 
         # T2 사이즈 (T1+T2 누적 비중)
-        grid = (total_cap / TOTAL_MAX_SLOTS) * LEVERAGE
+        grid = (total_cap / GRID_DIVISOR) * LEVERAGE
         cum_w = sum(DCA_WEIGHTS[:2]) / sum(DCA_WEIGHTS)
         notional = grid * cum_w
         qty = notional / src_cp
@@ -160,7 +183,9 @@ def plan_hedge_core_entry(
             },
         ))
         asym_syms.add(src_sym)
-        weak_count += 1
+        _hedge_count += 1
+        slots_all.risk_total += 1  # 전체 카운트도 증가
+        _hedge_core_cooldowns[src_sym] = time.time() + 60  # 60초 쿨다운
         print(f"[HEDGE_CORE] {src_sym} {hedge_side} src_roi={src_roi:.1f}% "
               f"src_dca=T{src_dca} skew={skew*100:.0f}% ${notional:.0f}")
 
@@ -200,11 +225,28 @@ def plan_hedge_core_manage(
 
             source_sym = hedge.get("source_sym", "")
             source_side = hedge.get("source_side", "")
-            if not source_sym or not source_side:
+            if not source_side:
                 source_side = "buy" if pos_side == "sell" else "sell"
+            # ★ PATCH BUG1: source_sym 비어있으면 복구 시도
+            # 1순위: 같은 심볼 반대방향 (CORE_HEDGE는 항상 소스와 같은 심볼)
+            if not source_sym:
+                _candidate = get_p(st.get(sym, {}), source_side)
+                if isinstance(_candidate, dict):
+                    source_sym = sym
+                    hedge["source_sym"] = sym
+                    print(f"[HEDGE_CORE_PATCH] {sym} {pos_side} source_sym 복구 → {sym}")
+                else:
+                    # 2순위: 전체 st 역탐색 (동일 source_side 활성 포지션)
+                    for _s, _ss in st.items():
+                        _sp = get_p(_ss, source_side)
+                        if isinstance(_sp, dict) and _sp.get("role", "").startswith("CORE"):
+                            source_sym = _s
+                            hedge["source_sym"] = _s
+                            print(f"[HEDGE_CORE_PATCH] {sym} {pos_side} source_sym 역탐색 복구 → {_s}")
+                            break
 
             # 소스 포지션 확인
-            src_st = st.get(source_sym, {})
+            src_st = st.get(source_sym, {}) if source_sym else {}
             src_p = get_p(src_st, source_side)
 
             # 현재 헷지 ROI
@@ -280,12 +322,55 @@ def plan_hedge_core_manage(
                         print(f"[HEDGE_CORE] {sym} {pos_side} T5 익절: roi={hedge_roi:+.1f}% → 소스 독립게임")
                 continue  # 소스 아직 건재 → 유지
 
-            # ── v10.11b: 손익 무관 CORE_MR 전환 ──
-            # 자체 TP1 라이프사이클로 수익 극대화
+            # ── T5 split — 소스 T5 도달 시 strategy_core에서 미니게임 즉시 시작 ──
+            # t5_mini_active는 strategy_core DCA T5 체결 시점에 이미 세팅됨
+            # 여기서는 혹시 누락된 경우 폴백으로만 처리
+            if hedge.get("t5_split"):
+                if not hedge.get("t5_mini_active"):
+                    # 폴백: manage 루프에서 뒤늦게 감지
+                    hedge["t5_mini_active"] = True
+                    hedge["t5_mini_start_price"] = cp
+                    hedge["role"] = "CORE_MR"
+                    hedge["source_sym"] = ""
+                    hedge["source_side"] = ""
+                    hedge["entry_type"] = "MR"
+                    hedge["dca_targets"] = []
+                    hedge["max_dca_reached"] = True
+                    hedge["t5_mini_alpha"] = 1.0
+                    hedge["worst_roi"] = hedge_roi
+                    hedge["max_roi_seen"] = max(hedge_roi, float(hedge.get("max_roi_seen", 0) or 0))
+                    print(f"[T5_MINI] {sym} {pos_side} 미니게임 폴백 시작 roi={hedge_roi:+.1f}%")
+                continue  # 미니게임 중 → manage 관여 없음, plan_tp1/plan_force_close가 담당
+
+            # ── v10.11b: 소스 소멸/TP1 → 수익 0.4% 이상이면 즉시 청산, 미만이면 CORE_MR 전환 ──
+            # ★ PATCH: 소스 사라졌을 때 헷지가 수익 중이면 바로 확정
+            # 이유: CORE_MR 전환 후 추가 DCA 받다가 수익이 날아가는 케이스 방지
+            # 손실 중이면 기존대로 CORE_MR 전환 (자체 라이프사이클로 수익 극대화)
+            _HC_PROFIT_CLOSE_THRESH = 0.4  # % (레버리지 기준)
+            if hedge_roi >= _HC_PROFIT_CLOSE_THRESH:
+                hedge_amt = float(hedge.get("amt", 0.0))
+                if hedge_amt > 0:
+                    close_side = "sell" if pos_side == "buy" else "buy"
+                    reason = "HC_SRC_TP1_PROFIT" if source_tp1 else "HC_SRC_GONE_PROFIT"
+                    intents.append(Intent(
+                        trace_id=_tid(),
+                        intent_type=IntentType.FORCE_CLOSE,
+                        symbol=sym,
+                        side=close_side,
+                        qty=hedge_amt,
+                        price=cp,
+                        reason=f"{reason}(roi={hedge_roi:+.1f}%)",
+                        metadata={"_expected_role": "CORE_HEDGE"},
+                    ))
+                    print(f"[HEDGE_CORE] {sym} {pos_side} 소스 소멸 + 수익 {hedge_roi:+.1f}% ≥ {_HC_PROFIT_CLOSE_THRESH}% → 즉시 청산")
+                continue
             hedge["role"] = "CORE_MR"
             hedge["source_sym"] = ""
             hedge["source_side"] = ""
             hedge["entry_type"] = "MR"
+            # ★ v10.15: CORE_HEDGE는 T2 사이즈 진입 → 최소 dca_level=2 보장
+            if int(hedge.get("dca_level", 1) or 1) < 2:
+                hedge["dca_level"] = 2
 
             # ★ v10.11b: 전환 시 dca_targets 재생성 (비어있으면 DCA 안 나감)
             try:
@@ -293,7 +378,7 @@ def plan_hedge_core_manage(
                 _h_ep = float(hedge.get("ep", 0) or 0)
                 _h_side = hedge.get("side", "buy")
                 _h_amt = float(hedge.get("amt", 0) or 0)
-                _h_dca = int(hedge.get("dca_level", 1) or 1)
+                _h_dca = int(hedge.get("dca_level", 2) or 2)  # ★ v10.15: 최소 2
                 _h_notional = _h_ep * _h_amt
                 _cum_w = sum(DCA_WEIGHTS[:_h_dca]) if _h_dca <= len(DCA_WEIGHTS) else sum(DCA_WEIGHTS)
                 _total_w = sum(DCA_WEIGHTS)

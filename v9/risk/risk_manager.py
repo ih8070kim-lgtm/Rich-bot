@@ -150,12 +150,28 @@ def evaluate_intent(
 
     # ── R4: 슬롯 ────────────────────────────────────────────────
     if itype == IntentType.OPEN:
-        if is_asym:
+        # ★ v10.15: 전체 하드캡 5 먼저 체크
+        if slots.risk_total >= TOTAL_MAX_SLOTS:
+            return _reject(RejectCode.REJECT_SLOT_LIMIT, "SLOTS:TOTAL_CAP")
+        _intent_role = meta.get("role", "CORE_MR")
+        if _intent_role == "CORE_HEDGE":
+            # HEDGE: CORE_HEDGE 카운트 ≤ MAX_HEDGE_SLOTS(3)
+            from v9.config import MAX_HEDGE_SLOTS
+            _h_slots = count_slots(st, role_filter="CORE_HEDGE")
+            if _h_slots.risk_total >= MAX_HEDGE_SLOTS:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:HEDGE_CAP({_h_slots.risk_total}/{MAX_HEDGE_SLOTS})")
+        elif is_asym:
             ok, reason = can_open_hard(slots, side)
+            if not ok:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:{reason}")
         else:
-            ok, reason = can_open_side(slots, side, st)
-        if not ok:
-            return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:{reason}")
+            # MR: CORE_MR만 카운트, 방향당 MAX_MR_PER_SIDE(4)
+            from v9.config import MAX_MR_PER_SIDE
+            _mr_slots = count_slots(st, role_filter="CORE_MR")
+            if side == "buy" and _mr_slots.risk_long >= MAX_MR_PER_SIDE:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_LONG({_mr_slots.risk_long}/{MAX_MR_PER_SIDE})")
+            if side == "sell" and _mr_slots.risk_short >= MAX_MR_PER_SIDE:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_SHORT({_mr_slots.risk_short}/{MAX_MR_PER_SIDE})")
 
     # ── R5: T4 최대 손실 ────────────────────────────────────────
     if itype == IntentType.DCA and dca_level >= 4:
