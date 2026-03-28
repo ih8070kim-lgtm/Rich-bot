@@ -106,7 +106,7 @@ DOWNLOAD_BLOCKED_FILENAMES = {
     "api.env", "deploy_api.env",
 }
 
-ALLOWED_DEPLOY_SUFFIXES = {".py"}
+ALLOWED_DEPLOY_SUFFIXES = {".py", ".zip"}
 ALLOWED_DOWNLOAD_SUFFIXES = {".py", ".log", ".json", ".txt", ".md", ".csv", ".env"}
 
 # =========================================================
@@ -672,7 +672,97 @@ def get_runtime_status() -> str:
 # 배포 로직
 # =========================================================
 
-def deploy_file(incoming: Path) -> tuple:
+def deploy_zip(zip_path: Path) -> tuple:
+    """
+    zip 안의 .py 파일을 전부 꺼내서 프로젝트에 배포.
+    차단 파일 / 대상 못 찾는 파일은 스킵하고 결과 요약 반환.
+    """
+    import zipfile
+
+    if not acquire_deploy_lock():
+        return False, "🔒 다른 배포 진행 중 — 잠시 후 재시도"
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            py_files = [n for n in zf.namelist()
+                        if n.endswith(".py") and not n.endswith("/")]
+
+        if not py_files:
+            return False, "zip 안에 .py 파일 없음"
+
+        backup_root = create_backup_root()
+        results = {"ok": [], "skip": [], "fail": []}
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for entry in py_files:
+                filename = Path(entry).name  # 경로 제거, 파일명만
+
+                if filename.lower() in DEPLOY_BLOCKED_FILENAMES:
+                    results["skip"].append(f"🚫 {filename} (차단)")
+                    continue
+
+                matches = list_project_files_by_name(filename)
+                if not matches:
+                    results["skip"].append(f"⚠️ {filename} (프로젝트에 없음)")
+                    continue
+                if len(matches) > 1 and not ALLOW_MULTI_MATCH:
+                    results["skip"].append(f"⚠️ {filename} (중복 경로)")
+                    continue
+
+                target = matches[0]
+                try:
+                    backup_file(target, backup_root)
+                    data = zf.read(entry)
+                    tmp = target.with_suffix(target.suffix + ".deploy_tmp")
+                    tmp.write_bytes(data)
+                    os.replace(tmp, target)
+                    results["ok"].append(f"✅ {filename}")
+                except Exception as e:
+                    results["fail"].append(f"❌ {filename}: {e}")
+
+        if not results["ok"] and not results["fail"]:
+            return False, "배포된 파일 없음\n" + "\n".join(results["skip"])
+
+        # GitHub sync — 변경된 파일들 일괄 커밋
+        git_msg = ""
+        if results["ok"] and _git_configured():
+            _setup_git_remote()
+            try:
+                for line in results["ok"]:
+                    fname = line.split()[-1]
+                    matches = list_project_files_by_name(fname)
+                    if matches:
+                        rel = matches[0].relative_to(PROJECT_DIR)
+                        subprocess.run(["git", "add", "--", str(rel)],
+                                       cwd=str(PROJECT_DIR), capture_output=True, timeout=10)
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                r = subprocess.run(
+                    ["git", "commit", "-m", f"deploybot: {zip_path.name} {ts}"],
+                    cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=15)
+                if r.returncode == 0:
+                    subprocess.run(["git", "push"], cwd=str(PROJECT_DIR),
+                                   capture_output=True, timeout=30)
+                    git_msg = "\n✅ GitHub sync 완료"
+                elif "nothing to commit" in r.stdout:
+                    git_msg = "\n⏭️ GitHub: no diff"
+            except Exception as ge:
+                git_msg = f"\n⚠️ GitHub sync 실패: {ge}"
+
+        restart_ok = request_restart(f"deploy:{zip_path.name}") if results["ok"] else False
+
+        summary = "\n".join(results["ok"] + results["skip"] + results["fail"])
+        return True, (
+            f"📦 zip 배포 완료 ({len(results['ok'])}/{len(py_files)}건)\n"
+            f"{summary}"
+            f"{git_msg}\n"
+            f"🔄 재시작: {'전송됨' if restart_ok else '스킵'}"
+        )
+
+    finally:
+        release_deploy_lock()
+
+
+
     filename = incoming.name
 
     if filename.lower() in DEPLOY_BLOCKED_FILENAMES:
@@ -1023,7 +1113,7 @@ def handle_document(chat_id: int, doc: dict):
         return
 
     if Path(filename).suffix.lower() not in ALLOWED_DEPLOY_SUFFIXES:
-        send_msg(chat_id, f"🚫 .py만 배포 가능: {filename}")
+        send_msg(chat_id, f"🚫 .py / .zip만 배포 가능: {filename}")
         return
 
     send_msg(chat_id, f"📥 {filename} 수신 → 배포 시작...")
@@ -1034,7 +1124,11 @@ def handle_document(chat_id: int, doc: dict):
         download_telegram_file(fp, save)
         log(f"Downloaded: {save}")
 
-        ok, msg = deploy_file(save)
+        # zip이면 일괄 배포
+        if filename.lower().endswith(".zip"):
+            ok, msg = deploy_zip(save)
+        else:
+            ok, msg = deploy_file(save)
 
         if ok:
             moved = move_file(save, TG_DONE_DIR)
