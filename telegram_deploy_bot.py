@@ -347,13 +347,18 @@ def _git_configured() -> bool:
 
 
 def _setup_git_remote():
-    """PAT 기반 push URL 설정 (한번만 하면 됨)."""
+    """SSH or PAT 기반 push URL 설정."""
     if not _git_configured():
         return
-    # https://TOKEN@github.com/user/repo.git
-    push_url = GITHUB_REPO_URL.replace(
-        "https://", f"https://{GITHUB_PUSH_TOKEN}@"
-    )
+
+    # SSH URL이면 그대로, HTTPS면 토큰 삽입
+    if GITHUB_REPO_URL.startswith("git@"):
+        push_url = GITHUB_REPO_URL
+    else:
+        push_url = GITHUB_REPO_URL.replace(
+            "https://", f"https://{GITHUB_PUSH_TOKEN}@"
+        )
+
     try:
         subprocess.run(
             ["git", "remote", "set-url", "origin", push_url],
@@ -362,7 +367,6 @@ def _setup_git_remote():
     except Exception:
         pass
 
-    # git config (commit용)
     for key, val in [("user.name", "deploybot"), ("user.email", "deploybot@trinity")]:
         try:
             subprocess.run(
