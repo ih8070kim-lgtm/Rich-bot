@@ -45,6 +45,10 @@ load_dotenv(ENV_PATH)
 BOT_TOKEN = os.getenv("DEPLOY_BOT_TOKEN", "").strip()
 ALLOWED_CHAT_ID_RAW = os.getenv("DEPLOY_ALLOWED_CHAT_ID", "").strip()
 
+# ★ v10.13: GitHub auto-sync credentials (optional)
+GITHUB_PUSH_TOKEN = os.getenv("GITHUB_PUSH_TOKEN", "").strip()
+GITHUB_REPO_URL   = os.getenv("GITHUB_REPO_URL", "").strip()  # https://github.com/user/repo.git
+
 if not BOT_TOKEN:
     print("[ERROR] DEPLOY_BOT_TOKEN missing"); sys.exit(1)
 if not ALLOWED_CHAT_ID_RAW:
@@ -302,6 +306,153 @@ def atomic_replace(src: Path, dst: Path):
     os.replace(tmp, dst)
 
 # =========================================================
+# ★ v10.13: Deploy Lock (중복 배포/push 방지)
+# =========================================================
+
+DEPLOY_LOCK_FILE = PROJECT_DIR / "_deploy_in_progress.lock"
+
+
+def acquire_deploy_lock() -> bool:
+    if DEPLOY_LOCK_FILE.exists():
+        try:
+            age = time.time() - DEPLOY_LOCK_FILE.stat().st_mtime
+            if age < 120:  # 2분 이내 lock → 거절
+                return False
+            # 2분 초과 lock → stale, 강제 해제
+            DEPLOY_LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+    try:
+        with open(DEPLOY_LOCK_FILE, "w") as f:
+            f.write(f"{os.getpid()} {now_str()}")
+        return True
+    except Exception:
+        return False
+
+
+def release_deploy_lock():
+    try:
+        DEPLOY_LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+# =========================================================
+# ★ v10.13: GitHub Auto-Sync (대상 파일만 commit/push)
+# =========================================================
+
+
+def _git_configured() -> bool:
+    """GitHub push 가능 여부 확인."""
+    return bool(GITHUB_PUSH_TOKEN and GITHUB_REPO_URL)
+
+
+def _setup_git_remote():
+    """PAT 기반 push URL 설정 (한번만 하면 됨)."""
+    if not _git_configured():
+        return
+    # https://TOKEN@github.com/user/repo.git
+    push_url = GITHUB_REPO_URL.replace(
+        "https://", f"https://{GITHUB_PUSH_TOKEN}@"
+    )
+    try:
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", push_url],
+            cwd=str(PROJECT_DIR), capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+    # git config (commit용)
+    for key, val in [("user.name", "deploybot"), ("user.email", "deploybot@trinity")]:
+        try:
+            subprocess.run(
+                ["git", "config", key, val],
+                cwd=str(PROJECT_DIR), capture_output=True, timeout=5,
+            )
+        except Exception:
+            pass
+
+
+def git_sync_target_file(target: Path, original_filename: str) -> tuple:
+    """
+    대상 파일만 git add / commit / push.
+    반환: (ok: bool, summary: str)
+    """
+    if not _git_configured():
+        return True, "GitHub sync 미설정 (skip)"
+
+    _setup_git_remote()
+
+    try:
+        rel_path = target.relative_to(PROJECT_DIR)
+    except ValueError:
+        return False, f"경로 오류: {target} not under {PROJECT_DIR}"
+
+    cwd = str(PROJECT_DIR)
+
+    # 1) git status 확인
+    try:
+        r = subprocess.run(
+            ["git", "status", "--porcelain", "--", str(rel_path)],
+            cwd=cwd, capture_output=True, text=True, timeout=10,
+        )
+        if not r.stdout.strip():
+            return True, "GitHub sync skip: no diff"
+    except Exception as e:
+        return False, f"git status 실패: {e}"
+
+    # 2) git add (대상 파일만!)
+    try:
+        r = subprocess.run(
+            ["git", "add", "--", str(rel_path)],
+            cwd=cwd, capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return False, f"git add 실패: {r.stderr.strip()}"
+    except Exception as e:
+        return False, f"git add 오류: {e}"
+
+    # 3) commit
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    commit_msg = f"deploybot: {original_filename} {ts}"
+    try:
+        r = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=cwd, capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode != 0:
+            # "nothing to commit" 도 성공 취급
+            if "nothing to commit" in r.stdout or "nothing to commit" in r.stderr:
+                return True, "GitHub sync skip: nothing to commit"
+            return False, f"git commit 실패: {r.stderr.strip()[:100]}"
+    except Exception as e:
+        return False, f"git commit 오류: {e}"
+
+    # commit hash 추출
+    try:
+        r2 = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+        commit_hash = r2.stdout.strip()[:7]
+    except Exception:
+        commit_hash = "?"
+
+    # 4) push
+    try:
+        r = subprocess.run(
+            ["git", "push"],
+            cwd=cwd, capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            err = r.stderr.strip()[:100]
+            return False, f"git push 실패 (commit {commit_hash}): {err}"
+    except Exception as e:
+        return False, f"git push 오류 (commit {commit_hash}): {e}"
+
+    return True, f"sync 완료 (commit {commit_hash})"
+
+# =========================================================
 # 파일 탐색
 # =========================================================
 
@@ -529,38 +680,52 @@ def deploy_file(incoming: Path) -> tuple:
     if incoming.suffix.lower() not in ALLOWED_DEPLOY_SUFFIXES:
         return False, f".py만 배포 가능"
 
-    matches = list_project_files_by_name(filename)
-    if not matches:
-        return False, f"대상 파일 못 찾음: {filename}"
-    if len(matches) > 1 and not ALLOW_MULTI_MATCH:
-        return False, f"동명 파일 복수: {filename}"
+    # ★ v10.13: deploy lock
+    if not acquire_deploy_lock():
+        return False, "🔒 다른 배포 진행 중 — 잠시 후 재시도"
 
-    target = matches[0]
-    backup_root = create_backup_root()
-    backup_path = backup_file(target, backup_root)
+    try:
+        matches = list_project_files_by_name(filename)
+        if not matches:
+            return False, f"대상 파일 못 찾음: {filename}"
+        if len(matches) > 1 and not ALLOW_MULTI_MATCH:
+            return False, f"동명 파일 복수: {filename}"
 
-    # ★ 파일 교체
-    atomic_replace(incoming, target)
+        target = matches[0]
+        backup_root = create_backup_root()
+        backup_path = backup_file(target, backup_root)
 
-    # ★ supervisor에게 재시작 신호 전송
-    restart_ok = request_restart(f"deploy:{filename}")
+        # ★ 파일 교체
+        atomic_replace(incoming, target)
 
-    report = create_report({
-        "file": filename,
-        "target": str(target),
-        "backup": str(backup_path),
-        "restart_signaled": restart_ok,
-        "timestamp": datetime.now().isoformat(),
-    })
+        # ★ v10.13: GitHub sync (대상 파일만)
+        git_ok, git_msg = git_sync_target_file(target, filename)
+        git_icon = "✅" if git_ok else "❌"
 
-    return True, (
-        f"✅ 배포 완료\n"
-        f"📄 {filename}\n"
-        f"📍 {target.relative_to(PROJECT_DIR)}\n"
-        f"💾 백업: {backup_path.name}\n"
-        f"🔄 재시작 신호: {'전송됨' if restart_ok else '실패!'}\n"
-        f"⏳ supervisor가 5초 내 재시작"
-    )
+        # ★ supervisor에게 재시작 신호 전송 (git 이후!)
+        restart_ok = request_restart(f"deploy:{filename}")
+
+        report = create_report({
+            "file": filename,
+            "target": str(target),
+            "backup": str(backup_path),
+            "restart_signaled": restart_ok,
+            "git_sync_ok": git_ok,
+            "git_message": git_msg,
+            "timestamp": datetime.now().isoformat(),
+        })
+
+        return True, (
+            f"✅ 배포 완료\n"
+            f"📄 {filename}\n"
+            f"📍 {target.relative_to(PROJECT_DIR)}\n"
+            f"💾 백업: {backup_root.name}\n"
+            f"{git_icon} GitHub: {git_msg}\n"
+            f"🔄 재시작: {'전송됨' if restart_ok else '실패!'}"
+        )
+
+    finally:
+        release_deploy_lock()
 
 # =========================================================
 # ★ 콜백 처리 (버튼 클릭)
@@ -669,7 +834,7 @@ def handle_callback(chat_id: int, message_id: int, cb_id: str, data: str):
                      [btn("planners.py", "getfile:planners.py"),
                       btn("config.py", "getfile:config.py")],
                      [btn("strategy_core.py", "getfile:strategy_core.py"),
-                      btn("hedge_engine_v2.py", "getfile:hedge_engine_v2.py")],
+                      btn("hedge_core.py", "getfile:hedge_core.py")],
                      [btn("runner.py", "getfile:runner.py"),
                       btn("risk_manager.py", "getfile:risk_manager.py")],
                      [btn("⬅️ 메뉴", "menu")],
@@ -841,6 +1006,13 @@ def handle_text(chat_id: int, text: str):
 def handle_document(chat_id: int, doc: dict):
     filename = doc.get("file_name") or "unknown"
     file_id = doc.get("file_id")
+
+    # ★ "(1)", "(2)" 등 중복 다운로드 접미사 제거: "planners (1).py" → "planners.py"
+    import re as _re
+    _clean = _re.sub(r'\s*\(\d+\)(\.\w+)$', r'\1', filename)
+    if _clean != filename:
+        log(f"파일명 정규화: {filename} → {_clean}")
+        filename = _clean
 
     if not filename or not file_id:
         send_msg(chat_id, "파일 정보 부족")
