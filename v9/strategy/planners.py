@@ -1507,6 +1507,11 @@ def plan_dca(
             if _bad_mode_active and _curr_dca_check == 1 and target.get("tier") == 2:
                 roi_trig = BAD_T1_DCA_ROI
 
+            # ★ TP_LOCK: 잠긴 T1 → T2 강제 DCA (ROI 무시, 즉시 불타기)
+            if p.get("tp_lock_force_dca") and _curr_dca_check == 1 and target.get("tier") == 2:
+                roi_trig = 999.0  # 무조건 통과
+                print(f"[TP_LOCK_DCA] {symbol} T1→T2 강제 DCA (완충재 승격)")
+
             is_hit = roi_now <= roi_trig
             if not is_hit:
                 continue
@@ -1606,6 +1611,11 @@ def plan_dca(
                           "_expected_role": p.get("role", "CORE_MR"),
                           "force_market": _force_mkt},
             ))
+
+            # ★ TP_LOCK: 강제 DCA 완료 → 플래그 클리어
+            if p.get("tp_lock_force_dca") and target["tier"] == 2:
+                p["tp_lock_force_dca"] = False
+                print(f"[TP_LOCK_DCA] {symbol} T1→T2 승격 완료")
             # ★ v10.9: ML 피처 로깅
             try:
                 from v9.logging.logger_ml import (
@@ -1703,10 +1713,16 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             else:
                 _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
                 _worst = float(p.get("worst_roi", 0.0) or 0.0)
+                # ★ V10.16: min(rebound, 고정alpha) OR
+                # worst 양수(DCA 승격 등)일 때 alpha가 cap → TP1 도달 가능
+                tp1_thresh = min(_worst + _alpha, _alpha)
+                _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
+                _worst = float(p.get("worst_roi", 0.0) or 0.0)
                 tp1_thresh = _worst + _alpha
 
-            # ★ FLOOR: 손실에서 TP1 절대 방지 (worst + alpha < 0 방어)
-            tp1_thresh = max(tp1_thresh, 0.3)
+            # ★ FLOOR: T1~T3만 손실 TP1 방지 / T4~T5는 약손실 탈출 허용
+            if dca_level <= 3:
+                tp1_thresh = max(tp1_thresh, 0.3)
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
@@ -1730,10 +1746,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 price=curr_p,
                 reason=(f"TP1_BAD(fixed={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"
                         if _bad_mode_active and dca_level == 1
-                        else f"TP1_RB(w={_worst:.1f}+a={_alpha}={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"),
-                metadata={"roi_gross": roi_gross,
-                           "worst_roi": _worst if not (_bad_mode_active and dca_level == 1) else 0.0,
-                           "alpha": _alpha if not (_bad_mode_active and dca_level == 1) else BAD_T1_TP1_PCT},
+                        else f"TP1_RB(w={_worst:.1f}+a={_alpha:.1f}→{tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"),
+                metadata={"roi_gross": roi_gross, "worst_roi": _worst, "alpha": _alpha,
+                           "tp1_thresh": tp1_thresh},
             ))
     return intents
 
@@ -2313,9 +2328,12 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
         if i <= len(_release_thresholds) and skew_val <= _release_thresholds[i-1]:
             target_lock = min(target_lock, i - 1)
 
-    # ── 잠금 대상 선정 (light side, 노셔널 큰 순) ──
+    # ── 잠금 대상 선정 ──
+    # T2+ 우선 (이미 큰 완충재), T1만 있으면 ROI 높은 순 → 강제 DCA
     if target_lock > cur_count:
-        candidates = []
+        prices = snapshot.all_prices or {}
+        cand_t2plus = []  # T2 이상 → 노셔널 큰 순
+        cand_t1     = []  # T1 → ROI 높은 순
         for sym, sym_st in st.items():
             if not isinstance(sym_st, dict):
                 continue
@@ -2326,17 +2344,32 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
                 continue
             if p.get("role", "") in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
                 continue
+            _dca = int(p.get("dca_level", 1) or 1)
             notional = float(p.get("amt", 0) or 0) * float(p.get("ep", 0) or 0)
-            candidates.append((sym, p, notional))
+            cp = float(prices.get(sym, 0) or 0)
+            ep = float(p.get("ep", 0) or 0)
+            _roi = calc_roi_pct(ep, cp, light_side, LEVERAGE) if (cp > 0 and ep > 0) else 0.0
+            if _dca >= 2:
+                cand_t2plus.append((sym, p, notional, _roi))
+            else:
+                cand_t1.append((sym, p, notional, _roi))
 
-        candidates.sort(key=lambda x: x[2], reverse=True)
+        cand_t2plus.sort(key=lambda x: x[2], reverse=True)   # 노셔널 큰 순
+        cand_t1.sort(key=lambda x: x[3], reverse=True)        # ROI 높은 순
+        candidates = cand_t2plus + cand_t1  # T2+ 우선
+
         need = target_lock - cur_count
-        for sym, p, nt in candidates[:need]:
+        for sym, p, nt, _roi in candidates[:need]:
             p["tp_locked"] = True
             p["tp_lock_reason"] = f"SKEW{target_lock}"
             p["tp_lock_ts"] = int(time.time())
+            # ★ T1이면 T2로 강제 DCA → 완충재 승격
+            if int(p.get("dca_level", 1) or 1) == 1:
+                p["tp_lock_force_dca"] = True
             print(f"[TP_LOCK_ON] {sym} {light_side} lock_n={target_lock} "
-                  f"skew={skew_val:.2f} heavy_roi={heavy_total_roi:.1f}%")
+                  f"skew={skew_val:.2f} heavy_roi={heavy_total_roi:.1f}% "
+                  f"dca={p.get('dca_level',1)} roi={_roi:+.1f}%"
+                  f"{'→T2' if p.get('tp_lock_force_dca') else ''}")
 
     elif target_lock < cur_count:
         # 잠금 해제 (노셔널 작은 순으로 해제)
