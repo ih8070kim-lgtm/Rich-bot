@@ -1197,8 +1197,33 @@ def plan_open(
         _bo_long_final  = _bo_long_final  and not _mr_long_final
         _bo_short_final = _bo_short_final and not _mr_short_final
 
-        final_long_trig  = _mr_long_final  or _bo_long_final
-        final_short_trig = _mr_short_final or _bo_short_final
+        # ★ V10.16: E30(5m) OR — 장기 EMA 기준 추가 진입
+        # 백테스트 R4_E30_loose_sym: Net+3405, MDD-25.7%, L$/S$ 양쪽 수익
+        # 기존 E10(15m) 조건 미발동 시에만 OR로 추가
+        _e30_long_final = False
+        _e30_short_final = False
+        closes_5m_e30 = [float(x[4]) for x in ohlcv_5m]
+        if len(closes_5m_e30) >= 30:
+            _ema30_5m = calc_ema(closes_5m_e30, period=30)
+            # ── E30 Long 주 조건 (ATR2.0, RSI<40) ──
+            if can_long and not _mr_long_final and _ema30_5m > 0:
+                if curr_p < _ema30_5m - atr_coin * 2.0 and rsi5_now < 40 and micro_long_ok:
+                    _e30_long_final = True
+            # ── E30 Long 대칭 (숏 조건 뒤집기: ATR1.4, RSI<40) ──
+            if can_long and not _mr_long_final and not _e30_long_final and _ema30_5m > 0:
+                if curr_p < _ema30_5m - atr_coin * 1.4 and rsi5_now < 40 and micro_long_ok:
+                    _e30_long_final = True
+            # ── E30 Short 주 조건 (ATR1.4, RSI>60) ──
+            if can_short and not _mr_short_final and _ema30_5m > 0:
+                if curr_p > _ema30_5m + atr_coin * 1.4 and rsi5_now > 60 and micro_short_ok:
+                    _e30_short_final = True
+            # ── E30 Short 대칭 (롱 조건 뒤집기: ATR2.0, RSI>60) ──
+            if can_short and not _mr_short_final and not _e30_short_final and _ema30_5m > 0:
+                if curr_p > _ema30_5m + atr_coin * 2.0 and rsi5_now > 60 and micro_short_ok:
+                    _e30_short_final = True
+
+        final_long_trig  = _mr_long_final  or _bo_long_final  or _e30_long_final
+        final_short_trig = _mr_short_final or _bo_short_final or _e30_short_final
 
 
         # (reason 태깅은 pending_map/entry_type_tag에서 처리)
@@ -1235,32 +1260,34 @@ def plan_open(
         if trigger_side is None:
             if final_short_trig:
                 if OPEN_WAIT_NEXT_BAR:
-                    entry_type_tag = "MR" if _mr_short_final else "BREAKOUT"
+                    entry_type_tag = "MR" if _mr_short_final else ("E30" if _e30_short_final else "BREAKOUT")
+                    _atr_label = f"ATR({atr_mult:.1f}x)" if _mr_short_final else f"E30_ATR({atr_mult:.1f}x)"
                     pending_map[symbol] = {
                         "armed":       True,
                         "armed_ts_ms": last_5m_ts,
                         "side":        "sell",
                         "entry_type":  entry_type_tag,
                         "reason": (
-                            f"HF_{entry_type_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)"
+                            f"HF_{entry_type_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_{_atr_label}"
                         ),
                     }
                     continue
                 else:
                     trigger_side = "sell"
-                    _et = "MR" if _mr_short_final else "BREAKOUT"
+                    _et = "MR" if _mr_short_final else ("E30" if _e30_short_final else "BREAKOUT")
                     reason = f"HF_{_et}_5mRSI_ATR({atr_mult:.1f}x)"
 
             if final_long_trig and trigger_side is None:
                 if OPEN_WAIT_NEXT_BAR:
-                    entry_type_tag = "MR" if _mr_long_final else "BREAKOUT"
+                    entry_type_tag = "MR" if _mr_long_final else ("E30" if _e30_long_final else "BREAKOUT")
+                    _atr_label = f"ATR({atr_mult:.1f}x)" if _mr_long_final else f"E30_ATR({atr_mult:.1f}x)"
                     pending_map[symbol] = {
                         "armed":       True,
                         "armed_ts_ms": last_5m_ts,
                         "side":        "buy",
                         "entry_type":  entry_type_tag,
                         "reason": (
-                            f"HF_{entry_type_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)"
+                            f"HF_{entry_type_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_{_atr_label}"
                         ),
                     }
                     continue
