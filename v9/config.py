@@ -171,9 +171,14 @@ SKEW_HEDGE_TRIGGER = 0.12   # ★ PATCH: 15%→12% (시장가 전환 + calc_skew
 # ═══════════════════════════════════════════════════════════════
 TP_LOCK_SKEW_1        = 0.10    # 1개 잠금 발동 스큐
 TP_LOCK_SKEW_2        = 0.20    # 2개 잠금 발동 스큐
+TP_LOCK_SKEW_3        = 0.25    # 3개 잠금 발동 스큐
+
 TP_LOCK_RELEASE_1     = 0.07    # 1개 잠금 해제 스큐
 TP_LOCK_RELEASE_2     = 0.15    # 2개 잠금 해제 스큐
+TP_LOCK_RELEASE_3     = 0.18    # 3개 잠금 해제 스큐
+
 TP_LOCK_HEAVY_ROI     = -3.0    # heavy side 총합 ROI 이하 → 스트레스 ON
+TP_LOCK_MAX           = 3       # 최대 잠금 슬롯 수
 
 GLOBAL_BLACKLIST = [
     "BTC/USDT", "DOGE/USDT", "SHIB/USDT", "PEPE/USDT",

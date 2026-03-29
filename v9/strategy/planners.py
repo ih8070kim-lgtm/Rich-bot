@@ -1810,29 +1810,17 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             else:
                 _trail_squeeze = 0.3  # ★ v10.12: 전 tier 0.3 (백테스트 검증: +$764)
 
-            PROFIT_CAP_TRIGGER = 6.0
-            PROFIT_CAP_EXIT    = 5.0
-
             trailing_triggered = False
             trail_reason       = "TRAILING_STOP"
 
-            if max_roi >= PROFIT_CAP_TRIGGER:
-                _cap_dist = (PROFIT_CAP_TRIGGER - PROFIT_CAP_EXIT) * _trail_squeeze
-                _cap_exit = PROFIT_CAP_TRIGGER - _cap_dist
-                if roi_pct <= _cap_exit:
-                    trailing_triggered = True
-                    trail_reason = f"PROFIT_CAP_{_cap_exit:.1f}PCT(max={max_roi:.1f})"
-            else:
-                # ★ v10.11b: Progressive Trail — 수익 커질수록 거리 줄어듦
-                #   dist = base / (1 + max(0, max_roi) × shrink_rate)
-                #   max=0% → dist=base(넓게), max=2% → dist=base/2(타이트)
-                #   shrink=0.5: max=2에서 exit=1.5 보장
-                _base = 2.0 * _trail_squeeze
-                _shrink = 0.6  # ★ v10.11b: 0.8→0.6 (수익 더 달리게)
-                dist = _base / (1 + max(0.0, max_roi) * _shrink)
-                if roi_pct <= max_roi - dist:
-                    trailing_triggered = True
-                    trail_reason = f"PTRAIL_{dist:.2f}(max={max_roi:.1f})"
+            # ★ V10.16: FIXED gap trail (bt_trail 검증: PROG +747 → FIXED +820)
+            # max_roi 올라가면 손절선도 같은 간격으로 따라감
+            # gap=0.3%: max=2% → stop=1.7% / max=5% → stop=4.7%
+            FIXED_TRAIL_GAP = 0.3
+            _stop = max_roi - FIXED_TRAIL_GAP
+            if roi_pct <= _stop:
+                trailing_triggered = True
+                trail_reason = f"FTRAIL_{FIXED_TRAIL_GAP}(max={max_roi:.1f},stop={_stop:.2f})"
 
             # TP1 하한선 컷
             if p.get("role") in ("HEDGE", "SOFT_HEDGE"):
@@ -2236,15 +2224,15 @@ _tp_lock_prev_count = 0  # 이전 잠금 수 (로그 중복 방지)
 def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
     """
     스큐 + heavy side 스트레스 시 light side 승자의 TP1을 보류.
-    - 발동: abs(skew) >= 0.10 AND heavy_total_roi <= -3.0%
-    - 해제: abs(skew) <= release_thresh
-    - 잠금 대상: light side 포지션 중 노셔널 큰 순
+    - 발동: skew >= thresh AND heavy_total_roi <= -3.0%
+    - 해제: skew <= release_thresh (단계별 히스테리시스)
+    - 잠금 대상: light side 포지션 중 노셔널 큰 순 (최대 3개)
     """
     global _tp_lock_prev_count
     from v9.config import (
-        TP_LOCK_SKEW_1, TP_LOCK_SKEW_2,
-        TP_LOCK_RELEASE_1, TP_LOCK_RELEASE_2,
-        TP_LOCK_HEAVY_ROI,
+        TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_SKEW_3,
+        TP_LOCK_RELEASE_1, TP_LOCK_RELEASE_2, TP_LOCK_RELEASE_3,
+        TP_LOCK_HEAVY_ROI, TP_LOCK_MAX,
     )
     from v9.engines.hedge_core import calc_skew
 
@@ -2271,18 +2259,17 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
             heavy_total_roi += calc_roi_pct(ep, cp, heavy_side, LEVERAGE)
             heavy_count += 1
 
-    # ── 잠금 개수 결정 ──
+    # ── 잠금 개수 결정 (3단계) ──
     stress_on = (heavy_total_roi <= TP_LOCK_HEAVY_ROI) if heavy_count > 0 else False
 
-    if stress_on and skew_val >= TP_LOCK_SKEW_2:
-        target_lock = 2
-    elif stress_on and skew_val >= TP_LOCK_SKEW_1:
-        target_lock = 1
-    else:
-        target_lock = 0
+    _skew_thresholds = [TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_SKEW_3]
+    target_lock = 0
+    if stress_on:
+        for i, th in enumerate(_skew_thresholds[:TP_LOCK_MAX], 1):
+            if skew_val >= th:
+                target_lock = i
 
     # ── 해제 체크 (히스테리시스) ──
-    # 현재 잠긴 포지션 수집
     currently_locked = []
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
@@ -2293,15 +2280,14 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
 
     cur_count = len(currently_locked)
 
-    # 해제 판단
-    if cur_count >= 2 and skew_val <= TP_LOCK_RELEASE_2:
-        target_lock = min(target_lock, 1)  # 2→1 해제
-    if cur_count >= 1 and skew_val <= TP_LOCK_RELEASE_1:
-        target_lock = 0  # 전체 해제
+    # 단계별 해제
+    _release_thresholds = [TP_LOCK_RELEASE_1, TP_LOCK_RELEASE_2, TP_LOCK_RELEASE_3]
+    for i in range(cur_count, 0, -1):
+        if i <= len(_release_thresholds) and skew_val <= _release_thresholds[i-1]:
+            target_lock = min(target_lock, i - 1)
 
     # ── 잠금 대상 선정 (light side, 노셔널 큰 순) ──
     if target_lock > cur_count:
-        # 추가 잠금 필요
         candidates = []
         for sym, sym_st in st.items():
             if not isinstance(sym_st, dict):
