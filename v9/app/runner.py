@@ -493,7 +493,11 @@ def _calc_tp1_params(p: dict) -> tuple:
     else:
         alpha = REBOUND_ALPHA.get(dca_level, 2.0)
         worst = float(p.get("worst_roi", 0.0) or 0.0)
-        target_roi = worst + alpha  # leveraged %
+        # ★ V10.16: min(rebound, 고정alpha) OR
+        target_roi = min(worst + alpha, alpha)
+        # ★ FLOOR: T1~T3만 / T4~T5는 약손실 탈출 허용
+        if dca_level <= 3:
+            target_roi = max(target_roi, 0.3)
 
     # ROI → 가격 역산: roi = ((cp-ep)/ep)*LEV*100 → cp = ep*(1+roi/LEV/100)
     lev = 3.0
