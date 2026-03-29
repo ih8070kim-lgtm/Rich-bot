@@ -1525,11 +1525,16 @@ def plan_dca(
             if tier_now <= _curr_dca_level:
                 continue
 
+            # ★ TP_LOCK force DCA 판정 (블록/필터 바이패스용)
+            _is_force_dca = p.get("tp_lock_force_dca") and _curr_dca_level == 1 and tier_now == 2
+
             # ★ v10.13: DCA 조건 도달 — 차단 여부 확인 → 보험 시그널
             # plan_dca에서 직접 판단 (기존 _scan_dca_blocked_insurance 제거)
             # ep 기준 ROI 불일치 버그 원천 해결
             _block = None
-            if _btc_crash_dca and is_long:
+            if _is_force_dca:
+                pass  # ★ TP_LOCK force DCA: 쿨다운/크래시 바이패스
+            elif _btc_crash_dca and is_long:
                 _block = "BTC_CRASH"
             elif _killswitch_dca:
                 _block = "KILLSWITCH"
@@ -1552,7 +1557,8 @@ def plan_dca(
 
             # ── 차단 아님 → 품질 필터 + DCA 진입 ──
             # ★ v10.14c: corr 부족도 보험 트리거 (기존: 보험 없이 DCA만 스킵 → SL 직행)
-            if corr < DCA_MIN_CORR:
+            # ★ TP_LOCK force_dca는 품질 필터 바이패스
+            if not _is_force_dca and corr < DCA_MIN_CORR:
                 if not p.get("insurance_sh_trigger"):
                     p["insurance_sh_trigger"] = "CORR_LOW"
                     print(f"[INSURANCE] {symbol} DCA T{tier_now} corr={corr:.2f}<{DCA_MIN_CORR} → 보험")
@@ -1564,6 +1570,8 @@ def plan_dca(
             # T2/T3: RSI 느슨한 필터 (≤45 or hook≤45) / T4: 무조건 통과
             if tier_now >= 4:
                 rsi_ok = True
+            elif _is_force_dca:
+                rsi_ok = True  # ★ TP_LOCK force DCA는 RSI 무시
             elif is_long:
                 rsi_ok = (rsi_now <= 45) or (rsi_now > rsi_prev and rsi_prev <= 45)
             else:
@@ -1716,9 +1724,6 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 # ★ V10.16: min(rebound, 고정alpha) OR
                 # worst 양수(DCA 승격 등)일 때 alpha가 cap → TP1 도달 가능
                 tp1_thresh = min(_worst + _alpha, _alpha)
-                _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
-                _worst = float(p.get("worst_roi", 0.0) or 0.0)
-                tp1_thresh = _worst + _alpha
 
             # ★ FLOOR: T1~T3만 손실 TP1 방지 / T4~T5는 약손실 탈출 허용
             if dca_level <= 3:
@@ -2324,6 +2329,21 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
             if isinstance(p, dict) and p.get("tp_locked"):
                 currently_locked.append((sym, pos_side, p))
 
+    # ★ 방향 전환 보호: 잠긴 포지션이 heavy side로 바뀌면 즉시 해제
+    _side_flipped = []
+    for sym, pos_side, p in currently_locked:
+        if pos_side == heavy_side:  # 잠긴 애가 이제 heavy side
+            p["tp_locked"] = False
+            p["tp_lock_reason"] = ""
+            p["tp_lock_ts"] = None
+            p["tp_lock_force_dca"] = False
+            _side_flipped.append(sym)
+            print(f"[TP_LOCK_OFF] {sym} {pos_side} reason=SIDE_FLIPPED "
+                  f"(was light, now heavy) skew={skew_val:.2f}")
+    if _side_flipped:
+        currently_locked = [(s,sd,p) for s,sd,p in currently_locked
+                            if s not in _side_flipped]
+
     cur_count = len(currently_locked)
 
     # 단계별 해제
@@ -2383,6 +2403,7 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
             p["tp_locked"] = False
             p["tp_lock_reason"] = ""
             p["tp_lock_ts"] = None
+            p["tp_lock_force_dca"] = False  # ★ 미완료 force_dca도 클리어
             reason = "SKEW_NORMALIZED"
             print(f"[TP_LOCK_OFF] {sym} {pos_side} reason={reason} skew={skew_val:.2f}")
 
