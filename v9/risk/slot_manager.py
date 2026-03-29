@@ -64,19 +64,19 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
             else:              risk_short_f += 1.0
 
         # ── pending_entry ────────────────────────────────────────
-        if not role_filter:  # pending은 전체 카운트에서만
-            for pe_side in ("buy", "sell"):
-                pe = get_pending_entry(sd, pe_side)
-                if not pe:
-                    continue
-                hard_total += 1
-                risk_total_f += 1.0
-                if pe_side == "buy":
-                    hard_long    += 1
-                    risk_long_f  += 1.0
-                else:
-                    hard_short   += 1
-                    risk_short_f += 1.0
+        # ★ FIX: role_filter 있어도 pending 카운트 (limit 미체결 → 슬롯 초과 방지)
+        for pe_side in ("buy", "sell"):
+            pe = get_pending_entry(sd, pe_side)
+            if not pe:
+                continue
+            hard_total += 1
+            risk_total_f += 1.0
+            if pe_side == "buy":
+                hard_long    += 1
+                risk_long_f  += 1.0
+            else:
+                hard_short   += 1
+                risk_short_f += 1.0
 
     import math
     risk_total = math.ceil(risk_total_f - 0.0001) if risk_total_f > 0 else 0
