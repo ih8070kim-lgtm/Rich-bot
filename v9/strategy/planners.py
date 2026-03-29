@@ -1820,6 +1820,10 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                       f"slot={_iter_side} p.side={p.get('side')} → 스킵")
                 continue
 
+            # ★ FIX: 이미 청산 주문 진행 중이면 스킵 (TRAIL_ON 30건/5분 스팸 방지)
+            if p.get("pending_close"):
+                continue
+
             roi_pct = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
             max_roi = p.get("max_roi_seen", roi_pct)
             if roi_pct > max_roi:
