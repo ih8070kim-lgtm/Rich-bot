@@ -1672,6 +1672,10 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
         # ★ v10.13: TP1 선주문 활성이면 plan_tp1 스킵 (runner가 관리)
         if p.get("tp1_preorder_id"):
             continue
+        # ★ V10.16 FIX: exit_fail_cooldown 체크 (-2022 무한반복 방지)
+        _sym_st_tp1 = st.get(symbol, {})
+        if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
+            continue
 
         # ★ V10.16: TP_LOCK — 잠긴 포지션은 TP1 보류
         if p.get("tp_locked"):
@@ -1823,6 +1827,10 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             if p.get("side", "") != _expected_side:
                 print(f"[TRAIL_GUARD] {symbol} side 불일치! "
                       f"slot={_iter_side} p.side={p.get('side')} → 스킵")
+                continue
+
+            # ★ V10.16 FIX: exit_fail_cooldown 체크 (-2022 무한반복 방지)
+            if float(sym_st.get("exit_fail_cooldown_until", 0.0) or 0.0) > now:
                 continue
 
             # ★ FIX: 이미 청산 주문 진행 중이면 스킵 (TRAIL_ON 30건/5분 스팸 방지)
@@ -2062,19 +2070,24 @@ def plan_force_close(
                 force  = True
                 reason = _h_reason
 
-        # ★ v10.10: INSURANCE_SH — timecut 청산
+        # ★ V10.16: INSURANCE_SH — 60초 타임컷 + 수익 기반 분기
         elif p.get("role") == "INSURANCE_SH":
             _ins_time = float(p.get("time", now) or now)
-            _ins_timecut = float(p.get("insurance_timecut", 300) or 300)
             _ins_age = now - _ins_time
 
-            # ★ v10.12: 30초 방향 체크 제거 — timecut까지 유지
-            # 폭락 시 일시 반등으로 오판하여 보험을 30초에 버리는 문제 수정
-
-            # 기존 timecut
-            if not force and _ins_age >= _ins_timecut:
-                force  = True
-                reason = f"INSURANCE_SH_TIMECUT({_ins_timecut/60:.0f}m)"
+            # 60초 경과 시 수익/손실에 따라 분기
+            if not force and _ins_age >= 60:
+                if roi_pct > 0:
+                    # ★ 수익 → trailing 전환 (plan_trail_on이 관리)
+                    p["step"] = 1
+                    p["tp1_done"] = True
+                    p["trailing_on_time"] = now
+                    p["max_roi_seen"] = max(float(p.get("max_roi_seen", 0) or 0), roi_pct)
+                    print(f"[INSURANCE_SH] {symbol} 60s roi={roi_pct:+.1f}% → trailing 전환")
+                    continue  # force close 하지 않음 — trailing으로 위임
+                else:
+                    force  = True
+                    reason = f"INSURANCE_SH_TIMECUT(60s,roi={roi_pct:+.1f}%)"
 
         else:
             # ── HARD_SL (CORE 포지션 전용) ────────────────────────
@@ -2105,7 +2118,10 @@ def plan_force_close(
                 _entry_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
                 _sl_ep = float(p.get(_entry_keys.get(_dca_lv_sl, ""), 0.0) or 0.0)
                 if _sl_ep <= 0:
-                    _sl_ep = float(p.get("original_ep", 0.0) or p.get("ep", 0.0))
+                    # ★ V10.16 FIX: original_ep 폴백 → ep(평단) 폴백
+                    # 재시작/sync로 tier entry price 유실 시 original_ep(T1가)로 계산하면
+                    # DCA 후 평단이 낮아진 것을 반영하지 못해 조기 SL 발동
+                    _sl_ep = float(p.get("ep", 0.0) or 0.0)
 
             if _sl_ep > 0:
                 _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
@@ -2237,7 +2253,7 @@ def plan_insurance_sh(
             # 이 지점까지 오면 opp 체크 통과 = 반대 포지션 확실히 없음
             # 기존 60%는 반대 포지션 있을 때를 위한 로직이었으나, 없으면 의미 없음
             qty = src_amt  # 100% always
-            timecut = 300 if trigger in ("BTC_CRASH", "KILLSWITCH") else 180
+            timecut = 60  # ★ V10.16: 전 트리거 60초 통일
 
             intents.append(Intent(
                 trace_id=_tid(),
@@ -2390,6 +2406,16 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
             # ★ T1이면 T2로 강제 DCA → 완충재 승격
             if int(p.get("dca_level", 1) or 1) == 1:
                 p["tp_lock_force_dca"] = True
+                # ★ V10.16 FIX: dca_targets 없으면 재생성 (RECOVERED 포지션 방어)
+                if not p.get("dca_targets"):
+                    _fd_ep = float(p.get("ep", 0) or 0)
+                    _fd_amt = float(p.get("amt", 0) or 0)
+                    if _fd_ep > 0 and _fd_amt > 0:
+                        _fd_grid = (_fd_ep * _fd_amt) * (sum(DCA_WEIGHTS) / DCA_WEIGHTS[0])
+                        _fd_regime = p.get("locked_regime", "LOW")
+                        _fd_targets = _build_dca_targets(_fd_ep, p.get("side", "buy"), _fd_grid, _fd_regime)
+                        p["dca_targets"] = [t for t in _fd_targets if t.get("tier", 0) > 1]
+                        print(f"[TP_LOCK_DCA] {sym} dca_targets 재생성 {len(p['dca_targets'])}개 (force_dca용)")
             print(f"[TP_LOCK_ON] {sym} {light_side} lock_n={target_lock} "
                   f"skew={skew_val:.2f} heavy_roi={heavy_total_roi:.1f}% "
                   f"dca={p.get('dca_level',1)} roi={_roi:+.1f}%"

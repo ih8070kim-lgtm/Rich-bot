@@ -308,13 +308,13 @@ def apply_order_results(
                     )
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
-            # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE에 orphan 플래그 세팅
+            # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE/CORE_HEDGE에 orphan 플래그 세팅
             if p and _closing_role != "HEDGE":
                 _opp_side_orphan = "sell" if pos_side == "buy" else "buy"
                 _opp_p_orphan = get_p(st.get(sym, {}), _opp_side_orphan)
-                if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") == "HEDGE":
+                if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") in ("HEDGE", "CORE_HEDGE"):
                     _opp_p_orphan["source_sl_orphan"] = True
-                    print(f"[strategy_core] {sym} CORE 청산 → HEDGE source_sl_orphan 세팅")
+                    print(f"[strategy_core] {sym} CORE 청산 → {_opp_p_orphan.get('role')} source_sl_orphan 세팅")
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 

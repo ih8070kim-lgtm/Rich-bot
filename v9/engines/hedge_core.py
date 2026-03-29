@@ -342,28 +342,9 @@ def plan_hedge_core_manage(
                     print(f"[T5_MINI] {sym} {pos_side} 미니게임 폴백 시작 roi={hedge_roi:+.1f}%")
                 continue  # 미니게임 중 → manage 관여 없음, plan_tp1/plan_force_close가 담당
 
-            # ── v10.11b: 소스 소멸/TP1 → 수익 0.4% 이상이면 즉시 청산, 미만이면 CORE_MR 전환 ──
-            # ★ PATCH: 소스 사라졌을 때 헷지가 수익 중이면 바로 확정
-            # 이유: CORE_MR 전환 후 추가 DCA 받다가 수익이 날아가는 케이스 방지
-            # 손실 중이면 기존대로 CORE_MR 전환 (자체 라이프사이클로 수익 극대화)
-            _HC_PROFIT_CLOSE_THRESH = 0.4  # % (레버리지 기준)
-            if hedge_roi >= _HC_PROFIT_CLOSE_THRESH:
-                hedge_amt = float(hedge.get("amt", 0.0))
-                if hedge_amt > 0:
-                    close_side = "sell" if pos_side == "buy" else "buy"
-                    reason = "HC_SRC_TP1_PROFIT" if source_tp1 else "HC_SRC_GONE_PROFIT"
-                    intents.append(Intent(
-                        trace_id=_tid(),
-                        intent_type=IntentType.FORCE_CLOSE,
-                        symbol=sym,
-                        side=close_side,
-                        qty=hedge_amt,
-                        price=cp,
-                        reason=f"{reason}(roi={hedge_roi:+.1f}%)",
-                        metadata={"_expected_role": "CORE_HEDGE"},
-                    ))
-                    print(f"[HEDGE_CORE] {sym} {pos_side} 소스 소멸 + 수익 {hedge_roi:+.1f}% ≥ {_HC_PROFIT_CLOSE_THRESH}% → 즉시 청산")
-                continue
+            # ── V10.16: 소스 소멸 → 수익이면 전체 trailing, 손실이면 CORE_MR 전환 ──
+            # ★ 소스 HARD_SL 시 헷지는 대체로 큰 수익 → trailing으로 극대화
+            # ★ 소스 TP1→trailing exit 시에도 동일 (수익 확정 경로 통일)
             hedge["role"] = "CORE_MR"
             hedge["source_sym"] = ""
             hedge["source_side"] = ""
@@ -372,26 +353,38 @@ def plan_hedge_core_manage(
             if int(hedge.get("dca_level", 1) or 1) < 2:
                 hedge["dca_level"] = 2
 
-            # ★ v10.11b: 전환 시 dca_targets 재생성 (비어있으면 DCA 안 나감)
-            try:
-                from v9.strategy.planners import _build_dca_targets
-                _h_ep = float(hedge.get("ep", 0) or 0)
-                _h_side = hedge.get("side", "buy")
-                _h_amt = float(hedge.get("amt", 0) or 0)
-                _h_dca = int(hedge.get("dca_level", 2) or 2)  # ★ v10.15: 최소 2
-                _h_notional = _h_ep * _h_amt
-                _cum_w = sum(DCA_WEIGHTS[:_h_dca]) if _h_dca <= len(DCA_WEIGHTS) else sum(DCA_WEIGHTS)
-                _total_w = sum(DCA_WEIGHTS)
-                _grid_est = _h_notional / (_cum_w / _total_w) if _cum_w > 0 else _h_notional * 5
-                _all_targets = _build_dca_targets(_h_ep, _h_side, _grid_est, hedge.get("locked_regime", "LOW"))
-                hedge["dca_targets"] = [t for t in _all_targets if t.get("tier", 0) > _h_dca]
-                print(f"[HEDGE_CORE→MR] {sym} dca_targets 재생성: {len(hedge['dca_targets'])}개 (T{_h_dca+1}부터)")
-            except Exception as _e:
-                print(f"[HEDGE_CORE→MR] {sym} dca_targets 생성 실패(무시): {_e}")
+            if hedge_roi > 0:
+                # ★ 수익 → 전체 trailing (즉시 청산 대신 수익 극대화)
+                hedge["step"] = 1
+                hedge["tp1_done"] = True
+                hedge["trailing_on_time"] = time.time()
+                hedge["max_roi_seen"] = max(hedge_roi, float(hedge.get("max_roi_seen", 0) or 0))
+                hedge["max_dca_reached"] = True  # 추가 DCA 차단
+                reason = "HC_SRC_TP1_TRAIL" if source_tp1 else "HC_SRC_GONE_TRAIL"
+                print(f"[HEDGE_CORE→TRAIL] {sym} {pos_side} {reason} "
+                      f"roi={hedge_roi:+.1f}% → 전체 trailing 전환")
+            else:
+                # ★ 손실 → CORE_MR step=0 전환 (자체 라이프사이클로 복구 시도)
+                # dca_targets 재생성 (비어있으면 DCA 안 나감)
+                try:
+                    from v9.strategy.planners import _build_dca_targets
+                    _h_ep = float(hedge.get("ep", 0) or 0)
+                    _h_side = hedge.get("side", "buy")
+                    _h_amt = float(hedge.get("amt", 0) or 0)
+                    _h_dca = int(hedge.get("dca_level", 2) or 2)
+                    _h_notional = _h_ep * _h_amt
+                    _cum_w = sum(DCA_WEIGHTS[:_h_dca]) if _h_dca <= len(DCA_WEIGHTS) else sum(DCA_WEIGHTS)
+                    _total_w = sum(DCA_WEIGHTS)
+                    _grid_est = _h_notional / (_cum_w / _total_w) if _cum_w > 0 else _h_notional * 5
+                    _all_targets = _build_dca_targets(_h_ep, _h_side, _grid_est, hedge.get("locked_regime", "LOW"))
+                    hedge["dca_targets"] = [t for t in _all_targets if t.get("tier", 0) > _h_dca]
+                    print(f"[HEDGE_CORE→MR] {sym} dca_targets 재생성: {len(hedge['dca_targets'])}개 (T{_h_dca+1}부터)")
+                except Exception as _e:
+                    print(f"[HEDGE_CORE→MR] {sym} dca_targets 생성 실패(무시): {_e}")
 
-            reason = "HC_CONVERT_TP1" if source_tp1 else "HC_CONVERT_GONE"
-            print(f"[HEDGE_CORE→MR] {sym} {pos_side} 전환: {reason} "
-                  f"roi={hedge_roi:+.1f}% → 독립 코어로 운영 (자체 TP1 대기)")
+                reason = "HC_CONVERT_TP1" if source_tp1 else "HC_CONVERT_GONE"
+                print(f"[HEDGE_CORE→MR] {sym} {pos_side} 전환: {reason} "
+                      f"roi={hedge_roi:+.1f}% → 독립 코어로 운영 (자체 TP1 대기)")
 
     return intents
 

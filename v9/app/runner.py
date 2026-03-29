@@ -363,10 +363,10 @@ def _trim_ohlcv_pool(snapshot) -> None:
     pool = getattr(snapshot, 'ohlcv_pool', None)
     if not pool:
         return
-    MAX_1M  = 300
-    MAX_5M  = 100   # [추가-2 FIX] 5m 50봉 × 2배 여유
-    MAX_15M = 150
-    MAX_1H  = 50    # [추가-2 FIX] 1h 25봉 × 2배 여유
+    MAX_1M  = 200   # ★ V10.16: 300→200 (planners 최대 65봉 × 3배 여유)
+    MAX_5M  = 80    # 5m 40봉 × 2배 여유
+    MAX_15M = 100   # 15m 50봉 × 2배 여유
+    MAX_1H  = 40    # 1h 20봉 × 2배 여유
     for sym in pool:
         tf_map = pool[sym]
         if not isinstance(tf_map, dict):
@@ -471,7 +471,7 @@ def _calc_tp1_params(p: dict) -> tuple:
     ★ BAD 모드: T1이면 고정 2.0% TP1
     반환: (target_price, close_qty, ref_ep, alpha) 또는 (None,)*4
     """
-    from v9.config import REBOUND_ALPHA, TP1_PARTIAL_RATIO
+    from v9.config import REBOUND_ALPHA, TP1_PARTIAL_RATIO, LEVERAGE as _LEV
     dca_level = int(p.get("dca_level", 1) or 1)
     side = p.get("side", "buy")
     amt = float(p.get("amt", 0) or 0)
@@ -500,7 +500,7 @@ def _calc_tp1_params(p: dict) -> tuple:
             target_roi = max(target_roi, 0.3)
 
     # ROI → 가격 역산: roi = ((cp-ep)/ep)*LEV*100 → cp = ep*(1+roi/LEV/100)
-    lev = 3.0
+    lev = float(_LEV)
     if side == "buy":
         target = ep * (1.0 + target_roi / lev / 100.0)
     else:
