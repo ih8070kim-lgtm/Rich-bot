@@ -253,6 +253,9 @@ from v9.config import (
     PULLBACK_DIST_ATR, ASYM_OPEN_RATIO, HEDGE_MODE,
     REBOUND_ALPHA,  # ★ v10.14c: min_roi 반등 TP1
     OPEN_CORR_MIN,  # ★ PATCH: config 통합
+    TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_RELEASE,
+    TP_LOCK_STRESS_ROI, TP_LOCK_STRESS_MULT,
+    TP_LOCK_MIN_ROI, TP_LOCK_EXIT_ROI,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1614,12 +1617,124 @@ def plan_dca(
 
 
 # ═════════════════════════════════════════════════════════════════
+# TP Lock — 마진 불균형 시 light side 익절 잠금 (★ v10.16)
+# ═════════════════════════════════════════════════════════════════
+_tp_lock_active = False   # 히스테리시스 상태
+
+def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
+    """마진 불균형 시 light side 상위 슬롯의 (symbol, side) set 반환.
+
+    반환된 키에 해당하는 포지션은 TP1/TP2를 스킵해야 한다.
+    """
+    global _tp_lock_active
+
+    total_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+    if total_cap <= 0:
+        return set()
+
+    skew, long_m, short_m = calc_skew(st, total_cap)
+
+    # ── 히스테리시스: 이미 활성이면 RELEASE 기준, 비활성이면 SKEW_1 기준 ──
+    if not _tp_lock_active and skew < TP_LOCK_SKEW_1:
+        return set()
+    if _tp_lock_active and skew < TP_LOCK_RELEASE:
+        _tp_lock_active = False
+        print(f"[TP_LOCK] OFF — skew={skew:.3f} < release={TP_LOCK_RELEASE}")
+        return set()
+
+    _tp_lock_active = True
+
+    heavy_side = "buy" if long_m > short_m else "sell"
+    light_side = "sell" if heavy_side == "buy" else "buy"
+
+    # ── Heavy side 스트레스 감지 ──
+    heavy_stressed = False
+    for sym, sym_st in st.items():
+        hp = get_p(sym_st, heavy_side)
+        if not isinstance(hp, dict):
+            continue
+        cp = float((snapshot.all_prices or {}).get(sym, 0.0))
+        if cp <= 0:
+            continue
+        roi = calc_roi_pct(float(hp.get("ep", 0)), cp, heavy_side, LEVERAGE)
+        if roi <= TP_LOCK_STRESS_ROI:
+            heavy_stressed = True
+            break
+
+    stress_mult = TP_LOCK_STRESS_MULT if heavy_stressed else 1.0
+    thresh_1 = TP_LOCK_SKEW_1 * stress_mult
+    thresh_2 = TP_LOCK_SKEW_2 * stress_mult
+
+    if skew >= thresh_2:
+        lock_count = 2
+    elif skew >= thresh_1:
+        lock_count = 1
+    else:
+        # 히스테리시스 유지 중이지만 스트레스 보정 후 미달
+        return set()
+
+    # ── Light side 후보: 미실현 PnL 내림차순 ──
+    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
+    candidates = []   # (symbol, side, unrealized_pnl, roi)
+    light_total = 0
+
+    for sym, sym_st in st.items():
+        lp = get_p(sym_st, light_side)
+        if not isinstance(lp, dict):
+            continue
+        if lp.get("role", "") in _HEDGE_ROLES:
+            continue
+        light_total += 1
+        cp = float((snapshot.all_prices or {}).get(sym, 0.0))
+        if cp <= 0:
+            continue
+        amt = float(lp.get("amt", 0))
+        ep  = float(lp.get("ep", 0))
+        roi = calc_roi_pct(ep, cp, light_side, LEVERAGE)
+        # ROI < 최소 기준 → 잠금 제외 (역전 리스크)
+        if roi < TP_LOCK_MIN_ROI:
+            continue
+        # 수익 소진 해제 (ROI < EXIT 기준)
+        if roi < TP_LOCK_EXIT_ROI:
+            continue
+        # 미실현 PnL 계산 (절대금액)
+        if light_side == "buy":
+            pnl = amt * (cp - ep)
+        else:
+            pnl = amt * (ep - cp)
+        candidates.append((sym, light_side, pnl, roi))
+
+    # ── 안전장치: light side 전부 잠금 금지 ──
+    lock_count = min(lock_count, max(0, light_total - 1))
+    if lock_count <= 0:
+        return set()
+
+    # PnL 내림차순 정렬 → 상위 N개 잠금
+    candidates.sort(key=lambda x: -x[2])
+    locked = set()
+    for i, (sym, side, pnl, roi) in enumerate(candidates):
+        if i >= lock_count:
+            break
+        locked.add((sym, side))
+        print(f"[TP_LOCK] {sym} {side} LOCKED — pnl=${pnl:.1f} roi={roi:.1f}% "
+              f"(skew={skew:.3f}, stress={'Y' if heavy_stressed else 'N'})")
+
+    return locked
+
+
+# ═════════════════════════════════════════════════════════════════
 # TP1 Planner
 # ═════════════════════════════════════════════════════════════════
 def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
+    # ★ v10.16: TP Lock — 마진 불균형 시 light side 익절 잠금
+    _tp_locked = _calc_tp_lock(snapshot, st)
+
     intents: List[Intent] = []
     for symbol, p in _pos_items(st):
         if p.get("step", 0) != 0 or p.get("tp1_done"):
+            continue
+        # ★ v10.16: TP Lock 가드
+        if (symbol, p.get("side", "")) in _tp_locked:
             continue
         # ★ v10.8: pending 주문 있으면 스킵 (TP1 295회 반복 방지)
         if p.get("pending_close"):
@@ -1704,9 +1819,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 # TP2 Planner
 # ═════════════════════════════════════════════════════════════════
 def plan_tp2(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
+    # ★ v10.16: TP Lock 재사용 (plan_tp1에서 이미 계산, 캐시 활용)
+    _tp_locked = _calc_tp_lock(snapshot, st)
+
     intents: List[Intent] = []
     for symbol, p in _pos_items(st):
         if p.get("step", 0) != 1 or p.get("tp2_done"):
+            continue
+        # ★ v10.16: TP Lock 가드
+        if (symbol, p.get("side", "")) in _tp_locked:
             continue
 
         curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
