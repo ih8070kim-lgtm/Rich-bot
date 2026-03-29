@@ -170,7 +170,7 @@ SKEW_HEDGE_TRIGGER = 0.12   # ★ PATCH: 15%→12% (시장가 전환 + calc_skew
 # heavy side 스트레스 시 light side 승자의 TP1을 보류 → 계좌 완충
 # ═══════════════════════════════════════════════════════════════
 TP_LOCK_SKEW_1        = 0.10    # 1개 잠금 발동 스큐
-TP_LOCK_SKEW_2        = 0.20    # 2개 잠금 발동 스큐
+TP_LOCK_SKEW_2        = 0.18    # 2개 잠금 발동 스큐
 TP_LOCK_SKEW_3        = 0.25    # 3개 잠금 발동 스큐
 
 TP_LOCK_RELEASE_1     = 0.07    # 1개 잠금 해제 스큐
