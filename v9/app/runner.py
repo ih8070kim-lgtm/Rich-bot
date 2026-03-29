@@ -546,6 +546,10 @@ async def _manage_tp1_preorders(ex, st, snapshot):
             if role in ("CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"):
                 continue
 
+            # ★ V10.16: TP_LOCK — 잠긴 포지션은 선주문도 안 걸음
+            if p.get("tp_locked"):
+                continue
+
             oid = p.get("tp1_preorder_id")
             dca = int(p.get("dca_level", 1) or 1)
 
@@ -1100,6 +1104,12 @@ async def _main_loop(ex_init, dry_run: bool):
             # pending_dca도 클리어 (이전 limit DCA 미체결 잔여)
             if isinstance(_sc_p, dict) and _sc_p.get('pending_dca'):
                 _sc_p['pending_dca'] = None
+                _startup_clear_count += 1
+            # ★ V10.16: tp_locked도 재시작 시 클리어 (런타임 상태)
+            if isinstance(_sc_p, dict) and _sc_p.get('tp_locked'):
+                _sc_p['tp_locked'] = False
+                _sc_p['tp_lock_reason'] = ""
+                _sc_p['tp_lock_ts'] = None
                 _startup_clear_count += 1
     if _startup_clear_count > 0:
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
