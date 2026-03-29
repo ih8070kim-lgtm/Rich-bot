@@ -1114,6 +1114,10 @@ async def _main_loop(ex_init, dry_run: bool):
                 _sc_p['tp_locked'] = False
                 _sc_p['tp_lock_reason'] = ""
                 _sc_p['tp_lock_ts'] = None
+                _sc_p['tp_lock_force_dca'] = False
+                _startup_clear_count += 1
+            elif isinstance(_sc_p, dict) and _sc_p.get('tp_lock_force_dca'):
+                _sc_p['tp_lock_force_dca'] = False
                 _startup_clear_count += 1
     if _startup_clear_count > 0:
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
