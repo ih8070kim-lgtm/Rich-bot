@@ -480,11 +480,9 @@ def _calc_tp1_params(p: dict) -> tuple:
     if amt <= 0 or ep <= 0:
         return None, None, None, None
 
-    # ★ V10.17: BAD T1 스캘핑 삭제 — 통일 rebound alpha
     alpha = REBOUND_ALPHA.get(dca_level, 2.0)
     worst = float(p.get("worst_roi", 0.0) or 0.0)
     target_roi = min(worst + alpha, alpha)
-    # ★ FLOOR: T1~T3만 / T4~T5는 약손실 탈출 허용
     if dca_level <= 3:
         target_roi = max(target_roi, 0.3)
 
@@ -541,6 +539,14 @@ async def _manage_tp1_preorders(ex, st, snapshot):
 
             # ★ V10.16: TP_LOCK — 잠긴 포지션은 선주문도 안 걸음
             if p.get("tp_locked"):
+                continue
+
+            # ★ V10.17 Rule B: Light side 마지막 슬롯 — 선주문 차단
+            from v9.strategy.planners import _count_active_by_side
+            _pr_longs, _pr_shorts = _count_active_by_side(st)
+            if pos_side == "buy" and _pr_longs <= 1 and _pr_shorts >= 2:
+                continue
+            if pos_side == "sell" and _pr_shorts <= 1 and _pr_longs >= 2:
                 continue
 
             oid = p.get("tp1_preorder_id")
@@ -625,8 +631,7 @@ async def _manage_tp1_preorders(ex, st, snapshot):
                         _tp1_roi = abs(raw_pnl / (old_ep * filled) * 3.0 * 100) if old_ep * filled > 0 else 0
                         asyncio.ensure_future(_notify_async_fill(
                             sym, pos_side, avg_price, filled, "TP1_PRE",
-                            pnl=raw_pnl, roi=_tp1_roi, ep=old_ep,
-                            role=p.get("role", ""),
+                            pnl=raw_pnl, roi=_tp1_roi, ep=old_ep, role=p.get("role", ""),
                         ))
                     # ★ v10.14: 전량 체결 시(amt≤0) 포지션 클리어 (무한 trailing 방지)
                     if p["amt"] <= 0:
@@ -876,9 +881,9 @@ async def _manage_pending_limits(ex, st, snapshot):
                         print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소")
                         # ★ V10.17: 부분체결 텔레그램 알림
                         if _TELEGRAM_OK:
-                            _pf_type = "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN"
                             asyncio.ensure_future(_notify_async_fill(
-                                info["sym"], info["side"], avg_p, part_filled, _pf_type,
+                                info["sym"], info["side"], avg_p, part_filled,
+                                "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN",
                                 tier=info.get("tier", 0), role=info.get("role", ""),
                             ))
                 except Exception:
