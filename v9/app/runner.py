@@ -232,6 +232,154 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
                 set_p(sym_st, side, None)
 
 
+# ═══════════════════════════════════════════════════════════════
+# 다운타임 중 청산된 포지션 감지 및 텔레그램 알림
+# ═══════════════════════════════════════════════════════════════
+async def _check_downtime_trades(ex, st: dict, system_state: dict):
+    """재시작 시 다운타임 동안 청산된 포지션을 감지하고 텔레그램으로 알림.
+
+    동작 원리:
+      1. system_state['_last_save_ts'] (마지막 저장 시각) 확인
+      2. 포지션북에 있던 포지션 중 현재 바이낸스에 없는 것 = 다운타임 중 청산
+      3. 해당 심볼의 fetch_my_trades로 청산가 / 실현PnL 조회
+      4. 텔레그램 알림 발송
+    """
+    last_save_ts = float(system_state.get('_last_save_ts', 0.0) or 0.0)
+    if last_save_ts <= 0:
+        print("[DOWNTIME] 이전 저장 기록 없음 — 다운타임 체크 생략")
+        return
+
+    downtime_sec = time.time() - last_save_ts
+    if downtime_sec < 60:
+        # 1분 미만 재시작은 정상 범위
+        return
+
+    print(f"[DOWNTIME] ★ 다운타임 {downtime_sec / 60:.1f}분 감지 — 청산 이력 확인 중...")
+
+    # ── 포지션북에 있던 활성 포지션 수집 ──
+    book_positions: dict = {}
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for side, p in iter_positions(sym_st):
+            if p is None:
+                continue
+            if float(p.get('amt', 0) or 0) > 0:
+                book_positions[(sym, side)] = dict(p)
+
+    if not book_positions:
+        return
+
+    # ── 현재 바이낸스 포지션 조회 ──
+    try:
+        ex_positions = await asyncio.to_thread(ex.fetch_positions)
+    except Exception as e:
+        print(f"[DOWNTIME] fetch_positions 실패(무시): {e}")
+        return
+
+    ex_active: set = set()
+    for pos in ex_positions:
+        contracts = float(pos.get('contracts', 0) or 0)
+        if contracts <= 0:
+            continue
+        raw_sym = pos.get('symbol', '')
+        sym = raw_sym.replace(':USDT', '') if ':USDT' in raw_sym else raw_sym
+        side_raw = pos.get('side', '')
+        ex_active.add((sym, "buy" if side_raw == "long" else "sell"))
+
+    # ── 다운타임 중 청산된 포지션 = 북에 있으나 거래소에 없는 것 ──
+    closed = [
+        (sym, side, p)
+        for (sym, side), p in book_positions.items()
+        if (sym, side) not in ex_active
+    ]
+
+    if not closed:
+        print("[DOWNTIME] 다운타임 중 청산된 포지션 없음")
+        return
+
+    print(f"[DOWNTIME] ★ 청산 감지 {len(closed)}건: "
+          f"{[f'{s}({d})' for s, d, _ in closed]}")
+
+    since_ms = int(last_save_ts * 1000)
+
+    from v9.config import LEVERAGE, FEE_RATE
+
+    for sym, side, p in closed:
+        ep   = float(p.get('ep',  0.0) or 0.0)
+        amt  = float(p.get('amt', 0.0) or 0.0)
+        role = str(p.get('role', 'CORE_MR') or 'CORE_MR')
+        dca  = int(p.get('dca_level', 1) or 1)
+
+        close_price        = 0.0
+        total_realized_pnl = 0.0
+        close_time_str     = ""
+
+        try:
+            trades = await asyncio.to_thread(ex.fetch_my_trades, sym, since=since_ms)
+            # 청산 = 반대 방향 트레이드
+            close_side_str = "sell" if side == "buy" else "buy"
+            close_trades = [t for t in trades if t.get('side', '') == close_side_str]
+            if close_trades:
+                last_t      = close_trades[-1]
+                close_price = float(last_t.get('price', 0) or 0)
+                ts_ms       = float(last_t.get('timestamp', 0) or 0)
+                if ts_ms > 0:
+                    close_time_str = datetime.fromtimestamp(ts_ms / 1000).strftime('%m/%d %H:%M')
+                # Binance info.realizedPnl 합산 (수수료 포함 실현손익)
+                for t in close_trades:
+                    rpnl = float((t.get('info') or {}).get('realizedPnl', 0.0) or 0.0)
+                    total_realized_pnl += rpnl
+        except Exception as e:
+            print(f"[DOWNTIME] {sym} fetch_my_trades 실패(무시): {e}")
+
+        # ── ROI 계산 ──
+        notional = amt * ep if ep > 0 else 0.0
+        if notional > 0 and total_realized_pnl != 0:
+            # 실현PnL이 있으면 그것 기준
+            roi = total_realized_pnl / (notional / LEVERAGE) * 100
+        elif ep > 0 and close_price > 0:
+            # fallback: 가격 기반 추정
+            raw     = (close_price - ep) / ep if side == "buy" else (ep - close_price) / ep
+            fee_pct = (ep + close_price) / ep * FEE_RATE
+            roi     = (raw - fee_pct) * LEVERAGE * 100
+            total_realized_pnl = (raw - fee_pct) * notional
+        else:
+            roi = 0.0
+
+        emoji     = "🟢" if total_realized_pnl >= 0 else "🔴"
+        dir_str   = "롱" if side == "buy" else "숏"
+        close_str = f"{close_price:.4f}" if close_price > 0 else "미확인"
+        if "HEDGE" in role:
+            badge = "🛡️ "
+        elif "INSURANCE" in role:
+            badge = "🩹 "
+        elif "BALANCE" in role:
+            badge = "⚖️ "
+        else:
+            badge = "🔁 "
+
+        msg = (
+            f"⚠️ <b>다운타임 청산</b> {badge}\n"
+            f"────────────────\n"
+            f"📌 <b>{sym}</b> {dir_str} T{dca}\n"
+            f"💵 진입가: {ep:.4f}  →  청산가: {close_str}\n"
+            f"{emoji} <b>{roi:+.2f}%</b>  💵 <b>${total_realized_pnl:+.2f}</b>\n"
+            f"🕒 다운타임 {downtime_sec / 60:.0f}분"
+            + (f"  ({close_time_str})" if close_time_str else "") + "\n"
+        )
+
+        if _TELEGRAM_OK:
+            try:
+                from telegram_engine import send_telegram_message as _stm_dt
+                await _stm_dt(msg)
+            except Exception as _te:
+                print(f"[DOWNTIME] 텔레그램 발송 실패: {_te}")
+
+        print(f"[DOWNTIME] ★ {sym} {side} 알림: roi={roi:+.2f}% pnl=${total_realized_pnl:+.2f} "
+              f"ep={ep:.4f} close={close_str}")
+
+
 # ── 경로 상수 ────────────────────────────────────────────────────
 _BASE_DIR    = os.path.dirname(os.path.abspath(__file__))   # v9/app
 _PROJECT_DIR = os.path.abspath(os.path.join(_BASE_DIR, "..", ".."))  # 프로젝트 루트
@@ -1139,6 +1287,9 @@ async def _main_loop(ex_init, dry_run: bool):
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
               f"(pending_entry + tp1_preorder + pending_dca)")
         save_position_book(st, cooldowns, system_state)
+
+    # ★ 다운타임 중 청산된 포지션 감지 및 텔레그램 알림
+    await _check_downtime_trades(ex, st, system_state)
 
     while True:
         now = time.time()

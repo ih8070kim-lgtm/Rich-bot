@@ -243,6 +243,8 @@ def save_position_book(st: dict, cooldowns: dict, system_state: dict):
         d = os.path.dirname(os.path.abspath(STATE_FILE))
         if d:
             os.makedirs(d, exist_ok=True)
+        # ★ 다운타임 감지용: 마지막 저장 시각 기록
+        system_state['_last_save_ts'] = time.time()
         data = {
             'st': st,
             'cooldowns': cooldowns,
