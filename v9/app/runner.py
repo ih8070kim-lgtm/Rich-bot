@@ -226,10 +226,231 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
         if (sym, side) not in ex_pos:
             book_qty = float(book_p.get('amt', 0) or 0)
             if book_qty > 0:
+                _ep = float(book_p.get('ep', 0) or 0)
+                _dca = int(book_p.get('dca_level', 1) or 1)
+                _role = book_p.get('role', '')
+                _entry_type = book_p.get('entry_type', 'MR')
                 print(f"[SYNC] ★ {sym} {side} 유령 포지션 제거: "
-                      f"qty={book_qty:.1f} (바이낸스에 없음)")
+                      f"qty={book_qty:.1f} ep={_ep:.4f} "
+                      f"dca={_dca} role={_role} (바이낸스에 없음)")
+                # ★ v10.18: 유령 제거 시 log_trade 기록 (감사 추적)
+                try:
+                    from v9.logging.logger_csv import log_trade as _lt_ghost
+                    _lt_ghost(
+                        trace_id=str(uuid.uuid4())[:8],
+                        symbol=sym,
+                        side=side,
+                        ep=_ep,
+                        exit_price=0.0,  # 알 수 없음
+                        amt=book_qty,
+                        pnl_usdt=0.0,    # 알 수 없음
+                        roi_pct=0.0,
+                        dca_level=_dca,
+                        hold_sec=0.0,
+                        reason="GHOST_CLEANUP",
+                        hedge_mode=bool(book_p.get('hedge_mode', False)),
+                        was_hedge=bool(book_p.get('was_hedge', False)),
+                        max_roi_seen=float(book_p.get('max_roi_seen', 0) or 0),
+                        entry_type=str(_entry_type),
+                        role=str(_role),
+                        source_sym=str(book_p.get('source_sym', '') or ''),
+                    )
+                except Exception as _lt_e:
+                    print(f"[SYNC] log_trade(GHOST) 실패(무시): {_lt_e}")
                 sym_st = st.get(sym, {})
                 set_p(sym_st, side, None)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ 다운타임 중 청산 감지 (v10.18)
+# 봇 재시작 시 _last_save_ts ~ 현재 사이에 청산된 포지션을 감지하고
+# 텔레그램으로 알림 발송
+# ═══════════════════════════════════════════════════════════════
+
+async def _check_downtime_trades(ex, st, system_state):
+    """
+    재시작 시 다운타임 중 청산된 포지션을 감지하여 텔레그램 알림 발송.
+    ① _last_save_ts 확인 → 다운타임 1분 미만이면 스킵
+    ② 포지션북의 활성 포지션 목록 수집
+    ③ fetch_positions()로 현재 바이낸스 포지션 조회
+    ④ 차집합 (북에 있음 + 거래소에 없음) = 다운타임 중 청산된 포지션
+    ⑤ fetch_my_trades(sym, since=last_save_ts_ms)로 청산가 + realizedPnl 조회
+    ⑥ 텔레그램 ⚠️ 다운타임 청산 알림 발송
+    """
+    last_save = system_state.get('_last_save_ts', 0)
+    now = time.time()
+    downtime_sec = now - last_save if last_save > 0 else 0
+
+    # 다운타임 1분 미만이면 스킵 (정상 재시작)
+    if downtime_sec < 60:
+        print(f"[DOWNTIME] 다운타임 {downtime_sec:.0f}초 — 스킵")
+        return
+
+    downtime_min = downtime_sec / 60
+    print(f"[DOWNTIME] ★ 다운타임 감지: {downtime_min:.1f}분 "
+          f"(마지막 저장: {datetime.fromtimestamp(last_save).strftime('%H:%M:%S')})")
+
+    # ② 포지션북의 활성 포지션 수집
+    book_positions = {}  # {(sym, side): p_dict}
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for side, p in iter_positions(sym_st):
+            if isinstance(p, dict) and float(p.get('amt', 0) or 0) > 0:
+                book_positions[(sym, side)] = p
+
+    if not book_positions:
+        print(f"[DOWNTIME] 활성 포지션 없음 — 스킵")
+        return
+
+    # ③ 현재 바이낸스 포지션 조회
+    try:
+        positions = await asyncio.to_thread(ex.fetch_positions)
+    except Exception as e:
+        print(f"[DOWNTIME] fetch_positions 실패: {e}")
+        return
+
+    ex_pos = set()
+    for pos in positions:
+        contracts = float(pos.get('contracts', 0) or 0)
+        if contracts <= 0:
+            continue
+        raw_sym = pos.get('symbol', '')
+        sym = raw_sym.replace(':USDT', '') if ':USDT' in raw_sym else raw_sym
+        side_raw = pos.get('side', '')
+        side = "buy" if side_raw == "long" else "sell"
+        ex_pos.add((sym, side))
+
+    # ④ 차집합: 포지션북에 있지만 거래소에 없음 = 다운타임 중 청산
+    closed_during_downtime = {}
+    for (sym, side), p in book_positions.items():
+        if (sym, side) not in ex_pos:
+            closed_during_downtime[(sym, side)] = p
+
+    if not closed_during_downtime:
+        print(f"[DOWNTIME] 다운타임 중 청산된 포지션 없음")
+        return
+
+    print(f"[DOWNTIME] ★ 다운타임 중 청산 감지: "
+          f"{[f'{s[0]} {s[1]}' for s in closed_during_downtime.keys()]}")
+
+    # ⑤ fetch_my_trades로 청산 거래 이력 조회
+    last_save_ms = int(last_save * 1000)
+    alerts = []
+
+    for (sym, side), p in closed_during_downtime.items():
+        entry_price = float(p.get('ep', 0) or 0)
+        entry_amt = float(p.get('amt', 0) or 0)
+        dca_level = p.get('dca_level', 0)
+        role = p.get('role', '')
+        side_label = "LONG" if side == "buy" else "SHORT"
+
+        # 거래 이력 조회
+        realized_pnl = 0.0
+        close_price = 0.0
+        close_time_str = "알 수 없음"
+
+        try:
+            trades = await asyncio.to_thread(
+                ex.fetch_my_trades, sym, since=last_save_ms, limit=100
+            )
+            # 해당 방향의 청산 거래만 필터
+            # 롱 청산 = sell 거래, 숏 청산 = buy 거래
+            close_side = "sell" if side == "buy" else "buy"
+            close_trades = [
+                t for t in trades
+                if t.get('side') == close_side
+            ]
+            if close_trades:
+                # 마지막 청산 거래 기준
+                last_trade = close_trades[-1]
+                close_price = float(last_trade.get('price', 0) or 0)
+                close_ts = last_trade.get('timestamp', 0)
+                if close_ts:
+                    close_time_str = datetime.fromtimestamp(
+                        close_ts / 1000
+                    ).strftime('%m/%d %H:%M:%S')
+                # realizedPnl 합산
+                for t in close_trades:
+                    info = t.get('info', {})
+                    rpnl = float(info.get('realizedPnl', 0) or 0)
+                    realized_pnl += rpnl
+        except Exception as e:
+            print(f"[DOWNTIME] {sym} fetch_my_trades 실패: {e}")
+
+        # ROI 계산
+        roi = 0.0
+        if entry_price > 0 and close_price > 0:
+            if side == "buy":
+                roi = (close_price - entry_price) / entry_price * 100
+            else:
+                roi = (entry_price - close_price) / entry_price * 100
+
+        # 알림 메시지 구성
+        pnl_sign = "+" if realized_pnl >= 0 else ""
+        roi_sign = "+" if roi >= 0 else ""
+        emoji = "✅" if realized_pnl >= 0 else "🔴"
+
+        alert_msg = (
+            f"  {emoji} <b>{sym}</b> {side_label}"
+            f" (DCA{dca_level}"
+            f"{' ' + role if role else ''})\n"
+            f"    진입가: {entry_price:.4f}"
+            f" → 청산가: {close_price:.4f}\n"
+            f"    ROI: {roi_sign}{roi:.2f}%"
+            f" | PnL: {pnl_sign}${realized_pnl:.2f}\n"
+            f"    청산 시각: {close_time_str}"
+        )
+        alerts.append(alert_msg)
+
+        # ★ log_trades.csv에 기록 (감사 추적)
+        try:
+            from v9.logging.logger_csv import log_trade as _lt_dt
+            _hold = now - float(p.get('time', now) or now)
+            _lt_dt(
+                trace_id=str(uuid.uuid4())[:8],
+                symbol=sym,
+                side=side,
+                ep=entry_price,
+                exit_price=close_price,
+                amt=entry_amt,
+                pnl_usdt=realized_pnl,
+                roi_pct=roi,
+                dca_level=int(dca_level),
+                hold_sec=_hold if _hold > 0 else 0.0,
+                reason="DOWNTIME_CLOSE",
+                hedge_mode=bool(p.get('hedge_mode', False)),
+                was_hedge=bool(p.get('was_hedge', False)),
+                max_roi_seen=float(p.get('max_roi_seen', 0) or 0),
+                entry_type=str(p.get('entry_type', 'MR') or 'MR'),
+                role=str(role),
+                source_sym=str(p.get('source_sym', '') or ''),
+            )
+        except Exception as _lt_e:
+            print(f"[DOWNTIME] log_trade 실패(무시): {_lt_e}")
+
+        print(f"[DOWNTIME] {sym} {side_label}: "
+              f"ep={entry_price:.4f} → cp={close_price:.4f} "
+              f"ROI={roi:+.2f}% PnL=${realized_pnl:+.2f}")
+
+        await asyncio.sleep(0.1)  # rate limit 방지
+
+    # ⑥ 텔레그램 알림 발송
+    if alerts and _TELEGRAM_OK:
+        header = (
+            f"⚠️ <b>다운타임 청산 감지</b>\n"
+            f"다운타임: {downtime_min:.0f}분 "
+            f"({datetime.fromtimestamp(last_save).strftime('%H:%M')} "
+            f"→ {datetime.fromtimestamp(now).strftime('%H:%M')})\n"
+            f"청산 {len(alerts)}건:\n"
+        )
+        msg = header + "\n".join(alerts)
+        try:
+            from telegram_engine import send_telegram_message
+            await send_telegram_message(msg)
+            print(f"[DOWNTIME] ★ 텔레그램 알림 발송 완료 ({len(alerts)}건)")
+        except Exception as e:
+            print(f"[DOWNTIME] 텔레그램 발송 실패: {e}")
 
 
 # ── 경로 상수 ────────────────────────────────────────────────────
@@ -1139,6 +1360,12 @@ async def _main_loop(ex_init, dry_run: bool):
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
               f"(pending_entry + tp1_preorder + pending_dca)")
         save_position_book(st, cooldowns, system_state)
+
+    # ★ v10.18: 다운타임 중 청산 감지 & 알림
+    try:
+        await _check_downtime_trades(ex, st, system_state)
+    except Exception as _dt_e:
+        print(f"[STARTUP] 다운타임 감지 실패(무시): {_dt_e}")
 
     while True:
         now = time.time()
