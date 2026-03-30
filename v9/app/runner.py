@@ -39,6 +39,7 @@ try:
     _tg_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     _sys.path.insert(0, _tg_root)
     from telegram_engine import notify_fill as _notify_fill
+    from telegram_engine import notify_async_fill as _notify_async_fill
     _TELEGRAM_OK = True
 except Exception as _tg_err:
     print(f"[V9 Runner] telegram_engine import 실패 (알림 비활성): {_tg_err}")
@@ -619,6 +620,14 @@ async def _manage_tp1_preorders(ex, st, snapshot):
                         )
                     except Exception:
                         pass
+                    # ★ V10.17: TP1 선주문 체결 텔레그램 알림
+                    if _TELEGRAM_OK:
+                        _tp1_roi = abs(raw_pnl / (old_ep * filled) * 3.0 * 100) if old_ep * filled > 0 else 0
+                        asyncio.ensure_future(_notify_async_fill(
+                            sym, pos_side, avg_price, filled, "TP1_PRE",
+                            pnl=raw_pnl, roi=_tp1_roi, ep=old_ep,
+                            role=p.get("role", ""),
+                        ))
                     # ★ v10.14: 전량 체결 시(amt≤0) 포지션 클리어 (무한 trailing 방지)
                     if p["amt"] <= 0:
                         from v9.execution.position_book import clear_position
@@ -813,6 +822,13 @@ async def _manage_pending_limits(ex, st, snapshot):
             _spe2(st[sym], info["side"], None)
             print(f"[PENDING_LIMIT] ★ {sym} {info['intent_type']} 체결! "
                   f"{filled_qty}@{avg_price:.4f}")
+            # ★ V10.17: Pending limit 체결 텔레그램 알림
+            if _TELEGRAM_OK:
+                _pl_type = "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN"
+                asyncio.ensure_future(_notify_async_fill(
+                    sym, info["side"], avg_price, filled_qty, _pl_type,
+                    tier=info.get("tier", 0), role=info.get("role", ""),
+                ))
 
         elif status == "canceled":
             remove_pending_limit(oid)
@@ -858,6 +874,13 @@ async def _manage_pending_limits(ex, st, snapshot):
                         log_fill(info["trace_id"], info["sym"], info["side"],
                                  avg_p, part_filled, info["tag"] + "_PARTIAL", oid)
                         print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소")
+                        # ★ V10.17: 부분체결 텔레그램 알림
+                        if _TELEGRAM_OK:
+                            _pf_type = "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN"
+                            asyncio.ensure_future(_notify_async_fill(
+                                info["sym"], info["side"], avg_p, part_filled, _pf_type,
+                                tier=info.get("tier", 0), role=info.get("role", ""),
+                            ))
                 except Exception:
                     pass
             remove_pending_limit(oid)
