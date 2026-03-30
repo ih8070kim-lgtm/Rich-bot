@@ -479,25 +479,13 @@ def _calc_tp1_params(p: dict) -> tuple:
     if amt <= 0 or ep <= 0:
         return None, None, None, None
 
-    # ★ BAD 모드 T1: 고정 TP1
-    _is_bad_t1 = False
-    try:
-        from v9.strategy.planners import _bad_mode_active, BAD_T1_TP1_PCT
-        _is_bad_t1 = _bad_mode_active and dca_level == 1
-    except ImportError:
-        pass
-
-    if _is_bad_t1:
-        target_roi = BAD_T1_TP1_PCT
-        alpha = BAD_T1_TP1_PCT
-    else:
-        alpha = REBOUND_ALPHA.get(dca_level, 2.0)
-        worst = float(p.get("worst_roi", 0.0) or 0.0)
-        # ★ V10.16: min(rebound, 고정alpha) OR
-        target_roi = min(worst + alpha, alpha)
-        # ★ FLOOR: T1~T3만 / T4~T5는 약손실 탈출 허용
-        if dca_level <= 3:
-            target_roi = max(target_roi, 0.3)
+    # ★ V10.17: BAD T1 스캘핑 삭제 — 통일 rebound alpha
+    alpha = REBOUND_ALPHA.get(dca_level, 2.0)
+    worst = float(p.get("worst_roi", 0.0) or 0.0)
+    target_roi = min(worst + alpha, alpha)
+    # ★ FLOOR: T1~T3만 / T4~T5는 약손실 탈출 허용
+    if dca_level <= 3:
+        target_roi = max(target_roi, 0.3)
 
     # ROI → 가격 역산: roi = ((cp-ep)/ep)*LEV*100 → cp = ep*(1+roi/LEV/100)
     lev = float(_LEV)

@@ -179,7 +179,8 @@ TP_LOCK_RELEASE_1     = 0.07    # 1개 잠금 해제 스큐
 TP_LOCK_RELEASE_2     = 0.15    # 2개 잠금 해제 스큐
 TP_LOCK_RELEASE_3     = 0.18    # 3개 잠금 해제 스큐
 
-TP_LOCK_HEAVY_ROI     = -3.0    # heavy side 총합 ROI 이하 → 스트레스 ON
+TP_LOCK_HEAVY_ROI     = -3.0    # heavy side 총합 ROI 이하 → 스트레스 ON (1차: skew 필요)
+TP_LOCK_HEAVY_ROI_2   = -4.0    # ★ V10.17: 2차 — skew 무관, ROI만으로 잠금
 TP_LOCK_MAX           = 3       # 최대 잠금 슬롯 수
 
 GLOBAL_BLACKLIST = [

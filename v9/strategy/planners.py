@@ -37,14 +37,11 @@ _regime_last = "NORMAL"  # 마지막 레짐 (히스테리시스용)
 _regime_cache_snap_id = None  # ★ v10.9: 틱당 1회 캐싱
 _regime_cache_result = "NORMAL"
 _high_enter_ts = 0.0  # ★ v10.15: HIGH sticky 진입 시각
+_bad_regime_active = False  # ★ V10.17: 좀비킬 전용 BAD 플래그
 
-# ★ BAD 모드 (T1 스캘핑) — 히스테리시스
-# score < 0.25 → BAD ON / score ≥ 0.50 → BAD OFF / 0.25~0.50 유지
-_bad_mode_active = False
-BAD_ENTER_THRESH = 0.25   # BAD 진입 (퍼센타일 25% 미만)
-BAD_EXIT_THRESH  = 0.50   # BAD 해제 (NORMAL 이상)
-BAD_T1_TP1_PCT   = 2.0    # BAD T1 고정 TP1 (%)
-BAD_T1_DCA_ROI   = -1.5   # BAD T1→T2 DCA 트리거 (%)
+# ★ V10.17: BAD 레짐 판단 — 좀비킬 전용 (T1 스캘핑 삭제)
+BAD_ENTER_THRESH = 0.15   # ★ V10.17: 좀비킬용 BAD 판정 (pctl 15% 미만)
+BAD_EXIT_THRESH  = 0.30   # BAD 해제
 
 def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     """
@@ -159,17 +156,16 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
         print(f"[REGIME] {_regime_last} → {new} "
               f"(score={_p:.3f} | 5m={pctl_5m:.2f} 15m={pctl_15m:.2f} 1h={pctl_1h:.2f})")
 
-    # ★ BAD 모드 히스테리시스
-    global _bad_mode_active
-    _bad_prev = _bad_mode_active
+    # ★ V10.17: BAD 모드 → 좀비킬 전용 플래그 (T1 스캘핑 삭제)
+    global _bad_regime_active
+    _bad_prev = _bad_regime_active
     if _p < BAD_ENTER_THRESH:
-        _bad_mode_active = True
+        _bad_regime_active = True
     elif _p >= BAD_EXIT_THRESH:
-        _bad_mode_active = False
-    # 0.25~0.50 구간은 현재 상태 유지 (히스테리시스)
-    if _bad_mode_active != _bad_prev:
-        print(f"[BAD_MODE] {'ON' if _bad_mode_active else 'OFF'} "
-              f"(score={_p:.3f}, thresh={BAD_ENTER_THRESH}/{BAD_EXIT_THRESH})")
+        _bad_regime_active = False
+    if _bad_regime_active != _bad_prev:
+        print(f"[BAD_REGIME] {'ON' if _bad_regime_active else 'OFF'} "
+              f"(score={_p:.3f}, zombie_only)")
 
     _regime_last = new
     _regime_cache_snap_id = _snap_id
@@ -270,7 +266,6 @@ OPEN_PENDING_TTL_SEC     = 5 * 60
 
 ASYM_PENDING_TTL_SEC     = 3 * 60   # ASYM armed 최대 대기
 
-PB_ENTRY_RATIO           = 0.50     # Pullback 초기 진입 비율 (슬롯의 50%)
 
 
 def _tid() -> str:
@@ -335,17 +330,8 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # ═════════════════════════════════════════════════════════════════
 # DCA ROI 트리거 (avg_ep 기준 실시간 ROI)
 # T2: -3.5% / T3: -5.0% / T4: -5.5%
-DCA_ROI_TRIGGERS = {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25}  # ★ 최종: -1.5×5.0×1.1 통일
+DCA_ROI_TRIGGERS = {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25}  # ★ V10.17: 전 레짐 통일 상수
 
-# ★ 최종 아키텍처: 전 레짐 동일 간격
-REGIME_DCA_TRIGGERS = {
-    "BAD":    {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
-    "LOW":    {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
-    "NORMAL": {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
-    "HIGH":   {2: -8.25, 3: -8.25, 4: -8.25, 5: -8.25},
-}
-REGIME_HEDGE_TRIGGER = {"BAD": -4.0, "LOW": -4.0, "NORMAL": -5.5, "HIGH": -7.0}
-REGIME_HEDGE_DCA     = {"BAD": -4.5, "LOW": -4.5, "NORMAL": -6.0, "HIGH": -7.5}
 REGIME_HARD_SL       = {"BAD": -5.0, "LOW": -6.5, "NORMAL": -8.0, "HIGH": -10.0}
 # 레짐 폭 순서 (넓은 순): HIGH > NORMAL > LOW > BAD
 _REGIME_WIDTH = {"HIGH": 4, "NORMAL": 3, "LOW": 2, "BAD": 1}
@@ -358,13 +344,12 @@ def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
 ) -> list:
-    """★ v10.8: DCA 5단 타겟 생성 — T2~T5."""
+    """★ V10.17: DCA 5단 타겟 생성 — T2~T5 (전 레짐 동일 간격)."""
     dca_w   = DCA_WEIGHTS
     total_w = sum(dca_w)
-    _regime_trigs = REGIME_DCA_TRIGGERS.get(regime, REGIME_DCA_TRIGGERS["LOW"])
     targets = []
     for i, tier in enumerate([2, 3, 4, 5]):
-        roi_trig = _regime_trigs.get(tier, DCA_ROI_TRIGGERS.get(tier, -3.5))
+        roi_trig = DCA_ROI_TRIGGERS.get(tier, -8.25)
         dist = abs(roi_trig) / 100 / LEVERAGE
         target_p = entry_p * (1.0 - dist) if side == "buy" else entry_p * (1.0 + dist)
         notional = grid_notional * (dca_w[i + 1] / total_w)
@@ -373,28 +358,6 @@ def _build_dca_targets(
     return targets
 
 
-def _build_pb_dca_targets(
-    entry_p: float,
-    side: str,
-    grid_notional: float,
-    breakout_level: float,
-) -> list:
-    """
-    Pullback 전용 DCA 타겟 빌더.
-
-    DCA2 실제 트리거 조건은 plan_dca에서 동적으로 판단:
-      Long:  curr_p < EMA20_5m  → TRAIL_ON
-      Short: curr_p > EMA20_5m  → TRAIL_ON
-
-    target_p는 레거시 참조용으로만 저장 (plan_dca에서 미사용).
-    notional = grid_notional × 50% (초기 50%와 합산해 100% 완성)
-    """
-    return [{
-        "tier":        2,
-        "target_p":    breakout_level,   # 참조용 (plan_dca는 EMA20_5m 기준 사용)
-        "notional":    grid_notional * PB_ENTRY_RATIO,
-
-    }]
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -809,88 +772,6 @@ def _is_falling_knife_short(ohlcv_5m: list) -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════
-# Pullback Entry Checker  (★ v10.0 — 5m/15m 분리 재설계)
-# ═════════════════════════════════════════════════════════════════
-# MR  : 15m EMA20 이탈거리 × 3.5 + RSI 극단(30/70) — 극단 과확장 전용
-# PB  : 15m 추세 구조 + 5m 눌림 + RSI 42/58 hook — 추세 안 눌림 전용
-# ═════════════════════════════════════════════════════════════════
-PB_RSI_HOOK_LONG  = 42   # 직전 RSI_5m 이 이 값 이하였고 지금 꺾여 올라오면 롱
-PB_RSI_HOOK_SHORT = 58   # 직전 RSI_5m 이 이 값 이상이었고 지금 꺾여 내려오면 숏
-
-
-def _check_pullback_long(
-    curr_p: float,
-    ema20_15m: float,
-    ema20_5m: float,
-    atr_coin: float,
-    rsi5_now: float,
-    rsi5_prev: float,
-) -> bool:
-    """
-    Pullback Long:
-      기본: price > EMA20_15m, price <= EMA20_5m + ATR*0.5, RSI hook up
-      추세 OR: EMA20_5m > EMA20_15m * 1.002 (정배열)
-               AND RSI 45~62 (중립 모멘텀, 횡보 RSI 제외)
-               AND rsi5_now > rsi5_prev (상승 모멘텀)
-               → 추세장 눌림 포착, 횡보에선 EMA 배율 조건 미달로 미발동
-    """
-    if ema20_15m <= 0 or ema20_5m <= 0:
-        return False
-
-    # 기본 PB 조건
-    basic_pb = (
-        curr_p > ema20_15m and
-        curr_p <= ema20_5m + atr_coin * 0.5 and
-        rsi5_now > rsi5_prev and rsi5_prev <= PB_RSI_HOOK_LONG
-    )
-
-    # 추세 OR: EMA 정배열 + 중립 RSI + 모멘텀
-    trend_or = (
-        ema20_5m > ema20_15m * 1.002 and          # 5m EMA가 15m보다 0.2% 위
-        45.0 <= rsi5_now <= 62.0 and               # 횡보 RSI(~50) 제외, 과열 제외
-        rsi5_now > rsi5_prev and                   # 상승 모멘텀
-        curr_p > ema20_15m                         # 15m EMA 위 유지
-    )
-
-    return basic_pb or trend_or
-
-
-def _check_pullback_short(
-    curr_p: float,
-    ema20_15m: float,
-    ema20_5m: float,
-    atr_coin: float,
-    rsi5_now: float,
-    rsi5_prev: float,
-) -> bool:
-    """
-    Pullback Short:
-      기본: price < EMA20_15m, price >= EMA20_5m - ATR*0.5, RSI hook down
-      추세 OR: EMA20_5m < EMA20_15m * 0.998 (역배열)
-               AND RSI 38~55 (중립 모멘텀)
-               AND rsi5_now < rsi5_prev (하락 모멘텀)
-               → 추세장 되돌림 포착
-    """
-    if ema20_15m <= 0 or ema20_5m <= 0:
-        return False
-
-    # 기본 PB 조건
-    basic_pb = (
-        curr_p < ema20_15m and
-        curr_p >= ema20_5m - atr_coin * 0.5 and
-        rsi5_now < rsi5_prev and rsi5_prev >= PB_RSI_HOOK_SHORT
-    )
-
-    # 추세 OR: EMA 역배열 + 중립 RSI + 모멘텀
-    trend_or = (
-        ema20_5m < ema20_15m * 0.998 and           # 5m EMA가 15m보다 0.2% 아래
-        38.0 <= rsi5_now <= 55.0 and               # 과매도 제외, 횡보 RSI 제외
-        rsi5_now < rsi5_prev and                   # 하락 모멘텀
-        curr_p < ema20_15m                         # 15m EMA 아래 유지
-    )
-
-    return basic_pb or trend_or
-
 
 # ═════════════════════════════════════════════════════════════════
 # ASYM 슬롯 킬 대상 탐색  (★ v9.9)
@@ -970,14 +851,9 @@ def plan_open(
     # ★ v10.9: BTC Crash Filter — 급락 시 롱만 차단 (숏 MR은 허용)
     _btc_crash_active = _check_btc_crash(snapshot, system_state)
 
-    # ★ v10.12: 롱/숏 ATR 분리 (백테스트 최적화)
-    # 롱: 2.4 통일 (레짐 무관), 숏: 1.8 고정
-    # ★ v10.13: HIGH 레짐에서 ATR +0.6 강화 (백테스트 $690→$797)
+    # ★ V10.17: 레짐별 ATR 페널티 제거 — 전 레짐 동일 기준
     _long_atr_base = 2.4
     _short_atr_base = 1.8
-    if _btc_regime == "HIGH":
-        _long_atr_base += 0.6   # 3.0
-        _short_atr_base += 0.6  # 2.4
 
     # ── SOURCE_LINKED_HEDGE_CORE (v10.11: hedge_core 모듈) ───
     _skew, _long_margin, _short_margin = calc_skew(st, total_cap)
@@ -1502,10 +1378,7 @@ def plan_dca(
             # avg_ep 기준 ROI 트리거 (T2:-3.5% / T3:-5.0% / T4:-5.5%)
             roi_trig = DCA_ROI_TRIGGERS.get(target.get("tier", 2), -8.25)  # ★ PATCH: 항상 config 기준 (저장값 무시 → 런타임 변경 즉시 반영)
 
-            # ★ BAD 모드 T1 스캘핑: T1→T2 DCA를 -1.5%로 얕게
             _curr_dca_check = int(p.get("dca_level", 1) or 1)
-            if _bad_mode_active and _curr_dca_check == 1 and target.get("tier") == 2:
-                roi_trig = BAD_T1_DCA_ROI
 
             # ★ TP_LOCK: 잠긴 T1 → T2 강제 DCA (ROI 무시, 즉시 불타기)
             if p.get("tp_lock_force_dca") and _curr_dca_check == 1 and target.get("tier") == 2:
@@ -1719,15 +1592,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ PATCH: t5_mini_alpha 있으면 우선 사용 (미니게임 alpha=1.0)
             roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
-            # ★ BAD 모드 T1 스캘핑: 고정 TP1 2.0%
-            if _bad_mode_active and dca_level == 1:
-                tp1_thresh = BAD_T1_TP1_PCT
-            else:
-                _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
-                _worst = float(p.get("worst_roi", 0.0) or 0.0)
-                # ★ V10.16: min(rebound, 고정alpha) OR
-                # worst 양수(DCA 승격 등)일 때 alpha가 cap → TP1 도달 가능
-                tp1_thresh = min(_worst + _alpha, _alpha)
+            _alpha = float(p.get("t5_mini_alpha") or 0) or REBOUND_ALPHA.get(dca_level, 2.0)
+            _worst = float(p.get("worst_roi", 0.0) or 0.0)
+            tp1_thresh = min(_worst + _alpha, _alpha)
 
             # ★ FLOOR: T1~T3만 손실 TP1 방지 / T4~T5는 약손실 탈출 허용
             if dca_level <= 3:
@@ -1753,9 +1620,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 side="sell" if is_long else "buy",
                 qty=close_qty,
                 price=curr_p,
-                reason=(f"TP1_BAD(fixed={tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"
-                        if _bad_mode_active and dca_level == 1
-                        else f"TP1_RB(w={_worst:.1f}+a={_alpha:.1f}→{tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}"),
+                reason=f"TP1_RB(w={_worst:.1f}+a={_alpha:.1f}→{tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}",
                 metadata={"roi_gross": roi_gross, "worst_roi": _worst, "alpha": _alpha,
                            "tp1_thresh": tp1_thresh},
             ))
@@ -1936,82 +1801,48 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 # ═════════════════════════════════════════════════════════════════
 # Force Close  (HARD_SL + DD Shutdown + ZOMBIE)
 # ═════════════════════════════════════════════════════════════════
-# ── ZOMBIE 파라미터 ──────────────────────────────────────────
-ZOMBIE_BASE_SEC     = {1: 120*60, 2: 90*60}
-ZOMBIE_MAXROI       = {1: 0.3,   2: 0.0}
-ZOMBIE_ROI_THRESH   = {1: -2.0,  2: -1.5}
-ZOMBIE_PROTECT_KST  = [(22*60+30, 23*60+59), (0, 1*60+30), (5*60, 7*60+30)]
+# ── V10.17: ZOMBIE 재구성 + 배치 익절 ────────────────────────────
+# 조건: BAD 레짐 + 슬롯 풀 + T2+ + ROI ≤ -5% + worst 순
+# 배치: 좀비킬 시 같은 방향 T1≥+4% / T2≥+2% step=0 1개 동반 청산
+# 쿨다운: 8시간, 방향별
+# ═════════════════════════════════════════════════════════════════
+ZOMBIE_ROI_THRESH  = -5.0
+ZOMBIE_COOLDOWN_SEC = 8 * 3600  # 8시간
+ZOMBIE_BATCH_TP_ROI = {1: 4.0, 2: 2.0}  # T1: +4%, T2: +2%
+
+# 방향별 쿨다운 타이머
+_zombie_cooldown = {"buy": 0.0, "sell": 0.0}
 
 
 def _zombie_exit(p: dict, roi_pct: float, now: float, atr_pct: float = 0.0, snapshot=None) -> tuple:
     """
-    ZOMBIE 악성 재고 정리 (v10.8 완전 재작성).
+    V10.17 ZOMBIE — BAD 레짐에서 슬롯 풀 + T2+ + ROI ≤ -5%
     반환: (force: bool, reason: str)
     """
-    # ★ 하드 가드: HEDGE/SOFT_HEDGE/INSURANCE_SH는 절대 죽이지 않음
+    # HEDGE/INSURANCE 계열 보호
     _role = p.get("role", "")
-    if _role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
+    if _role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
         return False, ""
 
-    # 헷지 롤링 포지션 제외
-    if int(p.get("hedge_rolling_count", 0) or 0) >= 1:
-        return False, ""
-
-    # SH 소스도 제외 (헷지 페어 보호)
-    open_ts = float(p.get("time", now) or now)
-    elapsed = now - open_ts
-    max_roi = float(p.get("max_roi_seen", 0.0) or 0.0)
+    # T1은 대상 아님 (소액, 죽여봐야 의미 없음)
     dca_level = int(p.get("dca_level", 1) or 1)
-
-    # T1/T2만 대상 (T3+는 DCA 투자 중이므로 ZOMBIE 안 함)
-    if dca_level >= 3:
+    if dca_level < 2:
         return False, ""
 
-    # 시간대 보호 (KST)
-    import datetime as _dt
-    _kst = _dt.datetime.utcfromtimestamp(now) + _dt.timedelta(hours=9)
-    _kst_min = _kst.hour * 60 + _kst.minute
-    for lo, hi in ZOMBIE_PROTECT_KST:
-        if lo <= _kst_min <= hi:
-            return False, ""
-
-    # HIGH 레짐 스킵
-    _regime = _btc_vol_regime(snapshot) if snapshot else "NORMAL"
-    if _regime == "HIGH":
+    # BAD 레짐에서만 발동
+    if not _bad_regime_active:
         return False, ""
 
-    # 배율 계산
-    _vol_m = 0.3 if _regime == "BAD" else (0.5 if _regime == "LOW" else 1.0)
+    # ROI 기준
+    if roi_pct > ZOMBIE_ROI_THRESH:
+        return False, ""
 
-    _beta_m = 1.0
-    if snapshot:
-        _sym = p.get("symbol", "")
-        _bp = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
-        _sp = (snapshot.ohlcv_pool or {}).get(_sym, {})
-        _b1h = _bp.get("1h", []) if _bp else []
-        _s1h = _sp.get("1h", []) if _sp else []
-        if len(_b1h) >= 24 and len(_s1h) >= 24:
-            import numpy as _np
-            _bc = _np.array([float(x[4]) for x in _b1h[-24:]])
-            _sc = _np.array([float(x[4]) for x in _s1h[-24:]])
-            _blr = _np.diff(_np.log(_bc + 1e-12))
-            _slr = _np.diff(_np.log(_sc + 1e-12))
-            _bs = float(_np.std(_blr))
-            if _bs > 0 and len(_blr) == len(_slr):
-                _corr = float(_np.corrcoef(_blr, _slr)[0, 1])
-                _beta = _corr * (float(_np.std(_slr)) / _bs)
-                if _beta < 0.8:
-                    _beta_m = max(0.3, _beta)
+    # 쿨다운 체크 (방향별)
+    _side = p.get("side", "buy")
+    if now < _zombie_cooldown.get(_side, 0.0):
+        return False, ""
 
-    base = ZOMBIE_BASE_SEC.get(dca_level, 120*60)
-    timeout = base * max(1.0, atr_pct * 100) * _vol_m * _beta_m
-    mr = ZOMBIE_MAXROI.get(dca_level, 0.3)
-    rt = ZOMBIE_ROI_THRESH.get(dca_level, -2.0)
-
-    if elapsed >= timeout and max_roi < mr and roi_pct <= rt:
-        return True, f"ZOMBIE_T{dca_level}_{elapsed/60:.0f}m_roi{roi_pct:.1f}%_b{_beta_m:.1f}"
-
-    return False, ""
+    return True, f"ZOMBIE_T{dca_level}_roi{roi_pct:.1f}%"
 
 
 def plan_force_close(
@@ -2129,20 +1960,19 @@ def plan_force_close(
                     force  = True
                     reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
 
-            # ★ v10.8: ZOMBIE — 같은 방향 슬롯이 꽉 찼을 때만
+            # ★ V10.17: ZOMBIE — BAD + 슬롯 풀 + T2+ + ROI ≤ -5% + worst 순
             if not force:
                 _z_side = p.get("side", "buy")
                 _z_slots = count_slots(st)
                 _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
                 if _z_full:
-                    pool_z = (snapshot.ohlcv_pool or {}).get(symbol, {})
-                    _ohlcv_z = pool_z.get("1m", [])
-                    _atr_z = atr_from_ohlcv(_ohlcv_z[-15:], period=10) if len(_ohlcv_z) >= 15 else 0.0
-                    _atr_pct_z = _atr_z / curr_p if curr_p > 0 else 0.0
-                    _zf, _zr = _zombie_exit(p, roi_pct, now, _atr_pct_z, snapshot)
+                    _zf, _zr = _zombie_exit(p, roi_pct, now, snapshot=snapshot)
                     if _zf:
                         force  = True
                         reason = _zr
+                        # ★ 좀비 쿨다운 세팅 (방향별 8시간)
+                        _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
+                        print(f"[ZOMBIE] {symbol} {_z_side} 정리 → 8h 쿨다운")
 
         if force:
             intents.append(Intent(
@@ -2155,10 +1985,50 @@ def plan_force_close(
                 reason=reason,
                 metadata={
                     "roi_pct": roi_pct,
-                    # ★ [BUG-SH3] strategy_core에서 role 교차검증용
                     "_expected_role": p.get("role", ""),
                 },
             ))
+
+            # ★ V10.17: 배치 익절 — 좀비킬 시 같은 방향 수익 포지션 동반 청산
+            if "ZOMBIE" in reason:
+                _batch_side = p.get("side", "buy")
+                _batch_best = None  # (symbol, p, roi, close_side)
+                _batch_best_roi = -999.0
+                prices_b = snapshot.all_prices or {}
+                for _b_sym, _b_st in st.items():
+                    if not isinstance(_b_st, dict) or _b_sym == symbol:
+                        continue
+                    _b_p = get_p(_b_st, _batch_side)
+                    if not isinstance(_b_p, dict):
+                        continue
+                    if _b_p.get("step", 0) >= 1:
+                        continue  # trailing 중 → plan_trail_on 관할
+                    if _b_p.get("role", "") in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
+                        continue
+                    _b_dca = int(_b_p.get("dca_level", 1) or 1)
+                    _b_cp = float(prices_b.get(_b_sym, 0) or 0)
+                    _b_ep = float(_b_p.get("ep", 0) or 0)
+                    if _b_cp <= 0 or _b_ep <= 0:
+                        continue
+                    _b_roi = calc_roi_pct(_b_ep, _b_cp, _batch_side, LEVERAGE)
+                    _b_thresh = ZOMBIE_BATCH_TP_ROI.get(_b_dca, 999.0)
+                    if _b_roi >= _b_thresh and _b_roi > _batch_best_roi:
+                        _batch_best = (_b_sym, _b_p, _b_roi, _b_cp)
+                        _batch_best_roi = _b_roi
+                if _batch_best:
+                    _bs, _bp, _br, _bcp = _batch_best
+                    _b_close_side = "sell" if _batch_side == "buy" else "buy"
+                    intents.append(Intent(
+                        trace_id=_tid(),
+                        intent_type=IntentType.FORCE_CLOSE,
+                        symbol=_bs,
+                        side=_b_close_side,
+                        qty=float(_bp.get("amt", 0.0)),
+                        price=_bcp,
+                        reason=f"ZOMBIE_BATCH_TP(roi={_br:+.1f}%)",
+                        metadata={"roi_pct": _br, "_expected_role": _bp.get("role", "")},
+                    ))
+                    print(f"[ZOMBIE_BATCH] {_bs} 동반 익절 roi={_br:+.1f}%")
 
     return intents
 
@@ -2299,7 +2169,7 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
     from v9.config import (
         TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_SKEW_3,
         TP_LOCK_RELEASE_1, TP_LOCK_RELEASE_2, TP_LOCK_RELEASE_3,
-        TP_LOCK_HEAVY_ROI, TP_LOCK_MAX,
+        TP_LOCK_HEAVY_ROI, TP_LOCK_HEAVY_ROI_2, TP_LOCK_MAX,
     )
     from v9.engines.hedge_core import calc_skew
 
@@ -2326,7 +2196,8 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
             heavy_total_roi += calc_roi_pct(ep, cp, heavy_side, LEVERAGE)
             heavy_count += 1
 
-    # ── 잠금 개수 결정 (3단계) ──
+    # ── 잠금 개수 결정 ──
+    # 1차: skew + heavy_roi ≤ -3% → 단계별 잠금
     stress_on = (heavy_total_roi <= TP_LOCK_HEAVY_ROI) if heavy_count > 0 else False
 
     _skew_thresholds = [TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_SKEW_3]
@@ -2335,6 +2206,10 @@ def _evaluate_tp_lock(snapshot: MarketSnapshot, st: Dict) -> None:
         for i, th in enumerate(_skew_thresholds[:TP_LOCK_MAX], 1):
             if skew_val >= th:
                 target_lock = i
+
+    # ★ V10.17: 2차 — heavy_roi ≤ -4%면 skew 무관하게 최소 1개 잠금
+    if heavy_count > 0 and heavy_total_roi <= TP_LOCK_HEAVY_ROI_2:
+        target_lock = max(target_lock, 1)
 
     # ── 해제 체크 (히스테리시스) ──
     currently_locked = []
