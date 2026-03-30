@@ -226,8 +226,37 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
         if (sym, side) not in ex_pos:
             book_qty = float(book_p.get('amt', 0) or 0)
             if book_qty > 0:
+                _ep = float(book_p.get('ep', 0) or 0)
+                _dca = int(book_p.get('dca_level', 1) or 1)
+                _role = book_p.get('role', '')
+                _entry_type = book_p.get('entry_type', 'MR')
                 print(f"[SYNC] ★ {sym} {side} 유령 포지션 제거: "
-                      f"qty={book_qty:.1f} (바이낸스에 없음)")
+                      f"qty={book_qty:.1f} ep={_ep:.4f} "
+                      f"dca={_dca} role={_role} (바이낸스에 없음)")
+                # ★ v10.18: 유령 제거 시 log_trade 기록 (감사 추적)
+                try:
+                    from v9.logging.logger_csv import log_trade as _lt_ghost
+                    _lt_ghost(
+                        trace_id=str(uuid.uuid4())[:8],
+                        symbol=sym,
+                        side=side,
+                        ep=_ep,
+                        exit_price=0.0,  # 알 수 없음
+                        amt=book_qty,
+                        pnl_usdt=0.0,    # 알 수 없음
+                        roi_pct=0.0,
+                        dca_level=_dca,
+                        hold_sec=0.0,
+                        reason="GHOST_CLEANUP",
+                        hedge_mode=bool(book_p.get('hedge_mode', False)),
+                        was_hedge=bool(book_p.get('was_hedge', False)),
+                        max_roi_seen=float(book_p.get('max_roi_seen', 0) or 0),
+                        entry_type=str(_entry_type),
+                        role=str(_role),
+                        source_sym=str(book_p.get('source_sym', '') or ''),
+                    )
+                except Exception as _lt_e:
+                    print(f"[SYNC] log_trade(GHOST) 실패(무시): {_lt_e}")
                 sym_st = st.get(sym, {})
                 set_p(sym_st, side, None)
 
@@ -373,6 +402,32 @@ async def _check_downtime_trades(ex, st, system_state):
             f"    청산 시각: {close_time_str}"
         )
         alerts.append(alert_msg)
+
+        # ★ log_trades.csv에 기록 (감사 추적)
+        try:
+            from v9.logging.logger_csv import log_trade as _lt_dt
+            _hold = now - float(p.get('time', now) or now)
+            _lt_dt(
+                trace_id=str(uuid.uuid4())[:8],
+                symbol=sym,
+                side=side,
+                ep=entry_price,
+                exit_price=close_price,
+                amt=entry_amt,
+                pnl_usdt=realized_pnl,
+                roi_pct=roi,
+                dca_level=int(dca_level),
+                hold_sec=_hold if _hold > 0 else 0.0,
+                reason="DOWNTIME_CLOSE",
+                hedge_mode=bool(p.get('hedge_mode', False)),
+                was_hedge=bool(p.get('was_hedge', False)),
+                max_roi_seen=float(p.get('max_roi_seen', 0) or 0),
+                entry_type=str(p.get('entry_type', 'MR') or 'MR'),
+                role=str(role),
+                source_sym=str(p.get('source_sym', '') or ''),
+            )
+        except Exception as _lt_e:
+            print(f"[DOWNTIME] log_trade 실패(무시): {_lt_e}")
 
         print(f"[DOWNTIME] {sym} {side_label}: "
               f"ep={entry_price:.4f} → cp={close_price:.4f} "
