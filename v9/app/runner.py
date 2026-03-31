@@ -352,7 +352,7 @@ async def _check_downtime_trades(ex, st, system_state):
 
         try:
             trades = await asyncio.to_thread(
-                ex.fetch_my_trades, sym, since=last_save_ms, limit=100
+                ex.fetch_my_trades, sym, since=last_save_ms, limit=500
             )
             # 해당 방향의 청산 거래만 필터
             # 롱 청산 = sell 거래, 숏 청산 = buy 거래
@@ -744,6 +744,10 @@ async def _manage_tp1_preorders(ex, st, snapshot):
     active_preorders = []  # [(sym, pos_side, p, oid), ...]
     new_candidates = []    # [(sym, pos_side, p, dca), ...]
 
+    # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
+    from v9.strategy.planners import _count_active_by_side
+    _pre_longs, _pre_shorts = _count_active_by_side(st)
+
     for sym, sym_st in list(st.items()):
         if not isinstance(sym_st, dict):
             continue
@@ -763,11 +767,9 @@ async def _manage_tp1_preorders(ex, st, snapshot):
                 continue
 
             # ★ V10.17 Rule B: Light side 마지막 슬롯 — 선주문 차단
-            from v9.strategy.planners import _count_active_by_side
-            _pr_longs, _pr_shorts = _count_active_by_side(st)
-            if pos_side == "buy" and _pr_longs <= 1 and _pr_shorts >= 2:
+            if pos_side == "buy" and _pre_longs <= 1 and _pre_shorts >= 2:
                 continue
-            if pos_side == "sell" and _pr_shorts <= 1 and _pr_longs >= 2:
+            if pos_side == "sell" and _pre_shorts <= 1 and _pre_longs >= 2:
                 continue
 
             oid = p.get("tp1_preorder_id")

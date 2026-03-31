@@ -275,14 +275,18 @@ def _tid() -> str:
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.17: Slot Balance 규칙
 # ═════════════════════════════════════════════════════════════════
+_HEDGE_ROLES_SLOT = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
+
 def _count_active_by_side(st: Dict) -> tuple:
-    """활성 포지션 수 (롱, 숏) — 모든 role, 모든 step."""
+    """활성 포지션 수 (롱, 숏) — HEDGE/INSURANCE 계열 제외 (calc_skew와 동일 기준)."""
     longs = shorts = 0
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
             continue
         for pos_side, p in iter_positions(sym_st):
             if isinstance(p, dict):
+                if p.get("role", "") in _HEDGE_ROLES_SLOT:
+                    continue
                 if pos_side == "buy": longs += 1
                 else: shorts += 1
     return longs, shorts
@@ -294,7 +298,8 @@ HEAVY_REBALANCE_CD_SEC  = 300    # 5분 쿨다운
 _heavy_rebal_cd = 0.0
 
 
-def plan_heavy_rebalance(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
+def plan_heavy_rebalance(snapshot: MarketSnapshot, st: Dict,
+                         exclude_syms: set = None) -> List[Intent]:
     """Rule C: Heavy side 수익 슬롯 1개 강제 익절 (skew ≥ 10%)."""
     global _heavy_rebal_cd
     intents: List[Intent] = []
@@ -312,9 +317,12 @@ def plan_heavy_rebalance(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
     prices = snapshot.all_prices or {}
     best = None
     best_roi = -999.0
+    _excl = exclude_syms or set()
 
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
+            continue
+        if sym in _excl:
             continue
         p = get_p(sym_st, heavy_side)
         if not isinstance(p, dict):
@@ -984,6 +992,9 @@ def plan_open(
                   f"atrL={_mr_atr_mult_long:.1f} atrS={_mr_atr_mult_short:.1f}")
             plan_open._last_dyn_atr = _dyn_atr_key
 
+    # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
+    _open_longs, _open_shorts = _count_active_by_side(st)
+
     for symbol in list(set(long_targets + short_targets)):
         # [UnboundLocalError 방지] Python 스코프 선점 — 반드시 루프 최상단
         can_long  = False
@@ -1250,12 +1261,11 @@ def plan_open(
             continue
 
         # ★ V10.17 Rule A: Slot Balance Gate — 반대=0 AND 이쪽≥3 → 차단
-        _bg_longs, _bg_shorts = _count_active_by_side(st)
         if trigger_side == "buy":
-            if _bg_shorts == 0 and _bg_longs >= 3:
+            if _open_shorts == 0 and _open_longs >= 3:
                 continue
         else:
-            if _bg_longs == 0 and _bg_shorts >= 3:
+            if _open_longs == 0 and _open_shorts >= 3:
                 continue
 
         if float(sym_st.get("open_fail_cooldown_until",   0.0)) > time.time(): continue
@@ -1354,11 +1364,22 @@ def plan_dca(
     # ★ v10.13: killswitch 감지 (보험 시그널용)
     _killswitch_dca = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0) >= 0.8
 
+    # ★ V10.18: DCA에도 Slot Balance Gate 적용 (루프 밖 1회 계산)
+    _dca_longs, _dca_shorts = _count_active_by_side(st)
+
     for symbol, p in _pos_items(st):
 
         # ★ v10.11: CORE_HEDGE 수익 중이면 DCA 금지 (보험→본체 방지)
         if is_hedge_dca_blocked(p, snapshot, symbol):
             continue
+
+        # ★ V10.18 Rule A: 반대=0 AND 이쪽≥3 → DCA도 차단 (skew 악화 방지)
+        _dca_side = p.get("side", "")
+        if p.get("role", "") not in _HEDGE_ROLES_SLOT:
+            if _dca_side == "buy" and _dca_shorts == 0 and _dca_longs >= 3:
+                continue
+            if _dca_side == "sell" and _dca_longs == 0 and _dca_shorts >= 3:
+                continue
 
         # ★ v10.8: DCA 하드가드
         # 1) dca_level >= 5이면 스킵
@@ -1619,6 +1640,8 @@ def plan_dca(
 # ═════════════════════════════════════════════════════════════════
 def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
     intents: List[Intent] = []
+    # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
+    _tp1_longs, _tp1_shorts = _count_active_by_side(st)
     for symbol, p in _pos_items(st):
         if p.get("step", 0) != 0 or p.get("tp1_done"):
             continue
@@ -1634,12 +1657,11 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             continue
 
         # ★ V10.17 Rule B: Light side 마지막 슬롯 보호 — TP1 차단
-        if p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
-            _lb_longs, _lb_shorts = _count_active_by_side(st)
+        if p.get("role", "") not in _HEDGE_ROLES_SLOT:
             _lb_side = p.get("side", "")
-            if _lb_side == "buy" and _lb_longs <= 1 and _lb_shorts >= 2:
+            if _lb_side == "buy" and _tp1_longs <= 1 and _tp1_shorts >= 2:
                 continue
-            if _lb_side == "sell" and _lb_shorts <= 1 and _lb_longs >= 2:
+            if _lb_side == "sell" and _tp1_shorts <= 1 and _tp1_longs >= 2:
                 continue
 
         # ★ V10.16: TP_LOCK — 잠긴 포지션은 TP1 보류
@@ -1791,6 +1813,14 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ FIX: 이미 청산 주문 진행 중이면 스킵 (TRAIL_ON 30건/5분 스팸 방지)
             if p.get("pending_close"):
                 continue
+
+            # ★ V10.18 Rule B: Light side 마지막 슬롯 — trailing 청산도 차단
+            if p.get("role", "") not in _HEDGE_ROLES_SLOT:
+                _tr_longs, _tr_shorts = _count_active_by_side(st)
+                if _iter_side == "buy" and _tr_longs <= 1 and _tr_shorts >= 2:
+                    continue
+                if _iter_side == "sell" and _tr_shorts <= 1 and _tr_longs >= 2:
+                    continue
 
             roi_pct = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
             max_roi = p.get("max_roi_seen", roi_pct)
@@ -2403,8 +2433,11 @@ def generate_all_intents(
     except Exception as _tpl_e:
         print(f"[TP_LOCK] 평가 오류(무시): {_tpl_e}")
 
-    intents += plan_force_close(snapshot, st, system_state)
-    intents += plan_heavy_rebalance(snapshot, st)
+    _fc_intents = plan_force_close(snapshot, st, system_state)
+    intents += _fc_intents
+    # ★ V10.18: force_close 대상 심볼 수집 → heavy_rebalance 중복 방지
+    _fc_syms = {i.symbol for i in _fc_intents}
+    intents += plan_heavy_rebalance(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_hedge_core_manage(snapshot, st)
     intents += plan_tp1(snapshot, st)
     intents += plan_trail_on(snapshot, st)
