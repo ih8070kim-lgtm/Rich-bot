@@ -1171,19 +1171,20 @@ def plan_open(
         if len(closes_5m_e30) >= 30:
             _ema30_5m = calc_ema(closes_5m_e30, period=30)
             # ── E30 Long 주 조건 (ATR2.0, RSI<40) ──
-            if can_long and not _mr_long_final and _ema30_5m > 0:
+            # ★ v10.20: MR 우선순위 게이트 제거 → MR과 독립 평가 (로그 비교용)
+            if can_long and _ema30_5m > 0:
                 if curr_p < _ema30_5m - atr_coin * 2.0 and rsi5_now < 40 and micro_long_ok:
                     _e30_long_final = True
             # ── E30 Long 대칭 (숏 조건 뒤집기: ATR1.4, RSI<40) ──
-            if can_long and not _mr_long_final and not _e30_long_final and _ema30_5m > 0:
+            if can_long and not _e30_long_final and _ema30_5m > 0:
                 if curr_p < _ema30_5m - atr_coin * 1.4 and rsi5_now < 40 and micro_long_ok:
                     _e30_long_final = True
             # ── E30 Short 주 조건 (ATR1.4, RSI>60) ──
-            if can_short and not _mr_short_final and _ema30_5m > 0:
+            if can_short and _ema30_5m > 0:
                 if curr_p > _ema30_5m + atr_coin * 1.4 and rsi5_now > 60 and micro_short_ok:
                     _e30_short_final = True
             # ── E30 Short 대칭 (롱 조건 뒤집기: ATR2.0, RSI>60) ──
-            if can_short and not _mr_short_final and not _e30_short_final and _ema30_5m > 0:
+            if can_short and not _e30_short_final and _ema30_5m > 0:
                 if curr_p > _ema30_5m + atr_coin * 2.0 and rsi5_now > 60 and micro_short_ok:
                     _e30_short_final = True
 
@@ -1284,11 +1285,20 @@ def plan_open(
         if _pend_entry_type is not None:
             entry_type_tag = _pend_entry_type   # pending 발화: armed 시점 값 사용
         else:
-            if (trigger_side == "buy"  and _mr_long_final) or \
-               (trigger_side == "sell" and _mr_short_final):
+            _is_mr  = (trigger_side == "buy"  and _mr_long_final)  or \
+                      (trigger_side == "sell" and _mr_short_final)
+            _is_e30 = (trigger_side == "buy"  and _e30_long_final) or \
+                      (trigger_side == "sell" and _e30_short_final)
+            _is_bo  = (trigger_side == "buy"  and _bo_long_final)  or \
+                      (trigger_side == "sell" and _bo_short_final)
+            # ★ v10.20: MR/E30 동시 발동 → "MR_E30", 단독 → 각자 태깅
+            if _is_mr and _is_e30:
+                entry_type_tag = "MR_E30"
+            elif _is_mr:
                 entry_type_tag = "MR"
-            elif (trigger_side == "buy"  and _bo_long_final) or \
-                 (trigger_side == "sell" and _bo_short_final):
+            elif _is_e30:
+                entry_type_tag = "E30"
+            elif _is_bo:
                 entry_type_tag = "BREAKOUT"
             else:
                 entry_type_tag = "MR"
