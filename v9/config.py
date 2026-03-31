@@ -183,6 +183,13 @@ TP_LOCK_HEAVY_ROI     = -3.0    # heavy side 총합 ROI 이하 → 스트레스 
 TP_LOCK_HEAVY_ROI_2   = -4.0    # ★ V10.17: 2차 — skew 무관, ROI만으로 잠금
 TP_LOCK_MAX           = 3       # 최대 잠금 슬롯 수
 
+# ─── v10.17: 스큐 에스컬레이션 / Heavy side 조기 TP ────────────────────────
+SKEW_STAGE2_TRIGGER     = 0.15  # 2단계: TP Lock 2개 + 헷지 필요조건 체크 시작
+SKEW_HEAVY_TP_ROI_1     = 1.5   # stage1 (10~15%) heavy side 조기 TP ROI 기준
+SKEW_HEAVY_TP_ROI_2     = 1.0   # stage2 (≥15%) heavy side 조기 TP ROI 기준
+SKEW_STAGE2_TIMEOUT_SEC = 900   # 15분: stage2 지속 → 헷지 필요조건③ 충족
+SKEW_HEDGE_STRESS_ROI   = -3.0  # heavy side 이 ROI 이하 → 헷지 DCA/ROI 조건 완화
+
 GLOBAL_BLACKLIST = [
     "BTC/USDT", "DOGE/USDT", "SHIB/USDT", "PEPE/USDT",
     "FLOKI/USDT", "BONK/USDT", "WIF/USDT", "1000PEPE/USDT",
@@ -223,6 +230,7 @@ LOG_ORDERS_FILE    = "log_orders.csv"
 LOG_FILLS_FILE     = "log_fills.csv"
 LOG_POSITIONS_FILE = "log_positions.csv"
 LOG_UNIVERSE_FILE  = "log_universe.csv"
+LOG_SKEW_FILE      = "log_skew.csv"      # ★ v10.17: 스큐 모니터링
 STATE_FILE         = "v9_state.json"
 HEARTBEAT_FILE     = "heartbeat.txt"
 

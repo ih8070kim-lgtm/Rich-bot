@@ -17,6 +17,7 @@ from v9.types import Intent, IntentType, MarketSnapshot
 from v9.config import (
     LEVERAGE, DCA_WEIGHTS,
     TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT, GRID_DIVISOR,
+    SKEW_STAGE2_TRIGGER, SKEW_STAGE2_TIMEOUT_SEC, SKEW_HEDGE_STRESS_ROI,
 )
 from v9.execution.position_book import get_p, iter_positions
 from v9.risk.slot_manager import count_slots
@@ -24,6 +25,66 @@ from v9.utils.utils_math import calc_roi_pct
 
 # ★ v10.15: HEDGE_CORE 심볼별 쿨다운 (스팸 방지)
 _hedge_core_cooldowns: dict = {}  # {sym: next_allowed_ts}
+
+# ★ v10.17: stage2 진입 시각 (15분 타이머 — 헷지 필요조건③)
+_skew_stage2_enter_ts: float = 0.0
+
+_HEDGE_ROLES_HC = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
+
+
+def _is_hedge_required(st: dict, snapshot: MarketSnapshot, skew: float, heavy_side: str) -> bool:
+    """헷지 필요 조건 확인 (OR 3가지).
+
+    ① heavy side 전 슬롯 ROI < 0  → 자체 조정 불가 (heavy side TP 없음)
+    ② MR ≥ 0.7                    → 신규 진입 차단 중
+    ③ stage2 ≥ 15분 지속          → 시간 기반 에스컬레이션
+    """
+    global _skew_stage2_enter_ts
+
+    # stage2 타이머 관리
+    if skew >= SKEW_STAGE2_TRIGGER:
+        if _skew_stage2_enter_ts == 0.0:
+            _skew_stage2_enter_ts = time.time()
+    else:
+        _skew_stage2_enter_ts = 0.0
+
+    # ③ 15분 경과
+    if (_skew_stage2_enter_ts > 0
+            and time.time() - _skew_stage2_enter_ts >= SKEW_STAGE2_TIMEOUT_SEC):
+        elapsed = (time.time() - _skew_stage2_enter_ts) / 60
+        print(f"[HEDGE_CORE] 필요조건③: stage2 {elapsed:.0f}분 경과 → 헷지 진입")
+        return True
+
+    # ② MR ≥ 0.7 (킬스위치 구간 — 신규 진입 불가)
+    mr = float(getattr(snapshot, "margin_ratio", 0) or 0)
+    if mr >= 0.7:
+        print(f"[HEDGE_CORE] 필요조건②: MR={mr:.2f} ≥ 0.7 → 헷지 진입")
+        return True
+
+    # ① heavy side 전 슬롯 ROI < 0 (자체조정 불가)
+    heavy_count = 0
+    all_negative = True
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        hp = get_p(sym_st, heavy_side)
+        if not isinstance(hp, dict):
+            continue
+        if hp.get("role", "") in _HEDGE_ROLES_HC:
+            continue
+        heavy_count += 1
+        cp = float((snapshot.all_prices or {}).get(sym, 0.0))
+        if cp <= 0:
+            continue
+        roi = calc_roi_pct(float(hp.get("ep", 0)), cp, heavy_side, LEVERAGE)
+        if roi >= 0:
+            all_negative = False
+            break
+    if heavy_count > 0 and all_negative:
+        print(f"[HEDGE_CORE] 필요조건①: heavy side({heavy_side}) 전 슬롯 손실 → 헷지 진입")
+        return True
+
+    return False
 
 
 def _tid():
@@ -91,13 +152,45 @@ def plan_hedge_core_entry(
     intents: List[Intent] = []
 
     if skew < skew_thresh:
+        # stage2 미만이면 타이머도 리셋
+        _is_hedge_required(st, snapshot, skew, "buy" if long_margin > short_margin else "sell")
         return intents
 
     heavy_side = "buy" if long_margin > short_margin else "sell"
     hedge_side = "sell" if heavy_side == "buy" else "buy"
 
+    # ★ v10.17: stage2(≥15%) 미만이면 자체조정(TP Lock + Heavy TP)에 맡김
+    if skew < SKEW_STAGE2_TRIGGER:
+        _is_hedge_required(st, snapshot, skew, heavy_side)  # 타이머 관리만
+        return intents
+
+    # ★ v10.17: 헷지 필요 조건 체크 — 미충족 시 진입 보류
+    if not _is_hedge_required(st, snapshot, skew, heavy_side):
+        return intents
+
+    # ★ v10.17: heavy side 스트레스 감지 → 진입 조건 완화
+    heavy_stressed = False
+    for _s, _ss in st.items():
+        if not isinstance(_ss, dict):
+            continue
+        _hp = get_p(_ss, heavy_side)
+        if not isinstance(_hp, dict):
+            continue
+        if _hp.get("role", "") in _HEDGE_ROLES_HC:
+            continue
+        _cp = float((snapshot.all_prices or {}).get(_s, 0.0))
+        if _cp <= 0:
+            continue
+        _roi = calc_roi_pct(float(_hp.get("ep", 0)), _cp, heavy_side, LEVERAGE)
+        if _roi <= SKEW_HEDGE_STRESS_ROI:  # -3.0%
+            heavy_stressed = True
+            break
+
+    # stressed: T1/T2 허용 + ROI ≤ -3.0%  /  normal: T2만 + ROI ≤ -6.0%
+    _roi_min = SKEW_HEDGE_STRESS_ROI if heavy_stressed else -6.0  # -3.0 vs -6.0
+
     # ── 소스 후보: heavy side, step=0, CORE만 ──
-    # 정렬: DCA 깊은 순 → ROI 낮은 순 (T2 없으면 ROI 낮은 T1 우선)
+    # 정렬: DCA 깊은 순 → ROI 낮은 순
     src_candidates = []
     for sym, sym_st in st.items():
         hp = get_p(sym_st, heavy_side)
@@ -110,17 +203,21 @@ def plan_hedge_core_entry(
         # ★ v10.11b: T5 소스에는 헷지 안 붙임 (T5 독립게임)
         if int(hp.get("dca_level", 1) or 1) >= 5:
             continue
-        # ★ 최종 아키텍처: T2만 소스 허용 (T1/T3+ 제외)
         _src_dca_lv = int(hp.get("dca_level", 1) or 1)
-        if _src_dca_lv != 2:
-            continue
+        # ★ v10.17: stressed → T1/T2 허용, normal → T2만 (기존 방식)
+        if heavy_stressed:
+            if _src_dca_lv > 2:  # T3+ 제외
+                continue
+        else:
+            if _src_dca_lv != 2:  # T2만
+                continue
         cp = float((snapshot.all_prices or {}).get(sym, 0.0))
         if cp <= 0:
             continue
         roi = calc_roi_pct(float(hp.get("ep", 0)), cp, heavy_side, LEVERAGE)
         dca = int(hp.get("dca_level", 1) or 1)
-        # ★ v10.12: T2~T4 소스는 ROI ≤ -1.2%일 때만 (DCA -1.5% 전에 발동, MDD 개선)
-        if roi > -6.0:  # ★ 최종: T2 진입 후 -6% 이상 손실 시만 헷지
+        # ★ v10.17: stressed=-3.0%, normal=-6.0%
+        if roi > _roi_min:
             continue
         src_candidates.append((sym, hp, cp, roi, dca))
 
@@ -187,7 +284,8 @@ def plan_hedge_core_entry(
         slots_all.risk_total += 1  # 전체 카운트도 증가
         _hedge_core_cooldowns[src_sym] = time.time() + 60  # 60초 쿨다운
         print(f"[HEDGE_CORE] {src_sym} {hedge_side} src_roi={src_roi:.1f}% "
-              f"src_dca=T{src_dca} skew={skew*100:.0f}% ${notional:.0f}")
+              f"src_dca=T{src_dca} skew={skew*100:.0f}% ${notional:.0f} "
+              f"stressed={'Y' if heavy_stressed else 'N'}")
 
     return intents
 

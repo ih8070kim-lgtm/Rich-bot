@@ -67,6 +67,14 @@ TRADES_COLUMNS = [
     "source_sym",    # HEDGE일 때 소스 심볼
 ]
 
+# ── log_skew (★ v10.17) ─────────────────────────────────────────
+SKEW_COLUMNS = [
+    "time", "skew", "long_mr", "short_mr", "heavy_side",
+    "lock_count", "hedge_active", "hedge_required",
+    "stage2_min",   # stage2 진입 후 경과 분 (0=비활성)
+    "mr",           # 전체 margin_ratio
+]
+
 # ── log_universe ────────────────────────────────────────────────
 UNIVERSE_COLUMNS = [
     "time", "trace_id", "top10", "long_4", "short_4",

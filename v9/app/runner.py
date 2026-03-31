@@ -222,6 +222,7 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
             _spe_sync(sym_st, side, None)
 
     # ── 2) 포지션북에 있는데 바이낸스에 없음 → 유령 포지션 제거 ──
+    # ★ v10.17: 첫 sync(재시작 직후)는 "다운타임 중 청산" 가능성 → 상세 로그
     for (sym, side), book_p in book_pos.items():
         if (sym, side) not in ex_pos:
             book_qty = float(book_p.get('amt', 0) or 0)
@@ -1369,11 +1370,47 @@ async def _main_loop(ex_init, dry_run: bool):
     except Exception as _dt_e:
         print(f"[STARTUP] 다운타임 감지 실패(무시): {_dt_e}")
 
+    # ★ v10.17: _skew_stage2_enter_ts 복원 (재시작 후 15분 타이머 유지)
+    try:
+        import v9.engines.hedge_core as _hc_mod
+        _saved_s2ts = float(system_state.get('_skew_stage2_enter_ts', 0.0) or 0.0)
+        if _saved_s2ts > 0 and time.time() - _saved_s2ts < 3600:  # 1시간 이내만 복원
+            _hc_mod._skew_stage2_enter_ts = _saved_s2ts
+            _elapsed = (time.time() - _saved_s2ts) / 60
+            print(f"[STARTUP] _skew_stage2_enter_ts 복원: {_elapsed:.0f}분 경과")
+        else:
+            _hc_mod._skew_stage2_enter_ts = 0.0
+    except Exception as _s2e:
+        print(f"[STARTUP] stage2 타이머 복원 실패(무시): {_s2e}")
+
     while True:
         now = time.time()
         loop_start = now
 
         try:
+            # ── ★ v10.17: config_override.json 핫리로드 ─────────────
+            # 파일 있으면 v9.config 모듈 속성을 런타임 오버라이드
+            # 파일 없으면 기존 동작 완전히 동일 (zero-risk)
+            # 허용 키만 오버라이드 (안전 화이트리스트)
+            _OVERRIDE_WHITELIST = {
+                "SKEW_STAGE2_TRIGGER", "SKEW_HEAVY_TP_ROI_1", "SKEW_HEAVY_TP_ROI_2",
+                "SKEW_STAGE2_TIMEOUT_SEC", "SKEW_HEDGE_STRESS_ROI",
+                "TP_LOCK_SKEW_1", "TP_LOCK_SKEW_2", "TP_LOCK_RELEASE",
+                "TP_LOCK_MIN_ROI", "TP_LOCK_EXIT_ROI", "TP_LOCK_STRESS_ROI",
+                "SKEW_HEDGE_TRIGGER", "REBOUND_ALPHA",
+            }
+            _override_path = os.path.join(_PROJECT_DIR, "config_override.json")
+            if os.path.exists(_override_path):
+                try:
+                    import v9.config as _v9cfg
+                    with open(_override_path, encoding='utf-8') as _ov_f:
+                        _overrides = json.load(_ov_f)
+                    for _ok, _ov in _overrides.items():
+                        if _ok in _OVERRIDE_WHITELIST and hasattr(_v9cfg, _ok):
+                            setattr(_v9cfg, _ok, _ov)
+                except Exception as _ov_e:
+                    print(f"[OVERRIDE] config_override.json 로드 실패(무시): {_ov_e}")
+
             # ── 텔레그램 봇 명령 싱크 (system_state.json → in-memory) ───
             try:
                 _ss_path = os.path.join(_PROJECT_DIR, "system_state.json")
@@ -1716,8 +1753,42 @@ async def _main_loop(ex_init, dry_run: bool):
             # ── 포지션 스냅샷 로그 (30초 주기) ──────────────────
             if now - last_save_ts >= 10:
                 snapshot_positions(st, snapshot)
+                # ★ v10.17: stage2 타이머 system_state에 저장 (재시작 복원용)
+                try:
+                    import v9.engines.hedge_core as _hc_sv
+                    system_state['_skew_stage2_enter_ts'] = _hc_sv._skew_stage2_enter_ts
+                except Exception:
+                    pass
                 save_position_book(st, cooldowns, system_state)
                 last_save_ts = now
+                # ★ v10.17: 스큐 상태 로그 (log_skew.csv)
+                try:
+                    from v9.engines.hedge_core import (
+                        calc_skew as _cs, _skew_stage2_enter_ts as _s2ts,
+                        _is_hedge_required as _ihr,
+                    )
+                    from v9.logging.logger_csv import log_skew as _lskew
+                    from v9.config import SKEW_STAGE2_TRIGGER as _s2t
+                    _tc = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                    if _tc > 0:
+                        _sk, _lm, _sm = _cs(st, _tc)
+                        _hvy = "buy" if _lm > _sm else "sell"
+                        _hact = any(
+                            isinstance(get_p(ss, s), dict)
+                            and (get_p(ss, s) or {}).get("role") == "CORE_HEDGE"
+                            for ss in st.values() if isinstance(ss, dict)
+                            for s in ("buy", "sell")
+                        )
+                        _hreq = _ihr(st, snapshot, _sk, _hvy) if _sk >= _s2t else False
+                        _s2m = (now - _s2ts) / 60 if _s2ts > 0 else 0.0
+                        _lc = (2 if _sk >= _s2t else 1) if _sk >= 0.10 else 0
+                        _lskew(
+                            skew=_sk, long_mr=_lm, short_mr=_sm, heavy_side=_hvy,
+                            lock_count=_lc, hedge_active=_hact, hedge_required=_hreq,
+                            stage2_min=_s2m, mr=float(getattr(snapshot, "margin_ratio", 0) or 0),
+                        )
+                except Exception as _lse:
+                    pass  # 로그 실패는 무시
                 # ★ v10.15: minroi 30초마다 저장
                 if now - _last_minroi_save_ts >= 30:
                     save_minroi(_minroi)
