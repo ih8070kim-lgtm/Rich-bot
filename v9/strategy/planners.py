@@ -1171,19 +1171,20 @@ def plan_open(
         if len(closes_5m_e30) >= 30:
             _ema30_5m = calc_ema(closes_5m_e30, period=30)
             # ── E30 Long 주 조건 (ATR2.0, RSI<40) ──
-            if can_long and not _mr_long_final and _ema30_5m > 0:
+            # ★ v10.20: MR 우선순위 게이트 제거 → MR과 독립 평가 (로그 비교용)
+            if can_long and _ema30_5m > 0:
                 if curr_p < _ema30_5m - atr_coin * 2.0 and rsi5_now < 40 and micro_long_ok:
                     _e30_long_final = True
             # ── E30 Long 대칭 (숏 조건 뒤집기: ATR1.4, RSI<40) ──
-            if can_long and not _mr_long_final and not _e30_long_final and _ema30_5m > 0:
+            if can_long and not _e30_long_final and _ema30_5m > 0:
                 if curr_p < _ema30_5m - atr_coin * 1.4 and rsi5_now < 40 and micro_long_ok:
                     _e30_long_final = True
             # ── E30 Short 주 조건 (ATR1.4, RSI>60) ──
-            if can_short and not _mr_short_final and _ema30_5m > 0:
+            if can_short and _ema30_5m > 0:
                 if curr_p > _ema30_5m + atr_coin * 1.4 and rsi5_now > 60 and micro_short_ok:
                     _e30_short_final = True
             # ── E30 Short 대칭 (롱 조건 뒤집기: ATR2.0, RSI>60) ──
-            if can_short and not _mr_short_final and not _e30_short_final and _ema30_5m > 0:
+            if can_short and not _e30_short_final and _ema30_5m > 0:
                 if curr_p > _ema30_5m + atr_coin * 2.0 and rsi5_now > 60 and micro_short_ok:
                     _e30_short_final = True
 
@@ -1284,11 +1285,20 @@ def plan_open(
         if _pend_entry_type is not None:
             entry_type_tag = _pend_entry_type   # pending 발화: armed 시점 값 사용
         else:
-            if (trigger_side == "buy"  and _mr_long_final) or \
-               (trigger_side == "sell" and _mr_short_final):
+            _is_mr  = (trigger_side == "buy"  and _mr_long_final)  or \
+                      (trigger_side == "sell" and _mr_short_final)
+            _is_e30 = (trigger_side == "buy"  and _e30_long_final) or \
+                      (trigger_side == "sell" and _e30_short_final)
+            _is_bo  = (trigger_side == "buy"  and _bo_long_final)  or \
+                      (trigger_side == "sell" and _bo_short_final)
+            # ★ v10.20: MR/E30 동시 발동 → "MR_E30", 단독 → 각자 태깅
+            if _is_mr and _is_e30:
+                entry_type_tag = "MR_E30"
+            elif _is_mr:
                 entry_type_tag = "MR"
-            elif (trigger_side == "buy"  and _bo_long_final) or \
-                 (trigger_side == "sell" and _bo_short_final):
+            elif _is_e30:
+                entry_type_tag = "E30"
+            elif _is_bo:
                 entry_type_tag = "BREAKOUT"
             else:
                 entry_type_tag = "MR"
@@ -1347,9 +1357,36 @@ def plan_dca(
     snapshot: MarketSnapshot,
     st: Dict,
     cooldowns: Dict,
+    system_state: Dict = None,
 ) -> List[Intent]:
     intents: List[Intent] = []
     now = time.time()
+
+    # ★ v10.20: 동적 DCA 제한 — MR 전략 정합성 강화
+    # 시장 전체 방향성 이동(동시 DCA 다수 / HARD_SL 반복) 감지 시 DCA 레벨 자동 축소
+    _dyn_now = now
+    # (1) 현재 DCA 진행 중 포지션 수 (dca_level >= 2, HEDGE 제외)
+    _in_dca_count = sum(
+        1 for _, p2 in _pos_items(st)
+        if int(p2.get("dca_level", 1) or 1) >= 2
+        and p2.get("role", "") not in _HEDGE_ROLES_SLOT
+    )
+    _concurrent_max = 5 if _in_dca_count < 2 else (3 if _in_dca_count < 3 else 2)
+
+    # (2) 최근 2시간 HARD_SL 발생 수
+    _hsl_cutoff = _dyn_now - 7200
+    _hsl_raw = (system_state or {}).get("_hard_sl_history", [])
+    _hsl_hist = [t for t in _hsl_raw if t > _hsl_cutoff]
+    if system_state is not None:
+        system_state["_hard_sl_history"] = _hsl_hist  # 만료 항목 정리
+    _recent_hsl = len(_hsl_hist)
+    _hsl_max = 5 if _recent_hsl == 0 else (3 if _recent_hsl < 2 else 2)
+
+    # 두 조건 중 더 엄격한 쪽 적용
+    _dynamic_max_tier = min(_concurrent_max, _hsl_max)
+    if _dynamic_max_tier < 5:
+        print(f"[DCA_LIMIT] 동적 DCA 제한 active: max_tier=T{_dynamic_max_tier} "
+              f"(동시DCA={_in_dca_count}개, 최근HARD_SL={_recent_hsl}건/2h)")
 
     # ★ v10.12: BTC Crash Filter — 롱 DCA만 차단 (2중 감지)
     _btc_pool_dca = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
@@ -1515,6 +1552,9 @@ def plan_dca(
             _block = None
             if _is_force_dca:
                 pass  # ★ TP_LOCK force DCA: 쿨다운/크래시 바이패스
+            # ★ v10.20: 동적 DCA 레벨 제한 (MR 전략 정합성)
+            elif tier_now > _dynamic_max_tier:
+                _block = f"DCA_LIMIT_T{_dynamic_max_tier}"
             elif _btc_crash_dca and is_long:
                 _block = "BTC_CRASH"
             elif _killswitch_dca:
@@ -2221,6 +2261,9 @@ def plan_force_close(
                 if _sl_roi <= _sl_thresh:
                     force  = True
                     reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
+                    # ★ v10.20: HARD_SL 발생 기록 → plan_dca 동적 제한
+                    _hsl = system_state.setdefault("_hard_sl_history", [])
+                    _hsl.append(time.time())
 
             # ★ V10.17: ZOMBIE — BAD + 슬롯풀 + T2+ + ROI≤-5%
             if not force:
@@ -2602,7 +2645,7 @@ def generate_all_intents(
     intents += plan_hedge_core_manage(snapshot, st)
     intents += plan_tp1(snapshot, st)
     intents += plan_trail_on(snapshot, st)
-    intents += plan_dca(snapshot, st, cooldowns)
+    intents += plan_dca(snapshot, st, cooldowns, system_state)
     intents += plan_insurance_sh(snapshot, st, system_state)
     intents += plan_open(snapshot, st, cooldowns, system_state)
     for _i in intents:

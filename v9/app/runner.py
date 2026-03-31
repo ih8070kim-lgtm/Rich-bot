@@ -726,11 +726,13 @@ async def _manage_tp1_preorders(ex, st, snapshot):
     """
     TP1 limit 선주문 관리 — 매 틱 실행.
     ★ v10.13b: 병렬 fetch_order + 5초 타임아웃 (순차 블로킹 해소)
+    ★ v10.19: ENABLE_TP1_PRE=False 시 기존 선주문만 취소하고 신규 배치 안 함
 
     Phase 1: 활성 선주문 일괄 조회 (병렬)
     Phase 2: 결과 처리 (체결/취소/DCA 가격 불일치)
     Phase 3: 신규 선주문 배치 (병렬)
     """
+    from v9.config import ENABLE_TP1_PRE
     global _tp1_pre_check_ts
     now = time.time()
     do_check = (now - _tp1_pre_check_ts >= _TP1_PRE_CHECK_SEC)
@@ -907,7 +909,11 @@ async def _manage_tp1_preorders(ex, st, snapshot):
 
     # ══════════════════════════════════════════════════════════
     # Phase 3: 신규 선주문 배치 (병렬)
+    # ★ v10.19: ENABLE_TP1_PRE=False → 신규 배치 전체 스킵
     # ══════════════════════════════════════════════════════════
+    if not ENABLE_TP1_PRE:
+        return
+
     place_tasks = []  # [(sym, pos_side, p, close_side, safe_qty, safe_price, ref_ep, tp1_pct, dca, params), ...]
 
     for sym, pos_side, p, dca in new_candidates:
