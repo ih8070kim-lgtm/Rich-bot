@@ -256,6 +256,7 @@ from v9.config import (
     TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_RELEASE,
     TP_LOCK_STRESS_ROI, TP_LOCK_STRESS_MULT,
     TP_LOCK_MIN_ROI, TP_LOCK_EXIT_ROI,
+    SKEW_STAGE2_TRIGGER, SKEW_HEAVY_TP_ROI_1, SKEW_HEAVY_TP_ROI_2,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1618,29 +1619,35 @@ def plan_dca(
 
 # ═════════════════════════════════════════════════════════════════
 # TP Lock — 마진 불균형 시 light side 익절 잠금 (★ v10.16)
+# ★ v10.17: (locked, heavy_side, skew) tuple 반환
+#            thresh_2 → SKEW_STAGE2_TRIGGER(15%)로 하향 조정
+#            CORE_HEDGE 활성 시 lock_count 최대 1개로 제한
 # ═════════════════════════════════════════════════════════════════
 _tp_lock_active = False   # 히스테리시스 상태
 
-def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
+def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict):
     """마진 불균형 시 light side 상위 슬롯의 (symbol, side) set 반환.
 
-    반환된 키에 해당하는 포지션은 TP1/TP2를 스킵해야 한다.
+    Returns: (locked: set, heavy_side: str, skew: float)
+      - locked: TP1/TP2를 스킵해야 하는 (symbol, side) 집합
+      - heavy_side: "buy" | "sell" | "" (스큐 없으면 빈 문자열)
+      - skew: 현재 스큐값 (0.0 ~ 1.0)
     """
     global _tp_lock_active
 
     total_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
     if total_cap <= 0:
-        return set()
+        return set(), "", 0.0
 
     skew, long_m, short_m = calc_skew(st, total_cap)
 
     # ── 히스테리시스: 이미 활성이면 RELEASE 기준, 비활성이면 SKEW_1 기준 ──
     if not _tp_lock_active and skew < TP_LOCK_SKEW_1:
-        return set()
+        return set(), "", skew
     if _tp_lock_active and skew < TP_LOCK_RELEASE:
         _tp_lock_active = False
         print(f"[TP_LOCK] OFF — skew={skew:.3f} < release={TP_LOCK_RELEASE}")
-        return set()
+        return set(), "", skew
 
     _tp_lock_active = True
 
@@ -1663,7 +1670,8 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
 
     stress_mult = TP_LOCK_STRESS_MULT if heavy_stressed else 1.0
     thresh_1 = TP_LOCK_SKEW_1 * stress_mult
-    thresh_2 = TP_LOCK_SKEW_2 * stress_mult
+    # ★ v10.17: thresh_2 = SKEW_STAGE2_TRIGGER(15%) — 기존 TP_LOCK_SKEW_2(20%)에서 하향
+    thresh_2 = SKEW_STAGE2_TRIGGER * stress_mult
 
     if skew >= thresh_2:
         lock_count = 2
@@ -1671,10 +1679,20 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
         lock_count = 1
     else:
         # 히스테리시스 유지 중이지만 스트레스 보정 후 미달
-        return set()
+        return set(), heavy_side, skew
+
+    # ★ v10.17: CORE_HEDGE 활성 시 lock_count 최대 1개 (헷지가 이미 offset 역할)
+    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
+    _hedge_active = any(
+        isinstance(get_p(sym_st, s), dict)
+        and (get_p(sym_st, s) or {}).get("role") == "CORE_HEDGE"
+        for sym, sym_st in st.items() if isinstance(sym_st, dict)
+        for s in ("buy", "sell")
+    )
+    if _hedge_active:
+        lock_count = min(lock_count, 1)
 
     # ── Light side 후보: 미실현 PnL 내림차순 ──
-    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
     candidates = []   # (symbol, side, unrealized_pnl, roi)
     light_total = 0
 
@@ -1707,7 +1725,7 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
     # ── 안전장치: light side 전부 잠금 금지 ──
     lock_count = min(lock_count, max(0, light_total - 1))
     if lock_count <= 0:
-        return set()
+        return set(), heavy_side, skew
 
     # PnL 내림차순 정렬 → 상위 N개 잠금
     candidates.sort(key=lambda x: -x[2])
@@ -1717,9 +1735,10 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
             break
         locked.add((sym, side))
         print(f"[TP_LOCK] {sym} {side} LOCKED — pnl=${pnl:.1f} roi={roi:.1f}% "
-              f"(skew={skew:.3f}, stress={'Y' if heavy_stressed else 'N'})")
+              f"(skew={skew:.3f} stage={'2' if skew>=SKEW_STAGE2_TRIGGER else '1'} "
+              f"stress={'Y' if heavy_stressed else 'N'} hedge_active={'Y' if _hedge_active else 'N'})")
 
-    return locked
+    return locked, heavy_side, skew
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1727,13 +1746,14 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict) -> set:
 # ═════════════════════════════════════════════════════════════════
 def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
     # ★ v10.16: TP Lock — 마진 불균형 시 light side 익절 잠금
-    _tp_locked = _calc_tp_lock(snapshot, st)
+    # ★ v10.17: (locked, heavy_side, skew) tuple 언패킹
+    _tp_locked, _heavy_side, _cur_skew = _calc_tp_lock(snapshot, st)
 
     intents: List[Intent] = []
     for symbol, p in _pos_items(st):
         if p.get("step", 0) != 0 or p.get("tp1_done"):
             continue
-        # ★ v10.16: TP Lock 가드
+        # ★ v10.16: TP Lock 가드 (light side 완전 블록)
         if (symbol, p.get("side", "")) in _tp_locked:
             continue
         # ★ v10.8: pending 주문 있으면 스킵 (TP1 295회 반복 방지)
@@ -1785,6 +1805,18 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 _worst = float(p.get("worst_roi", 0.0) or 0.0)
                 tp1_thresh = _worst + _alpha
 
+        # ★ v10.17: Heavy side 조기 TP — 스큐 시 REBOUND_ALPHA 완화
+        # light side는 위에서 이미 블록됨. heavy side 슬롯만 이 경로 진입.
+        if (_heavy_side and _cur_skew >= TP_LOCK_SKEW_1
+                and p.get("side", "") == _heavy_side
+                and not (_bad_mode_active and dca_level == 1)):  # BAD T1 기준은 유지
+            _early_roi = (SKEW_HEAVY_TP_ROI_2 if _cur_skew >= SKEW_STAGE2_TRIGGER
+                          else SKEW_HEAVY_TP_ROI_1)
+            if tp1_thresh > _early_roi:
+                tp1_thresh = _early_roi  # 완화 (올리지 않음)
+                print(f"[HEAVY_TP] {symbol} {p.get('side','')} 조기TP 기준 완화: "
+                      f"{tp1_thresh:.1f}% (skew={_cur_skew:.3f})")
+
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
             # ★ v10.13: T1~T5 전부 40% 부분익절 + 60% trailing
@@ -1819,8 +1851,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 # TP2 Planner
 # ═════════════════════════════════════════════════════════════════
 def plan_tp2(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
-    # ★ v10.16: TP Lock 재사용 (plan_tp1에서 이미 계산, 캐시 활용)
-    _tp_locked = _calc_tp_lock(snapshot, st)
+    # ★ v10.16: TP Lock 재사용 / ★ v10.17: tuple 언패킹
+    _tp_locked, _heavy_side, _cur_skew = _calc_tp_lock(snapshot, st)
 
     intents: List[Intent] = []
     for symbol, p in _pos_items(st):
