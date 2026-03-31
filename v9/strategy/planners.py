@@ -1617,6 +1617,9 @@ def plan_dca(
     return intents
 
 
+# ★ v10.17: Heavy TP 로그 중복 방지 — (symbol, side) 당 1회만 출력
+_heavy_tp_logged: set = set()  # 현재 skew 구간에서 이미 로그된 슬롯
+
 # ═════════════════════════════════════════════════════════════════
 # TP Lock — 마진 불균형 시 light side 익절 잠금 (★ v10.16)
 # ★ v10.17: (locked, heavy_side, skew) tuple 반환
@@ -1646,6 +1649,7 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict):
         return set(), "", skew
     if _tp_lock_active and skew < TP_LOCK_RELEASE:
         _tp_lock_active = False
+        _heavy_tp_logged.clear()  # ★ v10.17: skew 해제 시 로그 쿨다운 리셋
         print(f"[TP_LOCK] OFF — skew={skew:.3f} < release={TP_LOCK_RELEASE}")
         return set(), "", skew
 
@@ -1814,8 +1818,12 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                           else SKEW_HEAVY_TP_ROI_1)
             if tp1_thresh > _early_roi:
                 tp1_thresh = _early_roi  # 완화 (올리지 않음)
-                print(f"[HEAVY_TP] {symbol} {p.get('side','')} 조기TP 기준 완화: "
-                      f"{tp1_thresh:.1f}% (skew={_cur_skew:.3f})")
+                # ★ v10.17: (symbol, side) 당 1회만 출력
+                _log_key = (symbol, p.get("side", ""))
+                if _log_key not in _heavy_tp_logged:
+                    _heavy_tp_logged.add(_log_key)
+                    print(f"[HEAVY_TP] {symbol} {p.get('side','')} 조기TP 기준 완화: "
+                          f"thresh={tp1_thresh:.1f}% (skew={_cur_skew:.3f})")
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))

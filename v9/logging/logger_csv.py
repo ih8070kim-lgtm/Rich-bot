@@ -15,6 +15,7 @@ from v9.logging.schemas import (
     RISK_COLUMNS,
     TRADES_COLUMNS,
     UNIVERSE_COLUMNS,
+    SKEW_COLUMNS,
 )
 
 
@@ -252,6 +253,38 @@ def log_trade(
         "source_sym": source_sym,
     }
     _append_csv(_log_path("log_trades.csv"), TRADES_COLUMNS, row)
+
+
+# ── log_skew (★ v10.17) ─────────────────────────────────────────
+def log_skew(
+    skew: float,
+    long_mr: float,
+    short_mr: float,
+    heavy_side: str,
+    lock_count: int,
+    hedge_active: bool,
+    hedge_required: bool,
+    stage2_min: float,
+    mr: float,
+):
+    """스큐 상태 기록 — 30초마다 호출 (log_skew.csv)."""
+    from v9.config import LOG_SKEW_FILE
+    _append_csv(
+        _log_path(LOG_SKEW_FILE),
+        SKEW_COLUMNS,
+        {
+            "time":           _now_str(),
+            "skew":           round(skew, 4),
+            "long_mr":        round(long_mr, 4),
+            "short_mr":       round(short_mr, 4),
+            "heavy_side":     heavy_side,
+            "lock_count":     lock_count,
+            "hedge_active":   int(hedge_active),
+            "hedge_required": int(hedge_required),
+            "stage2_min":     round(stage2_min, 1),
+            "mr":             round(mr, 4),
+        },
+    )
 
 
 # ── log_universe ────────────────────────────────────────────────

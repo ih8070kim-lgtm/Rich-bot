@@ -223,6 +223,7 @@ LOG_ORDERS_FILE    = "log_orders.csv"
 LOG_FILLS_FILE     = "log_fills.csv"
 LOG_POSITIONS_FILE = "log_positions.csv"
 LOG_UNIVERSE_FILE  = "log_universe.csv"
+LOG_SKEW_FILE      = "log_skew.csv"      # ★ v10.17: 스큐 모니터링
 STATE_FILE         = "v9_state.json"
 HEARTBEAT_FILE     = "heartbeat.txt"
 
