@@ -642,6 +642,43 @@ async def _manage_tp1_preorders(ex, st, snapshot):
                         )
                     except Exception:
                         pass
+                    # ★ v10.17: TP1_PRE 체결 텔레그램 알림 (기존 누락 버그 수정)
+                    if _TELEGRAM_OK:
+                        try:
+                            from v9.types import OrderResult as _OR, Intent as _IN, IntentType as _IT
+                            _fake_result = _OR(
+                                trace_id=f"tp1pre_{str(oid)[:8]}",
+                                success=True,
+                                order_id=str(oid),
+                                symbol=sym,
+                                side="sell" if pos_side == "buy" else "buy",
+                                qty=filled,
+                                avg_price=avg_price,
+                                filled_qty=filled,
+                                order_type="LIMIT",
+                                tag="TP1_PRE",
+                            )
+                            _fake_intent = _IN(
+                                trace_id=f"tp1pre_{str(oid)[:8]}",
+                                intent_type=_IT.TP1,
+                                symbol=sym,
+                                side="sell" if pos_side == "buy" else "buy",
+                                qty=filled,
+                                price=avg_price,
+                                reason=f"TP1_PRE_FILL(pnl=${raw_pnl:+.2f})",
+                                metadata={},
+                            )
+                            asyncio.ensure_future(
+                                _notify_fill(
+                                    result=_fake_result,
+                                    intent=_fake_intent,
+                                    st=st,
+                                    snapshot=snapshot,
+                                    pos_snap=dict(p),  # 현재 포지션 스냅샷
+                                )
+                            )
+                        except Exception as _tg_tp1e:
+                            print(f"[TP1_PRE] 텔레그램 알림 실패(무시): {_tg_tp1e}")
                     # ★ v10.14: 전량 체결 시(amt≤0) 포지션 클리어 (무한 trailing 방지)
                     if p["amt"] <= 0:
                         from v9.execution.position_book import clear_position
