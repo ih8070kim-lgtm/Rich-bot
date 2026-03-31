@@ -85,6 +85,15 @@ USE_SUPERVISOR_MODE = True
 # (프로세스 관리는 supervisor가 담당 — deploy bot은 신호 파일만 생성)
 
 # =========================================================
+# Git Auto-Pull 설정
+# =========================================================
+
+GIT_AUTO_PULL_ENABLED  = os.getenv("GIT_AUTO_PULL_ENABLED", "1").strip() == "1"
+GIT_AUTO_PULL_BRANCH   = os.getenv("GIT_AUTO_PULL_BRANCH", "main").strip()
+GIT_AUTO_PULL_INTERVAL = int(os.getenv("GIT_AUTO_PULL_INTERVAL", "300"))  # 초 (기본 5분)
+RUN_TESTS_ON_DEPLOY    = os.getenv("RUN_TESTS_ON_DEPLOY", "1").strip() == "1"
+
+# =========================================================
 # 배포 설정
 # =========================================================
 
@@ -455,6 +464,165 @@ def git_sync_target_file(target: Path, original_filename: str) -> tuple:
         return False, f"git push 오류 (commit {commit_hash}): {e}"
 
     return True, f"sync 완료 (commit {commit_hash})"
+
+
+# =========================================================
+# 테스트 실행 (배포 전 안전 검증)
+# =========================================================
+
+def run_tests() -> tuple:
+    """
+    pytest tests/ 실행.
+    반환: (ok: bool, summary: str)
+    ok=True → 모든 테스트 통과 (또는 pytest 미설치)
+    ok=False → 테스트 실패 → 배포/pull 차단
+    """
+    tests_dir = PROJECT_DIR / "tests"
+    if not tests_dir.exists():
+        return True, "tests/ 폴더 없음 (skip)"
+
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", str(tests_dir),
+             "-x", "--tb=short", "-q", "--no-header"],
+            cwd=str(PROJECT_DIR),
+            capture_output=True, text=True, timeout=120,
+        )
+        passed = r.returncode == 0
+        # 마지막 2줄만 요약 (너무 길면 텔레그램 메시지 터짐)
+        lines = (r.stdout + r.stderr).strip().splitlines()
+        summary = "\n".join(lines[-3:]) if lines else "(출력 없음)"
+        return passed, summary
+    except FileNotFoundError:
+        return True, "pytest 미설치 (skip)"
+    except Exception as e:
+        return False, f"테스트 실행 오류: {e}"
+
+
+# =========================================================
+# Git Auto-Pull (GitHub → 서버 자동 동기화)
+# =========================================================
+
+_git_pull_last_ts: float = 0.0   # 마지막 pull 시각
+
+
+def git_get_remote_head(branch: str) -> Optional[str]:
+    """원격 브랜치의 최신 commit hash (7자). 실패 시 None."""
+    if not _git_configured():
+        return None
+    _setup_git_remote()
+    try:
+        r = subprocess.run(
+            ["git", "ls-remote", "origin", f"refs/heads/{branch}"],
+            cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().split()[0][:7]
+    except Exception:
+        pass
+    return None
+
+
+def git_get_local_head() -> Optional[str]:
+    """로컬 HEAD commit hash (7자). 실패 시 None."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return r.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def git_auto_pull(branch: str) -> tuple:
+    """
+    원격에 새 커밋이 있으면 pull + 재시작.
+    반환: (action: str, detail: str)
+      action: "pulled" | "up_to_date" | "skipped" | "error"
+    """
+    if not _git_configured():
+        return "skipped", "GitHub 미설정"
+
+    remote_head = git_get_remote_head(branch)
+    if not remote_head:
+        return "error", "원격 HEAD 조회 실패"
+
+    local_head = git_get_local_head()
+    if local_head and remote_head.startswith(local_head[:6]):
+        return "up_to_date", f"HEAD={local_head}"
+
+    log(f"[AUTO_PULL] 새 커밋 감지: local={local_head} remote={remote_head}")
+
+    # 1) 테스트 생략하고 일단 stash (워킹트리 보호)
+    try:
+        subprocess.run(
+            ["git", "stash"], cwd=str(PROJECT_DIR),
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+    # 2) pull
+    _setup_git_remote()
+    try:
+        r = subprocess.run(
+            ["git", "pull", "origin", branch, "--ff-only"],
+            cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout).strip()[:150]
+            return "error", f"git pull 실패: {err}"
+    except Exception as e:
+        return "error", f"git pull 오류: {e}"
+
+    new_head = git_get_local_head() or "?"
+
+    # 3) 테스트 검증 (실패 시 롤백)
+    if RUN_TESTS_ON_DEPLOY:
+        ok, summary = run_tests()
+        if not ok:
+            log(f"[AUTO_PULL] 테스트 실패 → 롤백 to {local_head}")
+            try:
+                subprocess.run(
+                    ["git", "reset", "--hard", local_head or "HEAD~1"],
+                    cwd=str(PROJECT_DIR), capture_output=True, timeout=10,
+                )
+            except Exception:
+                pass
+            return "error", f"테스트 실패 → 롤백\n{summary}"
+
+    # 4) 재시작
+    request_restart(reason=f"git_auto_pull:{new_head}")
+    return "pulled", f"{local_head} → {new_head}"
+
+
+def maybe_auto_pull():
+    """
+    메인 루프에서 주기적으로 호출. GIT_AUTO_PULL_INTERVAL 간격으로 실행.
+    """
+    global _git_pull_last_ts
+    if not GIT_AUTO_PULL_ENABLED:
+        return
+    now = time.time()
+    if now - _git_pull_last_ts < GIT_AUTO_PULL_INTERVAL:
+        return
+    _git_pull_last_ts = now
+
+    action, detail = git_auto_pull(GIT_AUTO_PULL_BRANCH)
+    if action == "pulled":
+        log(f"[AUTO_PULL] ✅ pull 완료: {detail}")
+        send_msg(ALLOWED_CHAT_ID,
+                 f"🔄 *Git Auto-Pull 완료*\n`{detail}`\n봇 재시작 중...",
+                 [[btn("📊 상태", "status"), btn("⬅️ 메뉴", "menu")]])
+    elif action == "error":
+        log(f"[AUTO_PULL] ❌ 오류: {detail}")
+        send_msg(ALLOWED_CHAT_ID,
+                 f"⚠️ *Git Auto-Pull 실패*\n`{detail}`")
+    # up_to_date / skipped → 무음
+
 
 # =========================================================
 # 파일 탐색
@@ -992,11 +1160,17 @@ def handle_text(chat_id: int, text: str):
 
     if cmd == "/status":
         rt = get_runtime_status()
+        local_h = git_get_local_head() or "?"
+        auto_pull_info = (
+            f"  Git Auto-Pull: {'ON' if GIT_AUTO_PULL_ENABLED else 'OFF'} "
+            f"(branch={GIT_AUTO_PULL_BRANCH} HEAD={local_h})"
+        )
         send_msg(chat_id,
                  f"📊 상태 ({now_str()})\n\n"
                  f"📂 {PROJECT_DIR}\n"
                  f"🤖 pid {os.getpid()} | parent {os.getppid()}\n\n"
-                 f"프로세스:\n{rt}",
+                 f"프로세스:\n{rt}\n\n"
+                 f"{auto_pull_info}",
                  [[btn("🔄 새로고침", "status"), btn("⬅️ 메뉴", "menu")]])
         return
 
@@ -1129,6 +1303,18 @@ def handle_document(chat_id: int, doc: dict):
         download_telegram_file(fp, save)
         log(f"Downloaded: {save}")
 
+        # ── 배포 전 테스트 검증 ─────────────────────────────────
+        if RUN_TESTS_ON_DEPLOY:
+            send_msg(chat_id, "🧪 테스트 실행 중...")
+            t_ok, t_summary = run_tests()
+            if not t_ok:
+                move_file(save, TG_FAILED_DIR)
+                send_msg(chat_id,
+                         f"❌ *테스트 실패 → 배포 차단*\n```\n{t_summary[:400]}\n```",
+                         [[btn("⬅️ 메뉴", "menu")]])
+                log(f"Deploy blocked by test failure: {filename}")
+                return
+
         # zip이면 일괄 배포
         if filename.lower().endswith(".zip"):
             ok, msg = deploy_zip(save)
@@ -1156,11 +1342,19 @@ def handle_document(chat_id: int, doc: dict):
 
 def main():
     ensure_dirs()
+    _setup_git_remote()
     offset = load_offset()
-    log("telegram_deploy_bot v2 started")
+    log(f"telegram_deploy_bot v2 started "
+        f"(auto_pull={'ON' if GIT_AUTO_PULL_ENABLED else 'OFF'} "
+        f"branch={GIT_AUTO_PULL_BRANCH} "
+        f"interval={GIT_AUTO_PULL_INTERVAL}s "
+        f"tests={'ON' if RUN_TESTS_ON_DEPLOY else 'OFF'})")
 
     while True:
         try:
+            # ── Git Auto-Pull 주기 체크 ──────────────────────────
+            maybe_auto_pull()
+
             updates = get_updates(offset)
 
             for upd in updates:

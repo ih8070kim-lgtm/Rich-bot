@@ -178,10 +178,15 @@ TP_LOCK_SKEW_3        = 0.25    # 3개 잠금 발동 스큐
 TP_LOCK_RELEASE_1     = 0.07    # 1개 잠금 해제 스큐
 TP_LOCK_RELEASE_2     = 0.15    # 2개 잠금 해제 스큐
 TP_LOCK_RELEASE_3     = 0.18    # 3개 잠금 해제 스큐
+TP_LOCK_RELEASE       = 0.07    # planners.py 호환 (= RELEASE_1)
 
 TP_LOCK_HEAVY_ROI     = -3.0    # heavy side 총합 ROI 이하 → 스트레스 ON (1차: skew 필요)
 TP_LOCK_HEAVY_ROI_2   = -4.0    # ★ V10.17: 2차 — skew 무관, ROI만으로 잠금
 TP_LOCK_MAX           = 3       # 최대 잠금 슬롯 수
+TP_LOCK_STRESS_ROI    = -4.0    # heavy side 이 ROI 이하 → 스트레스 가속 (= HEAVY_ROI_2)
+TP_LOCK_STRESS_MULT   = 0.80    # 스트레스 시 트리거 ×0.80
+TP_LOCK_MIN_ROI       = 2.0     # 잠금 대상 최소 ROI (이하 제외)
+TP_LOCK_EXIT_ROI      = 1.0     # 수익 소진 시 강제 해제
 
 # ─── v10.17: 스큐 에스컬레이션 / Heavy side 조기 TP ────────────────────────
 SKEW_STAGE2_TRIGGER     = 0.15  # 2단계: TP Lock 2개 + 헷지 필요조건 체크 시작
