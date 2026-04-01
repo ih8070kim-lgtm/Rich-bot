@@ -17,6 +17,7 @@ from v9.types import Intent, IntentType, MarketSnapshot
 from v9.config import (
     LEVERAGE, DCA_WEIGHTS,
     TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT, GRID_DIVISOR,
+    MAX_MR_PER_SIDE,
     SKEW_STAGE2_TRIGGER, SKEW_STAGE2_TIMEOUT_SEC, SKEW_HEDGE_STRESS_ROI,
 )
 from v9.execution.position_book import get_p, iter_positions
@@ -425,6 +426,15 @@ def plan_hedge_core_manage(
             # 여기서는 혹시 누락된 경우 폴백으로만 처리
             if hedge.get("t5_split"):
                 if not hedge.get("t5_mini_active"):
+                    # ★ V10.22 FIX: MR 슬롯 초과 방지
+                    _mr_slots_t5 = count_slots(st, role_filter="CORE_MR")
+                    _mr_cnt_t5 = _mr_slots_t5.risk_long if pos_side == "buy" else _mr_slots_t5.risk_short
+                    if _mr_cnt_t5 >= MAX_MR_PER_SIDE:
+                        print(f"[T5_MINI] {sym} {pos_side} MR슬롯 초과({_mr_cnt_t5}/{MAX_MR_PER_SIDE}) → 전환 차단, trailing")
+                        hedge["step"] = 1
+                        hedge["tp1_done"] = True
+                        hedge["trailing_on_time"] = time.time()
+                        continue
                     # 폴백: manage 루프에서 뒤늦게 감지
                     hedge["t5_mini_active"] = True
                     hedge["t5_mini_start_price"] = cp
@@ -440,14 +450,25 @@ def plan_hedge_core_manage(
                     print(f"[T5_MINI] {sym} {pos_side} 미니게임 폴백 시작 roi={hedge_roi:+.1f}%")
                 continue  # 미니게임 중 → manage 관여 없음, plan_tp1/plan_force_close가 담당
 
-            # ── V10.16: 소스 소멸 → 수익이면 전체 trailing, 손실이면 CORE_MR 전환 ──
-            # ★ 소스 HARD_SL 시 헷지는 대체로 큰 수익 → trailing으로 극대화
-            # ★ 소스 TP1→trailing exit 시에도 동일 (수익 확정 경로 통일)
+            # ── V10.22: 소스 소멸 → MR 전환 전 슬롯 체크 ──
+            _mr_slots_conv = count_slots(st, role_filter="CORE_MR")
+            _mr_cnt_conv = _mr_slots_conv.risk_long if pos_side == "buy" else _mr_slots_conv.risk_short
+            if _mr_cnt_conv >= MAX_MR_PER_SIDE:
+                # MR 슬롯 꽉 참 → 전환 불가, 즉시 trailing으로 정리
+                hedge["step"] = 1
+                hedge["tp1_done"] = True
+                hedge["trailing_on_time"] = time.time()
+                hedge["source_sym"] = ""
+                hedge["source_side"] = ""
+                hedge["max_dca_reached"] = True
+                print(f"[HEDGE_CORE→TRAIL] {sym} {pos_side} MR슬롯 초과({_mr_cnt_conv}/{MAX_MR_PER_SIDE}) "
+                      f"→ CORE_HEDGE 유지, trailing으로 정리 roi={hedge_roi:+.1f}%")
+                continue
+
             hedge["role"] = "CORE_MR"
             hedge["source_sym"] = ""
             hedge["source_side"] = ""
             hedge["entry_type"] = "MR"
-            # ★ v10.15: CORE_HEDGE는 T2 사이즈 진입 → 최소 dca_level=2 보장
             if int(hedge.get("dca_level", 1) or 1) < 2:
                 hedge["dca_level"] = 2
 
