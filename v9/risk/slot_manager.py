@@ -47,8 +47,6 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
         # ── 활성 포지션 (p_long / p_short) ──────────────────────
         for side, p in iter_positions(sd):
             step = int((p or {}).get("step", 0) or 0)
-            if step >= 1:
-                continue   # 트레일링 → HARD/RISK 모두 제외
             # ★ v10.15: role 필터
             if role_filter:
                 _role = (p or {}).get("role", "CORE_MR")
@@ -56,12 +54,18 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
                     continue
                 if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
                     continue
+            # ★ V10.22 FIX: 트레일링(step≥1)도 hard count 포함 (슬롯 초과 방지)
+            # risk는 0.5 가중치 (트레일링은 곧 청산 예정이므로 리스크 절반)
             hard_total += 1
             if side == "buy":  hard_long  += 1
             else:              hard_short += 1
-            risk_total_f += 1.0
-            if side == "buy":  risk_long_f  += 1.0
-            else:              risk_short_f += 1.0
+            if step >= 1:
+                _w = 0.5  # 트레일링: 리스크 가중치 절반
+            else:
+                _w = 1.0
+            risk_total_f += _w
+            if side == "buy":  risk_long_f  += _w
+            else:              risk_short_f += _w
 
         # ── pending_entry ────────────────────────────────────────
         # ★ FIX: role_filter 있어도 pending 카운트 (limit 미체결 → 슬롯 초과 방지)
