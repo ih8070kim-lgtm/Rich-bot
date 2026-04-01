@@ -119,13 +119,15 @@ async def route_order(
     trace_id  = intent.trace_id
     tag       = f"V9_{intent.intent_type.value}_{sym}"
 
-    # ── v10.13: 라우팅 모드 결정 ──
+    # ── v10.21: 라우팅 모드 결정 ──
+    # TP1: 지정가 (수익 목표 도달 → 슬리피지 0)
+    # TRAIL_ON/FORCE_CLOSE: 시장가 (급히 빠져야 → 즉시 체결)
     _meta_role = (intent.metadata or {}).get("role", "")
     _meta_entry = (intent.metadata or {}).get("entry_type", "")
+    from v9.types import IntentType as _IT_route
     _force_market = (
-        _is_reduce(intent)                           # TP1, TRAIL_ON, FORCE_CLOSE → 시장가
-        or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")  # ★ PATCH: 헷지 진입도 시장가 (limit → 체결 전 SL 방지)
-        # ★ v10.15: HIGH 레짐 DCA → metadata에서 force_market=True
+        _is_reduce(intent) and intent.intent_type != _IT_route.TP1  # TP1 제외 — 지정가
+        or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")
         or bool((intent.metadata or {}).get("force_market", False))
     )
     order_type = 'market' if (_force_market or not price) else 'limit'

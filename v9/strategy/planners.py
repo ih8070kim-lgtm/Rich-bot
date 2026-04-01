@@ -1948,9 +1948,6 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ v10.8: pending 주문 있으면 스킵 (TP1 295회 반복 방지)
         if p.get("pending_close"):
             continue
-        # ★ v10.13: TP1 선주문 활성이면 plan_tp1 스킵 (runner가 관리)
-        if p.get("tp1_preorder_id"):
-            continue
         # ★ V10.16 FIX: exit_fail_cooldown 체크 (-2022 무한반복 방지)
         _sym_st_tp1 = st.get(symbol, {})
         if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
