@@ -539,9 +539,8 @@ def _plan_open_asymmetric(
         _cleanup_asym_pending(system_state, st)
         return []
 
-    # ★ V10.22 FIX: hard count 기준으로 슬롯 제한
     slots = count_slots(st)
-    rl, rs = slots.long, slots.short
+    rl, rs = slots.risk_long, slots.risk_short
 
     # 방향별 목표 계산 (각 방향 독립)
     def _fill_target(dyn_slots: int, cur_cnt: int, t3_opp: int, t4_opp: int) -> int:
@@ -649,7 +648,7 @@ def _plan_open_asymmetric(
 
         # 재검증: 내 방향 슬롯 이미 충족
         cur_slots = count_slots(st)
-        my_count_now = cur_slots.long if force_side == "buy" else cur_slots.short
+        my_count_now = cur_slots.risk_long if force_side == "buy" else cur_slots.risk_short
         if my_count_now > my_count_at_arm:
             to_remove.append(sym)
             print(f"[ASYM_FORCE] {sym} CANCELLED — 슬롯 충족 ({my_count_at_arm}→{my_count_now})")
@@ -985,14 +984,13 @@ def plan_open(
     # ── 일반 OPEN 루프 ────────────────────────────────────────────
     # ★ v10.15: MR 슬롯은 CORE_MR만 카운트 (HEDGE는 별도 관리)
     # 전체 하드캡 5는 모든 포지션 카운트
-    # ★ V10.22 FIX: hard count(실제 포지션 수)로 MAX 체크 — 트레일링 포함
     _slots_all = count_slots(st)
-    if _slots_all.total >= TOTAL_MAX_SLOTS:
-        return intents
+    if _slots_all.risk_total >= TOTAL_MAX_SLOTS:
+        return intents  # 전체 5개 꽉 참
     _slots_mr = count_slots(st, role_filter="CORE_MR")
-    if _slots_mr.long >= MAX_MR_PER_SIDE:
+    if _slots_mr.risk_long >= MAX_MR_PER_SIDE:
         long_targets = []
-    if _slots_mr.short >= MAX_MR_PER_SIDE:
+    if _slots_mr.risk_short >= MAX_MR_PER_SIDE:
         short_targets = []
     if not long_targets and not short_targets:
         return intents
@@ -1036,13 +1034,13 @@ def plan_open(
         if float(sym_st.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
             continue
 
-        # ★ V10.22 FIX: hard count로 MAX 체크
+        # ★ v10.15: MR 슬롯은 CORE_MR만, 전체 하드캡 5
         _slots_pre = count_slots(st)
-        if _slots_pre.total >= TOTAL_MAX_SLOTS:
-            break
+        if _slots_pre.risk_total >= TOTAL_MAX_SLOTS:
+            break  # 전체 5개 꽉 참
         _slots_mr_pre = count_slots(st, role_filter="CORE_MR")
-        _can_long  = symbol in long_targets  and _slots_mr_pre.long  < MAX_MR_PER_SIDE
-        _can_short = symbol in short_targets and _slots_mr_pre.short < MAX_MR_PER_SIDE
+        _can_long  = symbol in long_targets  and _slots_mr_pre.risk_long  < MAX_MR_PER_SIDE
+        _can_short = symbol in short_targets and _slots_mr_pre.risk_short < MAX_MR_PER_SIDE
         if not (_can_long or _can_short):
             continue
 
@@ -2099,7 +2097,7 @@ def plan_force_close(
             if not force:
                 _z_side = p.get("side", "buy")
                 _z_slots = count_slots(st)
-                _z_full = (_z_slots.long >= MAX_LONG if _z_side == "buy" else _z_slots.short >= MAX_SHORT)
+                _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
                 if _z_full:
                     _zf, _zr = _zombie_exit(p, roi_pct, now, snapshot=snapshot)
                     if _zf:
@@ -2236,14 +2234,9 @@ def plan_insurance_sh(
             if isinstance(opp, dict):
                 continue
 
-            # ★ V10.22 FIX: 보험도 슬롯 하드캡 체크 (방향당 MAX 초과 방지)
+            # ★ v10.10: 보험은 최상위 규칙 — 슬롯 무시, 마진율만 체크
             _mr_ins = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0)
             if _mr_ins >= 0.90:
-                continue
-            _ins_slots = count_slots(st)
-            if hedge_side == "buy" and _ins_slots.long >= MAX_LONG:
-                continue
-            if hedge_side == "sell" and _ins_slots.short >= MAX_SHORT:
                 continue
 
             src_amt = float(src_p.get("amt", 0.0))
