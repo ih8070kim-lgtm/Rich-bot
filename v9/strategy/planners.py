@@ -1362,31 +1362,47 @@ def plan_dca(
     intents: List[Intent] = []
     now = time.time()
 
-    # ★ v10.20: 동적 DCA 제한 — MR 전략 정합성 강화
+    # ★ v10.20 → v10.21: 동적 DCA 제한 — 방향별 분리
     # 시장 전체 방향성 이동(동시 DCA 다수 / HARD_SL 반복) 감지 시 DCA 레벨 자동 축소
     _dyn_now = now
-    # (1) 현재 DCA 진행 중 포지션 수 (dca_level >= 2, HEDGE 제외)
-    _in_dca_count = sum(
-        1 for _, p2 in _pos_items(st)
-        if int(p2.get("dca_level", 1) or 1) >= 2
-        and p2.get("role", "") not in _HEDGE_ROLES_SLOT
-    )
-    _concurrent_max = 5 if _in_dca_count < 2 else (3 if _in_dca_count < 3 else 2)
+    # (1) 현재 DCA 진행 중 포지션 수 — 방향별 분리
+    _in_dca_long = _in_dca_short = 0
+    for _, p2 in _pos_items(st):
+        if int(p2.get("dca_level", 1) or 1) >= 2 and p2.get("role", "") not in _HEDGE_ROLES_SLOT:
+            if p2.get("side", "") == "buy":
+                _in_dca_long += 1
+            else:
+                _in_dca_short += 1
 
-    # (2) 최근 2시간 HARD_SL 발생 수
+    def _conc_max(cnt):
+        return 5 if cnt < 2 else (3 if cnt < 3 else 2)
+
+    # (2) 최근 2시간 HARD_SL 발생 수 — 방향별 분리
     _hsl_cutoff = _dyn_now - 7200
     _hsl_raw = (system_state or {}).get("_hard_sl_history", [])
-    _hsl_hist = [t for t in _hsl_raw if t > _hsl_cutoff]
+    # 하위호환: 기존 float list → dict list 마이그레이션
+    _hsl_hist = []
+    for e in (_hsl_raw or []):
+        if isinstance(e, dict):
+            if e.get("ts", 0) > _hsl_cutoff:
+                _hsl_hist.append(e)
+        elif isinstance(e, (int, float)):
+            if e > _hsl_cutoff:
+                _hsl_hist.append({"ts": e, "side": "buy"})  # 레거시: 방향 불명 → buy 기본
     if system_state is not None:
-        system_state["_hard_sl_history"] = _hsl_hist  # 만료 항목 정리
-    _recent_hsl = len(_hsl_hist)
-    _hsl_max = 5 if _recent_hsl == 0 else (3 if _recent_hsl < 2 else 2)
+        system_state["_hard_sl_history"] = _hsl_hist
+    _hsl_long  = sum(1 for e in _hsl_hist if e.get("side") == "buy")
+    _hsl_short = sum(1 for e in _hsl_hist if e.get("side") == "sell")
 
-    # 두 조건 중 더 엄격한 쪽 적용
-    _dynamic_max_tier = min(_concurrent_max, _hsl_max)
-    if _dynamic_max_tier < 5:
-        print(f"[DCA_LIMIT] 동적 DCA 제한 active: max_tier=T{_dynamic_max_tier} "
-              f"(동시DCA={_in_dca_count}개, 최근HARD_SL={_recent_hsl}건/2h)")
+    def _hsl_max(cnt):
+        return 5 if cnt == 0 else (3 if cnt < 2 else 2)
+
+    # 방향별 동적 max tier
+    _dyn_max_long  = min(_conc_max(_in_dca_long),  _hsl_max(_hsl_long))
+    _dyn_max_short = min(_conc_max(_in_dca_short), _hsl_max(_hsl_short))
+    if _dyn_max_long < 5 or _dyn_max_short < 5:
+        print(f"[DCA_LIMIT] L=T{_dyn_max_long}(dca={_in_dca_long},sl={_hsl_long}) "
+              f"S=T{_dyn_max_short}(dca={_in_dca_short},sl={_hsl_short})")
 
     # ★ v10.12: BTC Crash Filter — 롱 DCA만 차단 (2중 감지)
     _btc_pool_dca = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
@@ -1552,9 +1568,11 @@ def plan_dca(
             _block = None
             if _is_force_dca:
                 pass  # ★ TP_LOCK force DCA: 쿨다운/크래시 바이패스
-            # ★ v10.20: 동적 DCA 레벨 제한 (MR 전략 정합성)
-            elif tier_now > _dynamic_max_tier:
-                _block = f"DCA_LIMIT_T{_dynamic_max_tier}"
+            # ★ v10.21: 동적 DCA 레벨 제한 — 방향별 적용
+            elif is_long and tier_now > _dyn_max_long:
+                _block = f"DCA_LIMIT_L_T{_dyn_max_long}"
+            elif not is_long and tier_now > _dyn_max_short:
+                _block = f"DCA_LIMIT_S_T{_dyn_max_short}"
             elif _btc_crash_dca and is_long:
                 _block = "BTC_CRASH"
             elif _killswitch_dca:
@@ -1808,17 +1826,120 @@ def _calc_tp_lock(snapshot: MarketSnapshot, st: Dict):
 
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V10.21: 양방향 동시 TP — 스큐 중립 수익 확정
+# 롱/숏 모두 ROI ≥ 2% 슬롯이 있으면 1:1 매칭 동시 TP1
+# TP_LOCK 활성 시 비활성 (스큐 완화 목적과 충돌 방지)
+# ═════════════════════════════════════════════════════════════════
+BILATERAL_TP_MIN_ROI = {1: 2.0, 2: 1.5, 3: 1.0, 4: 1.0, 5: 1.0}
+BILATERAL_TP_CD_SEC  = 120  # 2분 쿨다운
+_bilateral_tp_cd     = 0.0
+
+
+def plan_bilateral_tp(snapshot: MarketSnapshot, st: Dict,
+                      exclude_syms: set = None) -> List[Intent]:
+    """양방향 ROI ≥ 2% 슬롯 1:1 매칭 동시 TP1 (40% 부분익절)."""
+    global _bilateral_tp_cd
+    intents: List[Intent] = []
+    now = time.time()
+    if now < _bilateral_tp_cd:
+        return intents
+
+    # TP_LOCK 활성 시 비활성
+    if _tp_lock_active:
+        return intents
+
+    prices = snapshot.all_prices or {}
+    _excl = exclude_syms or set()
+
+    # 롱/숏 후보 수집 — ROI 높은 순
+    long_cands = []   # (sym, p, roi, cp)
+    short_cands = []
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict) or sym in _excl:
+            continue
+        for pos_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            if p.get("step", 0) != 0 or p.get("tp1_done"):
+                continue
+            if p.get("pending_close"):
+                continue
+            if p.get("tp_locked"):
+                continue
+            if p.get("role", "") in _HEDGE_ROLES_SLOT:
+                continue
+            cp = float(prices.get(sym, 0) or 0)
+            ep = float(p.get("ep", 0) or 0)
+            if cp <= 0 or ep <= 0:
+                continue
+            roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE)
+            dca = int(p.get("dca_level", 1) or 1)
+            min_roi = BILATERAL_TP_MIN_ROI.get(dca, 2.0)
+            if roi < min_roi:
+                continue
+            if pos_side == "buy":
+                long_cands.append((sym, p, roi, cp))
+            else:
+                short_cands.append((sym, p, roi, cp))
+
+    if not long_cands or not short_cands:
+        return intents
+
+    # ROI 높은 순 정렬 → 1:1 매칭
+    long_cands.sort(key=lambda x: -x[2])
+    short_cands.sort(key=lambda x: -x[2])
+    pairs = min(len(long_cands), len(short_cands))
+
+    for i in range(pairs):
+        for (sym, p, roi, cp), close_dir in [
+            (long_cands[i], "sell"),
+            (short_cands[i], "buy"),
+        ]:
+            total_qty = float(p.get("amt", 0.0))
+            close_qty = total_qty * TP1_PARTIAL_RATIO
+            _sym_min_qty = {
+                "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
+                "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
+            }.get(sym, 1.0)
+            if close_qty < _sym_min_qty:
+                close_qty = total_qty
+            if close_qty <= 0:
+                continue
+            dca = int(p.get("dca_level", 1) or 1)
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.FORCE_CLOSE,
+                symbol=sym, side=close_dir,
+                qty=close_qty, price=cp,
+                reason=f"BILATERAL_TP(roi={roi:+.1f}%)_T{dca}",
+                metadata={"roi_pct": roi, "_expected_role": p.get("role", ""),
+                           "bilateral": True},
+            ))
+        print(f"[BILATERAL_TP] L:{long_cands[i][0]} roi={long_cands[i][2]:+.1f}% "
+              f"↔ S:{short_cands[i][0]} roi={short_cands[i][2]:+.1f}%")
+
+    if intents:
+        _bilateral_tp_cd = now + BILATERAL_TP_CD_SEC
+
+    return intents
+
+
+# ═════════════════════════════════════════════════════════════════
 # TP1 Planner
 # ═════════════════════════════════════════════════════════════════
-def plan_tp1(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
+def plan_tp1(snapshot: MarketSnapshot, st: Dict,
+             exclude_syms: set = None) -> List[Intent]:
     # ★ v10.16: TP Lock — 마진 불균형 시 light side 익절 잠금
     # ★ v10.17: (locked, heavy_side, skew) tuple 언패킹
     _tp_locked, _heavy_side, _cur_skew = _calc_tp_lock(snapshot, st)
 
     intents: List[Intent] = []
+    _tp1_excl = exclude_syms or set()
     # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
     _tp1_longs, _tp1_shorts = _count_active_by_side(st)
     for symbol, p in _pos_items(st):
+        if symbol in _tp1_excl:
+            continue
         if p.get("step", 0) != 0 or p.get("tp1_done"):
             continue
         # ★ v10.16: TP Lock 가드 (light side 완전 블록)
@@ -2261,9 +2382,9 @@ def plan_force_close(
                 if _sl_roi <= _sl_thresh:
                     force  = True
                     reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
-                    # ★ v10.20: HARD_SL 발생 기록 → plan_dca 동적 제한
+                    # ★ v10.21: HARD_SL 발생 기록 — 방향별 (plan_dca 동적 제한)
                     _hsl = system_state.setdefault("_hard_sl_history", [])
-                    _hsl.append(time.time())
+                    _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
 
             # ★ V10.17: ZOMBIE — BAD + 슬롯풀 + T2+ + ROI≤-5%
             if not force:
@@ -2643,7 +2764,11 @@ def generate_all_intents(
     _fc_syms = {i.symbol for i in _fc_intents}
     intents += plan_heavy_rebalance(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_hedge_core_manage(snapshot, st)
-    intents += plan_tp1(snapshot, st)
+    # ★ V10.21: 양방향 동시 TP → plan_tp1보다 먼저 (중복 방지)
+    _bt_intents = plan_bilateral_tp(snapshot, st, exclude_syms=_fc_syms)
+    intents += _bt_intents
+    _bt_syms = {i.symbol for i in _bt_intents}
+    intents += plan_tp1(snapshot, st, exclude_syms=_bt_syms)
     intents += plan_trail_on(snapshot, st)
     intents += plan_dca(snapshot, st, cooldowns, system_state)
     intents += plan_insurance_sh(snapshot, st, system_state)
