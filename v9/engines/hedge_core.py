@@ -226,13 +226,13 @@ def plan_hedge_core_entry(
 
     # ★ v10.15: HEDGE 슬롯 = CORE_HEDGE만 카운트, 최대 3개
     from v9.config import MAX_HEDGE_SLOTS
+    # ★ V10.22 FIX: hard count(실제 포지션 수)로 MAX 체크 — 트레일링 포함
     slots_all = count_slots(st)
     slots_hedge = count_slots(st, role_filter="CORE_HEDGE")
-    _hedge_count = slots_hedge.risk_total
+    _hedge_count = slots_hedge.total
 
     for src_sym, src_p, src_cp, src_roi, src_dca in src_candidates:
-        # 전체 하드캡 OR 헷지 상한 도달 → 중단
-        if slots_all.risk_total >= TOTAL_MAX_SLOTS or _hedge_count >= MAX_HEDGE_SLOTS:
+        if slots_all.total >= TOTAL_MAX_SLOTS or _hedge_count >= MAX_HEDGE_SLOTS:
             break
         if src_sym in asym_syms:
             continue
@@ -281,7 +281,7 @@ def plan_hedge_core_entry(
         ))
         asym_syms.add(src_sym)
         _hedge_count += 1
-        slots_all.risk_total += 1  # 전체 카운트도 증가
+        slots_all.total += 1  # 전체 카운트도 증가
         _hedge_core_cooldowns[src_sym] = time.time() + 60  # 60초 쿨다운
         print(f"[HEDGE_CORE] {src_sym} {hedge_side} src_roi={src_roi:.1f}% "
               f"src_dca=T{src_dca} skew={skew*100:.0f}% ${notional:.0f} "
