@@ -1120,16 +1120,12 @@ async def _main_loop(ex_init, dry_run: bool):
             if isinstance(_sc_p, dict) and _sc_p.get('pending_dca'):
                 _sc_p['pending_dca'] = None
                 _startup_clear_count += 1
-            # ★ V10.16: tp_locked도 재시작 시 클리어 (런타임 상태)
-            if isinstance(_sc_p, dict) and _sc_p.get('tp_locked'):
-                _sc_p['tp_locked'] = False
-                _sc_p['tp_lock_reason'] = ""
-                _sc_p['tp_lock_ts'] = None
-                _sc_p['tp_lock_force_dca'] = False
-                _startup_clear_count += 1
-            elif isinstance(_sc_p, dict) and _sc_p.get('tp_lock_force_dca'):
-                _sc_p['tp_lock_force_dca'] = False
-                _startup_clear_count += 1
+            # ★ V10.22: tp_locked 레거시 필드 정리 (재시작 시 클리어)
+            if isinstance(_sc_p, dict):
+                for _legacy_key in ('tp_locked', 'tp_lock_reason', 'tp_lock_ts', 'tp_lock_force_dca'):
+                    if _sc_p.get(_legacy_key):
+                        _sc_p.pop(_legacy_key, None)
+                        _startup_clear_count += 1
     if _startup_clear_count > 0:
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
               f"(pending_entry + tp1_preorder + pending_dca)")
@@ -1164,11 +1160,9 @@ async def _main_loop(ex_init, dry_run: bool):
             # 파일 없으면 기존 동작 완전히 동일 (zero-risk)
             # 허용 키만 오버라이드 (안전 화이트리스트)
             _OVERRIDE_WHITELIST = {
-                "SKEW_STAGE2_TRIGGER", "SKEW_HEAVY_TP_ROI_1", "SKEW_HEAVY_TP_ROI_2",
-                "SKEW_STAGE2_TIMEOUT_SEC", "SKEW_HEDGE_STRESS_ROI",
-                "TP_LOCK_SKEW_1", "TP_LOCK_SKEW_2", "TP_LOCK_RELEASE",
-                "TP_LOCK_MIN_ROI", "TP_LOCK_EXIT_ROI", "TP_LOCK_STRESS_ROI",
-                "SKEW_HEDGE_TRIGGER", "REBOUND_ALPHA",
+                "SKEW_STAGE2_TRIGGER", "SKEW_STAGE2_TIMEOUT_SEC",
+                "SKEW_HEDGE_STRESS_ROI", "SKEW_HEDGE_TRIGGER",
+                "REBOUND_ALPHA",
             }
             _override_path = os.path.join(_PROJECT_DIR, "config_override.json")
             if os.path.exists(_override_path):

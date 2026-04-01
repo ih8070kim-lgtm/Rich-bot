@@ -34,36 +34,21 @@ def test_sanity_import():
 class TestConfigConstants:
     """설정값이 논리적으로 말이 되는지 확인 (실수로 값이 뒤집히는 것 방지)."""
 
-    def test_tp_lock_skew_order(self):
-        """TP Lock 스큐 트리거: SKEW_1 < SKEW_2 < SKEW_3."""
-        from v9.config import TP_LOCK_SKEW_1, TP_LOCK_SKEW_2, TP_LOCK_SKEW_3
-        assert TP_LOCK_SKEW_1 < TP_LOCK_SKEW_2 < TP_LOCK_SKEW_3
-
-    def test_tp_lock_release_below_trigger(self):
-        """해제 임계값은 발동 임계값보다 낮아야 히스테리시스가 작동한다."""
-        from v9.config import TP_LOCK_SKEW_1, TP_LOCK_RELEASE
-        assert TP_LOCK_RELEASE < TP_LOCK_SKEW_1
-
-    def test_skew_stage2_above_stage1(self):
-        """Stage2 트리거는 Stage1(TP_LOCK_SKEW_1)보다 커야 한다."""
-        from v9.config import TP_LOCK_SKEW_1, SKEW_STAGE2_TRIGGER
-        assert SKEW_STAGE2_TRIGGER > TP_LOCK_SKEW_1
-
-    def test_heavy_tp_roi_stage2_below_stage1(self):
-        """Stage2(위기) TP ROI 기준이 Stage1보다 낮아야 더 빨리 익절한다."""
-        from v9.config import SKEW_HEAVY_TP_ROI_1, SKEW_HEAVY_TP_ROI_2
-        assert SKEW_HEAVY_TP_ROI_2 < SKEW_HEAVY_TP_ROI_1
+    def test_skew_stage2_trigger_positive(self):
+        """Stage2 트리거는 양수여야 한다."""
+        from v9.config import SKEW_STAGE2_TRIGGER
+        assert SKEW_STAGE2_TRIGGER > 0
 
     def test_stress_roi_is_negative(self):
         """스트레스 ROI 기준은 음수여야 한다."""
-        from v9.config import TP_LOCK_STRESS_ROI, SKEW_HEDGE_STRESS_ROI
-        assert TP_LOCK_STRESS_ROI < 0
+        from v9.config import SKEW_HEDGE_STRESS_ROI
         assert SKEW_HEDGE_STRESS_ROI < 0
 
-    def test_stress_mult_reduces_threshold(self):
-        """스트레스 배수가 1 미만이어야 트리거를 낮춘다 (더 빨리 발동)."""
-        from v9.config import TP_LOCK_STRESS_MULT
-        assert 0 < TP_LOCK_STRESS_MULT < 1.0
+    def test_dca_weights_4_tiers(self):
+        """★ V10.22: DCA 4단 weight 검증."""
+        from v9.config import DCA_WEIGHTS
+        assert len(DCA_WEIGHTS) == 4
+        assert sum(DCA_WEIGHTS) == 100
 
     def test_leverage_positive(self):
         """레버리지는 양수여야 한다."""
@@ -143,122 +128,16 @@ class TestCalcSkew:
 
 
 # ═══════════════════════════════════════════════════════════════
-# 4. TP Lock (_calc_tp_lock) 검증
+# 4. Skew-Aware TP (_skew_tp_adjustment) 검증  — ★ V10.22
 # ═══════════════════════════════════════════════════════════════
 
-class TestCalcTpLock:
-    """_calc_tp_lock(snapshot, st) → (locked: set, heavy_side: str, skew: float)."""
+class TestSkewTpAdjustment:
+    """_skew_tp_adjustment(pos_side, st, snapshot) → dict 검증."""
 
-    def _reset_tp_lock(self):
-        """모듈 레벨 상태 초기화 (테스트 격리)."""
-        import v9.strategy.planners as pl
-        pl._tp_lock_active = False
-        pl._heavy_tp_logged = set()
-
-    def test_no_lock_when_skew_below_threshold(self, snap_factory, pos, sym_st):
-        """skew < 10% 면 잠금 없음."""
-        from v9.strategy.planners import _calc_tp_lock
-        self._reset_tp_lock()
-        # skew ≈ 0.05 (5%)
+    def test_no_skew_returns_neutral(self, snap_factory, pos, sym_st):
+        """skew < 5% 면 mult=1.0, blocked=False."""
+        from v9.strategy.planners import _skew_tp_adjustment
         total_cap = 10_000.0
-        snap = snap_factory(real_balance_usdt=total_cap)
-        # long: 150*100/3 = 5000 → 0.50, short: 100*100/3 = 3333 → 0.33 → skew≈0.17
-        # 실제로 낮은 skew를 만들려면 균형에 가깝게
-        st = {
-            "ETH/USDT": sym_st(
-                p_long=pos(ep=100.0, amt=33.0, side="buy"),   # 33*100/3=1100 → 0.11
-                p_short=pos(ep=100.0, amt=27.0, side="sell"),  # 27*100/3= 900 → 0.09
-            )
-        }
-        locked, heavy_side, skew = _calc_tp_lock(snap, st)
-        # skew ≈ 0.02 < 0.10 → 잠금 없음
-        assert len(locked) == 0
-        assert skew < 0.10
-
-    def test_lock_1_at_stage1(self, snap_factory, pos, sym_st):
-        """skew 10~15% → lock_count=1, light side 상위 1개 잠금.
-        안전장치: light_total >= lock_count+1 필요 → short 2개 세팅.
-        """
-        from v9.strategy.planners import _calc_tp_lock
-        self._reset_tp_lock()
-        total_cap = 50_000.0
-        # short(sell) ep=100, cp=80 → ROI = (100-80)/100*3*100 = +60% > TP_LOCK_MIN_ROI
-        snap = snap_factory(
-            real_balance_usdt=total_cap,
-            all_prices={"ETH/USDT": 100.0, "BTC/USDT": 80.0, "SOL/USDT": 80.0},
-        )
-        # long: 451*100/3≈15033 → 0.3007 (>0.10 초과)
-        # short: 150*100/3*2=10000 → 0.20  → skew≈0.10
-        st = {
-            "ETH/USDT": sym_st(p_long=pos(ep=100.0, amt=451.0, side="buy")),
-            "BTC/USDT": sym_st(p_short=pos(ep=100.0, amt=150.0, side="sell")),
-            "SOL/USDT": sym_st(p_short=pos(ep=100.0, amt=150.0, side="sell")),
-        }
-        locked, heavy_side, skew = _calc_tp_lock(snap, st)
-        assert skew >= 0.10
-        assert heavy_side == "buy"
-        # 안전장치: min(1, max(0, 2-1)) = 1
-        assert len(locked) == 1
-
-    def test_lock_2_at_stage2(self, snap_factory, pos, sym_st):
-        """skew ≥ 15% → lock_count=2.
-        안전장치: light_total >= 3 필요 → short 3개 세팅.
-        """
-        from v9.strategy.planners import _calc_tp_lock
-        self._reset_tp_lock()
-        total_cap = 50_000.0
-        # short(sell) ep=100, cp=80 → ROI=+60%
-        snap = snap_factory(
-            real_balance_usdt=total_cap,
-            all_prices={"ETH/USDT": 100.0, "BTC/USDT": 100.0,
-                        "SOL/USDT": 80.0, "XRP/USDT": 80.0, "ADA/USDT": 80.0},
-        )
-        # long: 600*100/3=20000 → 0.40
-        # short: 150*100/3*3=15000 → 0.30 → skew=0.10 (stage1)
-        # 더 많은 long으로 skew 키우기: long 450+300=750
-        # long: 750*100/3=25000 → 0.50, short: 150*100/3*3=15000 → 0.30 → skew=0.20
-        st = {
-            "ETH/USDT": sym_st(p_long=pos(ep=100.0, amt=450.0, side="buy")),
-            "BTC/USDT": sym_st(p_long=pos(ep=100.0, amt=300.0, side="buy")),
-            "SOL/USDT": sym_st(p_short=pos(ep=100.0, amt=150.0, side="sell")),
-            "XRP/USDT": sym_st(p_short=pos(ep=100.0, amt=150.0, side="sell")),
-            "ADA/USDT": sym_st(p_short=pos(ep=100.0, amt=150.0, side="sell")),
-        }
-        locked, heavy_side, skew = _calc_tp_lock(snap, st)
-        assert skew >= 0.15
-        # 안전장치: min(2, max(0, 3-1)) = 2
-        assert len(locked) == 2
-
-    def test_heavy_side_correctly_identified(self, snap_factory, pos, sym_st):
-        """heavy_side는 마진 비율이 더 큰 쪽이어야 한다."""
-        from v9.strategy.planners import _calc_tp_lock
-        self._reset_tp_lock()
-        total_cap = 50_000.0
-        snap = snap_factory(
-            real_balance_usdt=total_cap,
-            all_prices={"ETH/USDT": 100.0},
-        )
-        st = {
-            "ETH/USDT": sym_st(
-                p_long=pos(ep=100.0, amt=450.0, side="buy"),   # heavy
-                p_short=pos(ep=100.0, amt=150.0, side="sell"),
-            )
-        }
-        _, heavy_side, _ = _calc_tp_lock(snap, st)
-        assert heavy_side == "buy"
-
-    def test_hysteresis_release(self, snap_factory, pos, sym_st):
-        """잠금 활성 후 skew가 RELEASE 미만으로 떨어지면 해제."""
-        import v9.strategy.planners as pl
-        from v9.strategy.planners import _calc_tp_lock
-        from v9.config import TP_LOCK_RELEASE
-
-        # 먼저 잠금 활성화
-        pl._tp_lock_active = True
-        pl._heavy_tp_logged = set()
-
-        total_cap = 10_000.0
-        # skew ≈ 0.02 < RELEASE(0.07) → 해제
         snap = snap_factory(real_balance_usdt=total_cap)
         st = {
             "ETH/USDT": sym_st(
@@ -266,10 +145,47 @@ class TestCalcTpLock:
                 p_short=pos(ep=100.0, amt=27.0, side="sell"),
             )
         }
-        locked, heavy_side, skew = _calc_tp_lock(snap, st)
-        assert skew < TP_LOCK_RELEASE
-        assert len(locked) == 0
-        assert pl._tp_lock_active is False
+        result = _skew_tp_adjustment("buy", st, snap)
+        assert result["skew_mult"] == 1.0
+        assert result["blocked"] is False
+        assert result["full_close"] is False
+
+    def test_heavy_side_lower_mult(self, snap_factory, pos, sym_st):
+        """skew 5~10%: heavy side mult < 1.0, light side mult > 1.0."""
+        from v9.strategy.planners import _skew_tp_adjustment
+        total_cap = 10_000.0
+        snap = snap_factory(real_balance_usdt=total_cap)
+        # long heavy: 40*100/3≈1333 → 0.133, short: 20*100/3≈667 → 0.067
+        # skew ≈ 0.067 (5~10% 구간)
+        st = {
+            "ETH/USDT": sym_st(
+                p_long=pos(ep=100.0, amt=40.0, side="buy"),
+                p_short=pos(ep=100.0, amt=20.0, side="sell"),
+            )
+        }
+        heavy = _skew_tp_adjustment("buy", st, snap)
+        light = _skew_tp_adjustment("sell", st, snap)
+        assert heavy["skew_mult"] < 1.0
+        assert light["skew_mult"] > 1.0
+
+    def test_high_skew_blocks_light(self, snap_factory, pos, sym_st):
+        """skew ≥ 15%: light side 차단, heavy side 풀클로즈."""
+        from v9.strategy.planners import _skew_tp_adjustment
+        total_cap = 10_000.0
+        snap = snap_factory(real_balance_usdt=total_cap)
+        # long heavy: 80*100/3≈2667 → 0.267, short: 20*100/3≈667 → 0.067
+        # skew ≈ 0.20 (>15%)
+        st = {
+            "ETH/USDT": sym_st(
+                p_long=pos(ep=100.0, amt=80.0, side="buy"),
+                p_short=pos(ep=100.0, amt=20.0, side="sell"),
+            )
+        }
+        heavy = _skew_tp_adjustment("buy", st, snap)
+        light = _skew_tp_adjustment("sell", st, snap)
+        assert heavy["full_close"] is True
+        assert heavy["skew_mult"] <= 0.3
+        assert light["blocked"] is True
 
 
 # ═══════════════════════════════════════════════════════════════
