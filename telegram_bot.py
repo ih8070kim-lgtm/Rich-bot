@@ -1,11 +1,12 @@
 """
-V10.13 Trinity 관제 봇  (최종 아키텍처 반영)
+V10.24 Trinity 관제 봇
 =============================================
 변경:
-  - /regime: Breakout 제거, ATR 배수 실제값, BAD 제거
-  - build_position_list: T5_MINI 뱃지 추가
+  - /status: pending limits 카운트, 슬롯 상세 (MR/TOTAL), RECOVERED 마커,
+    시스템 건강 지표 (heartbeat 경과, 연속 오류)
+  - build_position_list: RECOVERED 뱃지 (♻️) 추가
   - /closeall: 긴급 전량청산
-  - /status: 헷지 슬롯 1개 제한 표시
+  - /slots: 슬롯 상세 정보 신규 명령
 """
 import json, os, asyncio, requests, time as _time, csv
 from datetime import datetime, date
@@ -74,23 +75,26 @@ def build_position_list(positions: list):
         role       = pos.get("role", "")
         entry_type = pos.get("entry_type", "MR")
         mini       = bool(pos.get("t5_mini_active", False))
+        tag        = pos.get("tag", "")
 
         roi_icon  = "🟢" if roi >= 0 else "🔴"
         trail_tag = "✂️" if step >= 1 else ""
         mini_tag  = "🎯" if mini else ""  # T5 미니게임
+        # ★ v10.24: RECOVERED 마커
+        recovered_tag = "♻️" if tag == "V9_RECOVERED" else ""
 
         if role in ("HEDGE", "SOFT_HEDGE", "CORE_HEDGE"):
             h_badge = "🛡️"
-            line = f"  {roi_icon}{h_badge} {sym} T{tier}{trail_tag}{mini_tag}: {roi:+.2f}%"
+            line = f"  {roi_icon}{h_badge}{recovered_tag} {sym} T{tier}{trail_tag}{mini_tag}: {roi:+.2f}%"
             hedge_list.append(line)
         elif role == "INSURANCE_SH":
-            line = f"  {roi_icon}🩹 {sym} INS: {roi:+.2f}%"
+            line = f"  {roi_icon}🩹{recovered_tag} {sym} INS: {roi:+.2f}%"
             if side == "BUY": long_core.append(line)
             else: short_core.append(line)
         else:
             # CORE_MR, CORE_BREAKOUT, BALANCE 등
             type_badge = "🔁"
-            line = f"  {roi_icon}{type_badge} {sym} T{tier}{trail_tag}{mini_tag}: {roi:+.2f}%"
+            line = f"  {roi_icon}{type_badge}{recovered_tag} {sym} T{tier}{trail_tag}{mini_tag}: {roi:+.2f}%"
             if side == "BUY": long_core.append(line)
             else: short_core.append(line)
 
@@ -159,15 +163,27 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hedge_cnt  = sum(1 for p in positions if p.get("role","") in ("CORE_HEDGE","HEDGE","SOFT_HEDGE"))
     # 최종 아키텍처: 헷지 최대 1개
     hedge_status = f"🛡️ 헷지: {hedge_cnt}/1" if hedge_cnt > 0 else ""
+    # ★ v10.24: RECOVERED 카운트
+    recovered_cnt = sum(1 for p in positions if p.get("tag","") == "V9_RECOVERED")
+    recovered_tag = f"  ♻️ RECOVERED: {recovered_cnt}\n" if recovered_cnt > 0 else ""
+
+    # ★ v10.24: 슬롯 상세 + pending limits
+    _slot_mr_l = int(s.get("slot_mr_long", 0) or 0)
+    _slot_mr_s = int(s.get("slot_mr_short", 0) or 0)
+    _slot_total = int(s.get("slot_total", 0) or 0)
+    _pending_cnt = int(s.get("pending_limits_count", 0) or 0)
+    _slot_line = f"🎰 슬롯: MR L{_slot_mr_l}/S{_slot_mr_s} | 전체 {_slot_total}/10"
+    _pending_line = f"  ⏳ Pending: {_pending_cnt}" if _pending_cnt > 0 else ""
 
     msg = (
-        f"<b>Trinity V10.13</b>  {freshness}\n"
+        f"<b>Trinity V10.24</b>  {freshness}\n"
         f"────────────────\n"
         f"⚡ {ks}\n"
         f"🌡️ 레짐: <b>{regime_ui}</b>\n"
         f"{crash_tag}"
         f"💰 <b>${total_bal:,.2f}</b>  📊 일 {daily_roi:+.2f}% | 총 {total_roi:+.2f}%\n"
         f"📊 마진: L {_long_margin:.0f}% | S {_short_margin:.0f}%\n"
+        f"{_slot_line}{_pending_line}\n"
         f"────────────────\n"
         f"📈 <b>Long</b> {long_status} ({core_long})\n"
         f"{long_text}\n\n"
@@ -175,9 +191,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{short_text}"
         f"{hedge_text}\n"
         f"{('  '+hedge_status+chr(10)) if hedge_status else ''}"
+        f"{recovered_tag}"
         f"────────────────\n"
-        f"🔁=MR  🛡️=헷지  🩹=보험  🎯=T5미니  ✂️=Trail\n"
-        f"/status /perf /regime /unlock /closeall"
+        f"🔁=MR  🛡️=헷지  🩹=보험  ♻️=복구  ✂️=Trail\n"
+        f"/status /perf /regime /slots /unlock /closeall"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -304,6 +321,66 @@ async def regime_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# /slots  — 슬롯 상세 정보
+# ═══════════════════════════════════════════════════════════════════
+async def slots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = load_state()
+    if not s:
+        await update.message.reply_text("⏳ 엔진 데이터 수집 중...")
+        return
+
+    positions = s.get("positions", [])
+    _slot_mr_l = int(s.get("slot_mr_long", 0) or 0)
+    _slot_mr_s = int(s.get("slot_mr_short", 0) or 0)
+    _slot_total = int(s.get("slot_total", 0) or 0)
+    _pending_cnt = int(s.get("pending_limits_count", 0) or 0)
+
+    # role별 카운트
+    _roles = {}
+    for p in positions:
+        role = p.get("role", "CORE_MR") or "CORE_MR"
+        side = p.get("side", "BUY")
+        key = f"{role}_{side}"
+        _roles[key] = _roles.get(key, 0) + 1
+
+    # 포지션별 상세
+    _details = []
+    for p in positions:
+        sym = p.get("symbol", "?")
+        side = "L" if p.get("side") == "BUY" else "S"
+        tier = int(p.get("tier", 1) or 1)
+        role = p.get("role", "CORE_MR") or "CORE_MR"
+        step = int(p.get("step", 0) or 0)
+        tag = p.get("tag", "")
+        trail = "✂️" if step >= 1 else ""
+        recovered = "♻️" if tag == "V9_RECOVERED" else ""
+        _details.append(f"  {sym} [{side}] T{tier}{trail}{recovered} — {role}")
+
+    details_text = "\n".join(_details) if _details else "  └ 없음"
+
+    # role 요약
+    role_summary = []
+    for rk, rv in sorted(_roles.items()):
+        role_summary.append(f"  {rk}: {rv}")
+    role_text = "\n".join(role_summary) if role_summary else "  └ 없음"
+
+    msg = (
+        f"🎰 <b>슬롯 상세</b>\n"
+        f"────────────────\n"
+        f"MR 슬롯: L {_slot_mr_l} / S {_slot_mr_s}\n"
+        f"전체 사용: {_slot_total} / 10\n"
+        f"⏳ Pending Limits: {_pending_cnt}\n"
+        f"────────────────\n"
+        f"<b>Role별 카운트</b>\n"
+        f"{role_text}\n"
+        f"────────────────\n"
+        f"<b>포지션 상세</b>\n"
+        f"{details_text}\n"
+    )
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # /closeall  — 긴급 전량청산
 # ═══════════════════════════════════════════════════════════════════
 async def closeall_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -386,7 +463,7 @@ async def control_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 def main():
-    print("📢 Trinity V10.13 관제 봇 가동")
+    print("📢 Trinity V10.24 관제 봇 가동")
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -401,6 +478,7 @@ def main():
     app.add_handler(CommandHandler("regime",   regime_command))
     app.add_handler(CommandHandler("log",      log_command))
     app.add_handler(CommandHandler("unlock",   unlock_command))
+    app.add_handler(CommandHandler("slots",    slots_command))
     app.add_handler(CommandHandler("closeall", closeall_command))
     for strat in ["long","short"]:
         app.add_handler(CommandHandler(f"used_{strat}",   control_strategy))

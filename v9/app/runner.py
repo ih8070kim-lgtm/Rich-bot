@@ -187,6 +187,11 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
             elif _rv_dca > 1:
                 print(f"[SYNC] ★ {sym} {side} RECOVERED dca_level 역추정: {_rv_dca} "
                       f"(notional=${_rv_notional:.0f} grid=${_rv_grid:.0f})")
+            # ★ v10.24 Fix A: RECOVERED 포지션 role을 무조건 CORE_MR로 강제
+            # pending_limit에서 CORE_BREAKOUT을 가져오면 MR 슬롯 카운트에서 빠져
+            # 좀비 슬롯이 되는 근본 원인 차단
+            _pl_role = "CORE_MR"
+            _pl_entry_type = "MR"
             set_p(sym_st, side, {
                 "symbol": sym, "side": side,
                 "ep": ex_ep, "original_ep": ex_ep,
@@ -483,6 +488,15 @@ def _write_json_atomic(path: str, obj: dict):
         print(f"[V9 Runner] 로그 순환 오류(무시): {_log_e}")
 
 
+def _get_pending_limits_count() -> int:
+    """pending limit 주문 수 조회 (system_state.json용)"""
+    try:
+        from v9.execution.order_router import get_pending_limits
+        return len(get_pending_limits())
+    except Exception:
+        return 0
+
+
 def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, st: dict):
     """
     텔레그램 봇이 읽는 system_state.json 최소 필드를 프로젝트 루트에 저장.
@@ -534,6 +548,8 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
                     "role":         str(p.get("role", "") if isinstance(p, dict) else ""),
                     "source_sym":   str(p.get("source_sym", "") if isinstance(p, dict) else ""),
                     "entry_type":   str(p.get("entry_type", "MR") if isinstance(p, dict) else "MR"),
+                    # ★ v10.24: tag 필드 추가 (RECOVERED 마커용)
+                    "tag":          str(p.get("tag", "") if isinstance(p, dict) else ""),
                 })
 
         mr = float(snapshot.margin_ratio) if snapshot else 0.0
@@ -555,7 +571,23 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
             # ★ v10.6: 레짐 + crash freeze
             "regime": str(system_state.get("_current_regime", "")),
             "btc_crash_freeze_until": float(system_state.get("btc_crash_freeze_until", 0)),
+            # ★ v10.24: pending limits 카운트 + 슬롯 상세
+            "pending_limits_count": _get_pending_limits_count(),
+            "slot_mr_long": 0,
+            "slot_mr_short": 0,
+            "slot_total": 0,
         }
+
+        # ★ v10.24: 슬롯 상세 정보 채우기
+        try:
+            from v9.risk.slot_manager import count_slots as _cs_compat
+            _sc = _cs_compat(st, role_filter="CORE_MR")
+            _sc_all = _cs_compat(st)
+            payload["slot_mr_long"] = _sc.long
+            payload["slot_mr_short"] = _sc.short
+            payload["slot_total"] = _sc_all.total
+        except Exception:
+            pass
 
         path = os.path.join(_PROJECT_DIR, "system_state.json")
         _write_json_atomic(path, payload)
@@ -839,6 +871,10 @@ async def _manage_pending_limits(ex, st, snapshot):
             from v9.execution.position_book import set_pending_entry, ensure_slot
             ensure_slot(st, info["sym"])
             set_pending_entry(st[info["sym"]], info["side"], None)
+            # ★ v10.24 Fix D: TP1 pending limit 타임아웃 시 exit_fail_cooldown 설정
+            # 즉시 재생성 방지 (30초 쿨다운)
+            if info.get("intent_type") == "TP1":
+                st[info["sym"]]["exit_fail_cooldown_until"] = now + 30
 
 
 def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
@@ -1397,6 +1433,42 @@ async def _main_loop(ex_init, dry_run: bool):
             except Exception:
                 pass
 
+            # ★ v10.24 Fix C: RECOVERED 좀비 자동 청산
+            # tag=V9_RECOVERED + step=0 + 30분 경과 → FORCE_CLOSE
+            _recovered_close_intents = []
+            for _rc_sym, _rc_ss in st.items():
+                if not isinstance(_rc_ss, dict):
+                    continue
+                for _rc_side, _rc_p in iter_positions(_rc_ss):
+                    if _rc_p is None:
+                        continue
+                    if (str(_rc_p.get("tag", "")) == "V9_RECOVERED"
+                            and int(_rc_p.get("step", 0) or 0) == 0
+                            and now - float(_rc_p.get("time", now) or now) > 1800):
+                        _rc_amt = float(_rc_p.get("amt", 0) or 0)
+                        _rc_cp = float((snapshot.all_prices or {}).get(_rc_sym, 0) or 0)
+                        if _rc_amt > 0 and _rc_cp > 0:
+                            _rc_close_side = "sell" if _rc_side == "buy" else "buy"
+                            _recovered_close_intents.append(Intent(
+                                trace_id=str(uuid.uuid4())[:8],
+                                intent_type=IntentType.FORCE_CLOSE,
+                                symbol=_rc_sym,
+                                side=_rc_close_side,
+                                qty=_rc_amt,
+                                price=None,
+                                reason="RECOVERED_ZOMBIE_30MIN",
+                                metadata={"positionSide": "LONG" if _rc_side == "buy" else "SHORT"},
+                            ))
+                            print(f"[V9] ★ RECOVERED 좀비 청산: {_rc_sym} {_rc_side} "
+                                  f"qty={_rc_amt} age={int(now - float(_rc_p.get('time', now)))}초")
+            if _recovered_close_intents:
+                _rc_results = await execute_intents(
+                    ex, _recovered_close_intents, dry_run=dry_run, st=st
+                )
+                _rc_map = {i.trace_id: i for i in _recovered_close_intents}
+                apply_order_results(_rc_results, _rc_map, st, cooldowns, snapshot)
+                save_position_book(st, cooldowns, system_state)
+
             # ── Intent 생성 ──────────────────────────────────────
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
             # ★ v10.14d: plan_dca는 generate_all_intents 안에서 실행 (보험 타이밍 수정)
@@ -1440,6 +1512,10 @@ async def _main_loop(ex_init, dry_run: bool):
             # ── v10.15b: 바이낸스 sync 매틱 복원 ──────────────────
             # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)
             await _sync_positions_with_exchange(ex, st, snapshot)
+
+            # ★ v10.24 Fix B: _manage_pending_limits 호출 추가
+            # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
+            await _manage_pending_limits(ex, st, snapshot)
 
             # ★ FIX-2: 유령 pending_entry 일괄 정리 (조건 확장)
             # 기존: 포지션+pending 동시 → 클리어

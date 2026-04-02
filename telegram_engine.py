@@ -216,7 +216,7 @@ async def report_system_status(snapshot, st: dict):
     _stats_str = "\n".join(_stats_lines)
 
     msg = (
-        f"<b>Trinity V10.11b 리포트</b>\n"
+        f"<b>Trinity V10.24 리포트</b>\n"
         f"────────────────\n"
         f"🌡️ <b>{regime_ui}</b>  💰 <b>${current_bal:,.2f}</b>  일MDD: {mdd_pct:+.2f}%\n"
         f"📊 마진: {_margin_bar}\n"
@@ -360,10 +360,12 @@ async def notify_async_fill(
         badge = "🛡️ " if "HEDGE" in role else ("🩹 " if "INSURANCE" in role else "")
         ts_str = datetime.now().strftime('%H:%M:%S')
 
-        if fill_type == "TP1_PRE":
+        if fill_type in ("TP1_PRE", "TP1_LIMIT"):
+            # ★ v10.24: TP1_LIMIT 추가 (pending limit TP1 체결 알림)
             emoji = "🟢" if pnl >= 0 else "🔴"
+            _tp1_label = "TP1 선주문 체결" if fill_type == "TP1_PRE" else "TP1 Limit 체결"
             msg = (
-                f"✅ <b>{badge}TP1 선주문 체결</b>\n"
+                f"✅ <b>{badge}{_tp1_label}</b>\n"
                 f"────────────────\n"
                 f"📌 <b>{sym}</b>\n"
                 f"💵 청산가: <b>{avg_px:.4f}</b>  (진입: {ep:.4f})\n"

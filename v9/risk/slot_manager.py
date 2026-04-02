@@ -50,9 +50,12 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
             if step >= 1:
                 continue   # 트레일링 → HARD/RISK 모두 제외
             # ★ v10.15: role 필터
+            # ★ v10.24 Fix F: CORE_BREAKOUT도 CORE_MR과 동일 취급
+            # v10.23에서 Breakout 진입 제거 후 잔류 CORE_BREAKOUT 포지션이
+            # MR 슬롯 카운트에서 빠져 총량만 차지하는 문제 해결
             if role_filter:
                 _role = (p or {}).get("role", "CORE_MR")
-                if role_filter == "CORE_MR" and _role != "CORE_MR":
+                if role_filter == "CORE_MR" and _role not in ("CORE_MR", "CORE_BREAKOUT"):
                     continue
                 if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
                     continue
