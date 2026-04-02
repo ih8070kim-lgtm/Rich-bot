@@ -134,9 +134,15 @@ async def route_order(
 
     # ── Idempotency Key 중복주문 방지 ──────────────────────────
     tier = intent.metadata.get('tier', 0) if intent.metadata else 0
-    price_key = round(float(getattr(intent, "price", 0.0) or 0.0), 2)
     side_key  = str(getattr(intent, "side", "") or "")
-    idem_key  = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}|{price_key}"
+    # ★ v10.24 Fix E: TP1/TP2 DEDUP 키에서 price 제거
+    # 가격이 미세 변동(2152.78→2153.82→2152.93)하면 DEDUP 미스 → 30초 내 6개 동시 배치
+    from v9.types import IntentType as _IT_dedup
+    if intent.intent_type in (_IT_dedup.TP1, _IT_dedup.TP2):
+        idem_key = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}"
+    else:
+        price_key = round(float(getattr(intent, "price", 0.0) or 0.0), 2)
+        idem_key  = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}|{price_key}"
 
     # 만료된 캐시 정리
     now_ts = time.time()
