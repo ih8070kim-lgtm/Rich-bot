@@ -1436,6 +1436,7 @@ async def _main_loop(ex_init, dry_run: bool):
             # ★ v10.24 Fix C: RECOVERED 좀비 자동 청산
             # tag=V9_RECOVERED + step=0 + 30분 경과 → FORCE_CLOSE
             _recovered_close_intents = []
+            from v9.types import Intent as _Intent_rc
             for _rc_sym, _rc_ss in st.items():
                 if not isinstance(_rc_ss, dict):
                     continue
@@ -1449,7 +1450,7 @@ async def _main_loop(ex_init, dry_run: bool):
                         _rc_cp = float((snapshot.all_prices or {}).get(_rc_sym, 0) or 0)
                         if _rc_amt > 0 and _rc_cp > 0:
                             _rc_close_side = "sell" if _rc_side == "buy" else "buy"
-                            _recovered_close_intents.append(Intent(
+                            _recovered_close_intents.append(_Intent_rc(
                                 trace_id=str(uuid.uuid4())[:8],
                                 intent_type=IntentType.FORCE_CLOSE,
                                 symbol=_rc_sym,
