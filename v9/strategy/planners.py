@@ -310,8 +310,6 @@ def _skew_tp_adjustment(pos_side: str, st: Dict, snapshot) -> dict:
             "heavy_side": str,    # "buy" | "sell" | ""
         }
     """
-    from v9.engines.hedge_core import calc_skew
-
     total_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
     if total_cap <= 0:
         return {"skew_mult": 1.0, "slot_mult": 1.0, "full_close": False,
@@ -1655,11 +1653,12 @@ def plan_dca(
             # ★ v10.9: ML 피처 로깅
             try:
                 from v9.logging.logger_ml import (
-                    log_ml_features, calc_btc_returns, calc_skew, calc_vol_ratio_5m
+                    log_ml_features, calc_btc_returns,
+                    calc_skew as _calc_skew_ml, calc_vol_ratio_5m
                 )
                 _ml_regime = _btc_vol_regime(snapshot)
                 _ml_btc5, _ml_btc15, _ml_btc1h = calc_btc_returns(snapshot)
-                _ml_skew, _ml_skew_side = calc_skew(st, float(getattr(snapshot, "real_balance_usdt", 0) or 0), LEVERAGE)
+                _ml_skew, _ml_skew_side = _calc_skew_ml(st, float(getattr(snapshot, "real_balance_usdt", 0) or 0), LEVERAGE)
                 _ml_atr_1m = atr_from_ohlcv(ohlcv_1m[-15:], period=10) if len(ohlcv_1m) >= 15 else 0.0
                 _ml_atr_5m = atr_from_ohlcv(ohlcv_5m_dca[-15:], period=10) if len(ohlcv_5m_dca) >= 15 else 0.0
                 _ml_rsi5 = calc_rsi([float(c[4]) for c in ohlcv_5m_dca], period=14) if len(ohlcv_5m_dca) >= 15 else 50.0
