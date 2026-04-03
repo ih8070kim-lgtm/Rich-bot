@@ -1,5 +1,5 @@
 """
-V9 Strategy Core  (v10.9.1 — SH/HH 소스 오염 방지 패치)
+V9 Strategy Core  (v10.27 — log_trade import 수정)
 =========================================================
 v10.9 → v10.9.1 변경:
   [BUG-SH1] OPEN: 기존 포지션 role 다르면 덮어쓰기 차단

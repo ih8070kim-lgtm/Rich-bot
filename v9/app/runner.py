@@ -1,5 +1,5 @@
 """
-V9 App Runner
+V9 App Runner  (v10.27)
 메인 루프: 스냅샷 → Intent 생성 → 리스크 평가 → 실행 → 포지션 북 갱신
 """
 import asyncio

@@ -1,5 +1,5 @@
 """
-V9 Strategy — Planners  (v10.1 — Pullback 독립 아키텍처)
+V9 Strategy — Planners  (v10.27 — TP1 고정값 + 스큐 시뮬 + SL 타이트)
 =========================================================
 v9.8 → v10.1 변경:
   [Pullback v10.4]
