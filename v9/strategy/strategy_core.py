@@ -213,20 +213,12 @@ def apply_order_results(
                 print(f"[DCA_APPLIED] {sym} {pos_side} T{tier}: "
                       f"qty {_dca_pre_amt:.1f}+{filled:.1f}={p['amt']:.1f} "
                       f"ep {_dca_pre_ep:.4f}→{p['ep']:.4f}")
-                # ★ PATCH BUG2: DCA 체결 후 worst_roi 새 ep 기준으로 리셋
-                # 구 ep 기준 worst_roi가 그대로 남으면 tp1_thresh가 비정상적으로 낮아져
-                # DCA 직후 TP1이 즉시 발동하는 버그 방지
-                try:
-                    from v9.utils.utils_math import calc_roi_pct as _crp
-                    _dca_new_roi = _crp(p["ep"], avg_px, p.get("side", "buy"), 3.0)
-                    p["worst_roi"] = _dca_new_roi
-                    # max_roi_seen도 새 ep 기준으로 재계산 (상단으로 올라온 경우 방지)
-                    _dca_new_max = _crp(p["ep"], avg_px, p.get("side", "buy"), 3.0)
-                    p["max_roi_seen"] = max(0.0, _dca_new_max)
-                    print(f"[DCA_PATCH_WORST] {sym} {pos_side} T{tier}: "
-                          f"worst_roi 리셋 {p.get('worst_roi',0):.2f}% (새 ep={p['ep']:.4f})")
-                except Exception as _e:
-                    print(f"[DCA_PATCH_WORST] worst_roi 리셋 실패(무시): {_e}")
+                # ★ V10.26: DCA 체결 → worst_roi/max_roi 0 리셋 (새 출발)
+                # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
+                p["worst_roi"] = 0.0
+                p["max_roi_seen"] = 0.0
+                print(f"[DCA_RESET] {sym} {pos_side} T{tier}: "
+                      f"worst_roi=0 max_roi=0 (새 ep={p['ep']:.4f})")
                 # ★ v10.10: sh_trigger 제거 — DCA_BLOCKED_INSURANCE로 대체
                 _log_pos(result.trace_id, sym, p, snapshot)
             else:
@@ -308,13 +300,13 @@ def apply_order_results(
                     )
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
-            # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE에 orphan 플래그 세팅
+            # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE/CORE_HEDGE에 orphan 플래그 세팅
             if p and _closing_role != "HEDGE":
                 _opp_side_orphan = "sell" if pos_side == "buy" else "buy"
                 _opp_p_orphan = get_p(st.get(sym, {}), _opp_side_orphan)
-                if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") == "HEDGE":
+                if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") in ("HEDGE", "CORE_HEDGE"):
                     _opp_p_orphan["source_sl_orphan"] = True
-                    print(f"[strategy_core] {sym} CORE 청산 → HEDGE source_sl_orphan 세팅")
+                    print(f"[strategy_core] {sym} CORE 청산 → {_opp_p_orphan.get('role')} source_sl_orphan 세팅")
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 

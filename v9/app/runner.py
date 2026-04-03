@@ -39,6 +39,7 @@ try:
     _tg_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     _sys.path.insert(0, _tg_root)
     from telegram_engine import notify_fill as _notify_fill
+    from telegram_engine import notify_async_fill as _notify_async_fill
     _TELEGRAM_OK = True
 except Exception as _tg_err:
     print(f"[V9 Runner] telegram_engine import 실패 (알림 비활성): {_tg_err}")
@@ -186,6 +187,11 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
             elif _rv_dca > 1:
                 print(f"[SYNC] ★ {sym} {side} RECOVERED dca_level 역추정: {_rv_dca} "
                       f"(notional=${_rv_notional:.0f} grid=${_rv_grid:.0f})")
+            # ★ v10.24 Fix A: RECOVERED 포지션 role을 무조건 CORE_MR로 강제
+            # pending_limit에서 CORE_BREAKOUT을 가져오면 MR 슬롯 카운트에서 빠져
+            # 좀비 슬롯이 되는 근본 원인 차단
+            _pl_role = "CORE_MR"
+            _pl_entry_type = "MR"
             set_p(sym_st, side, {
                 "symbol": sym, "side": side,
                 "ep": ex_ep, "original_ep": ex_ep,
@@ -221,14 +227,236 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
             _spe_sync(sym_st, side, None)
 
     # ── 2) 포지션북에 있는데 바이낸스에 없음 → 유령 포지션 제거 ──
+    # ★ v10.17: 첫 sync(재시작 직후)는 "다운타임 중 청산" 가능성 → 상세 로그
     for (sym, side), book_p in book_pos.items():
         if (sym, side) not in ex_pos:
             book_qty = float(book_p.get('amt', 0) or 0)
             if book_qty > 0:
+                _ep = float(book_p.get('ep', 0) or 0)
+                _dca = int(book_p.get('dca_level', 1) or 1)
+                _role = book_p.get('role', '')
+                _entry_type = book_p.get('entry_type', 'MR')
                 print(f"[SYNC] ★ {sym} {side} 유령 포지션 제거: "
-                      f"qty={book_qty:.1f} (바이낸스에 없음)")
+                      f"qty={book_qty:.1f} ep={_ep:.4f} "
+                      f"dca={_dca} role={_role} (바이낸스에 없음)")
+                # ★ v10.18: 유령 제거 시 log_trade 기록 (감사 추적)
+                try:
+                    from v9.logging.logger_csv import log_trade as _lt_ghost
+                    _lt_ghost(
+                        trace_id=str(uuid.uuid4())[:8],
+                        symbol=sym,
+                        side=side,
+                        ep=_ep,
+                        exit_price=0.0,  # 알 수 없음
+                        amt=book_qty,
+                        pnl_usdt=0.0,    # 알 수 없음
+                        roi_pct=0.0,
+                        dca_level=_dca,
+                        hold_sec=0.0,
+                        reason="GHOST_CLEANUP",
+                        hedge_mode=bool(book_p.get('hedge_mode', False)),
+                        was_hedge=bool(book_p.get('was_hedge', False)),
+                        max_roi_seen=float(book_p.get('max_roi_seen', 0) or 0),
+                        entry_type=str(_entry_type),
+                        role=str(_role),
+                        source_sym=str(book_p.get('source_sym', '') or ''),
+                    )
+                except Exception as _lt_e:
+                    print(f"[SYNC] log_trade(GHOST) 실패(무시): {_lt_e}")
                 sym_st = st.get(sym, {})
                 set_p(sym_st, side, None)
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ 다운타임 중 청산 감지 (v10.18)
+# 봇 재시작 시 _last_save_ts ~ 현재 사이에 청산된 포지션을 감지하고
+# 텔레그램으로 알림 발송
+# ═══════════════════════════════════════════════════════════════
+
+async def _check_downtime_trades(ex, st, system_state):
+    """
+    재시작 시 다운타임 중 청산된 포지션을 감지하여 텔레그램 알림 발송.
+    ① _last_save_ts 확인 → 다운타임 1분 미만이면 스킵
+    ② 포지션북의 활성 포지션 목록 수집
+    ③ fetch_positions()로 현재 바이낸스 포지션 조회
+    ④ 차집합 (북에 있음 + 거래소에 없음) = 다운타임 중 청산된 포지션
+    ⑤ fetch_my_trades(sym, since=last_save_ts_ms)로 청산가 + realizedPnl 조회
+    ⑥ 텔레그램 ⚠️ 다운타임 청산 알림 발송
+    """
+    last_save = system_state.get('_last_save_ts', 0)
+    now = time.time()
+    downtime_sec = now - last_save if last_save > 0 else 0
+
+    # 다운타임 1분 미만이면 스킵 (정상 재시작)
+    if downtime_sec < 60:
+        print(f"[DOWNTIME] 다운타임 {downtime_sec:.0f}초 — 스킵")
+        return
+
+    downtime_min = downtime_sec / 60
+    print(f"[DOWNTIME] ★ 다운타임 감지: {downtime_min:.1f}분 "
+          f"(마지막 저장: {datetime.fromtimestamp(last_save).strftime('%H:%M:%S')})")
+
+    # ② 포지션북의 활성 포지션 수집
+    book_positions = {}  # {(sym, side): p_dict}
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for side, p in iter_positions(sym_st):
+            if isinstance(p, dict) and float(p.get('amt', 0) or 0) > 0:
+                book_positions[(sym, side)] = p
+
+    if not book_positions:
+        print(f"[DOWNTIME] 활성 포지션 없음 — 스킵")
+        return
+
+    # ③ 현재 바이낸스 포지션 조회
+    try:
+        positions = await asyncio.to_thread(ex.fetch_positions)
+    except Exception as e:
+        print(f"[DOWNTIME] fetch_positions 실패: {e}")
+        return
+
+    ex_pos = set()
+    for pos in positions:
+        contracts = float(pos.get('contracts', 0) or 0)
+        if contracts <= 0:
+            continue
+        raw_sym = pos.get('symbol', '')
+        sym = raw_sym.replace(':USDT', '') if ':USDT' in raw_sym else raw_sym
+        side_raw = pos.get('side', '')
+        side = "buy" if side_raw == "long" else "sell"
+        ex_pos.add((sym, side))
+
+    # ④ 차집합: 포지션북에 있지만 거래소에 없음 = 다운타임 중 청산
+    closed_during_downtime = {}
+    for (sym, side), p in book_positions.items():
+        if (sym, side) not in ex_pos:
+            closed_during_downtime[(sym, side)] = p
+
+    if not closed_during_downtime:
+        print(f"[DOWNTIME] 다운타임 중 청산된 포지션 없음")
+        return
+
+    print(f"[DOWNTIME] ★ 다운타임 중 청산 감지: "
+          f"{[f'{s[0]} {s[1]}' for s in closed_during_downtime.keys()]}")
+
+    # ⑤ fetch_my_trades로 청산 거래 이력 조회
+    last_save_ms = int(last_save * 1000)
+    alerts = []
+
+    for (sym, side), p in closed_during_downtime.items():
+        entry_price = float(p.get('ep', 0) or 0)
+        entry_amt = float(p.get('amt', 0) or 0)
+        dca_level = p.get('dca_level', 0)
+        role = p.get('role', '')
+        side_label = "LONG" if side == "buy" else "SHORT"
+
+        # 거래 이력 조회
+        realized_pnl = 0.0
+        close_price = 0.0
+        close_time_str = "알 수 없음"
+
+        try:
+            trades = await asyncio.to_thread(
+                ex.fetch_my_trades, sym, since=last_save_ms, limit=500
+            )
+            # 해당 방향의 청산 거래만 필터
+            # 롱 청산 = sell 거래, 숏 청산 = buy 거래
+            close_side = "sell" if side == "buy" else "buy"
+            close_trades = [
+                t for t in trades
+                if t.get('side') == close_side
+            ]
+            if close_trades:
+                # 마지막 청산 거래 기준
+                last_trade = close_trades[-1]
+                close_price = float(last_trade.get('price', 0) or 0)
+                close_ts = last_trade.get('timestamp', 0)
+                if close_ts:
+                    close_time_str = datetime.fromtimestamp(
+                        close_ts / 1000
+                    ).strftime('%m/%d %H:%M:%S')
+                # realizedPnl 합산
+                for t in close_trades:
+                    info = t.get('info', {})
+                    rpnl = float(info.get('realizedPnl', 0) or 0)
+                    realized_pnl += rpnl
+        except Exception as e:
+            print(f"[DOWNTIME] {sym} fetch_my_trades 실패: {e}")
+
+        # ROI 계산
+        roi = 0.0
+        if entry_price > 0 and close_price > 0:
+            if side == "buy":
+                roi = (close_price - entry_price) / entry_price * 100
+            else:
+                roi = (entry_price - close_price) / entry_price * 100
+
+        # 알림 메시지 구성
+        pnl_sign = "+" if realized_pnl >= 0 else ""
+        roi_sign = "+" if roi >= 0 else ""
+        emoji = "✅" if realized_pnl >= 0 else "🔴"
+
+        alert_msg = (
+            f"  {emoji} <b>{sym}</b> {side_label}"
+            f" (DCA{dca_level}"
+            f"{' ' + role if role else ''})\n"
+            f"    진입가: {entry_price:.4f}"
+            f" → 청산가: {close_price:.4f}\n"
+            f"    ROI: {roi_sign}{roi:.2f}%"
+            f" | PnL: {pnl_sign}${realized_pnl:.2f}\n"
+            f"    청산 시각: {close_time_str}"
+        )
+        alerts.append(alert_msg)
+
+        # ★ log_trades.csv에 기록 (감사 추적)
+        try:
+            from v9.logging.logger_csv import log_trade as _lt_dt
+            _hold = now - float(p.get('time', now) or now)
+            _lt_dt(
+                trace_id=str(uuid.uuid4())[:8],
+                symbol=sym,
+                side=side,
+                ep=entry_price,
+                exit_price=close_price,
+                amt=entry_amt,
+                pnl_usdt=realized_pnl,
+                roi_pct=roi,
+                dca_level=int(dca_level),
+                hold_sec=_hold if _hold > 0 else 0.0,
+                reason="DOWNTIME_CLOSE",
+                hedge_mode=bool(p.get('hedge_mode', False)),
+                was_hedge=bool(p.get('was_hedge', False)),
+                max_roi_seen=float(p.get('max_roi_seen', 0) or 0),
+                entry_type=str(p.get('entry_type', 'MR') or 'MR'),
+                role=str(role),
+                source_sym=str(p.get('source_sym', '') or ''),
+            )
+        except Exception as _lt_e:
+            print(f"[DOWNTIME] log_trade 실패(무시): {_lt_e}")
+
+        print(f"[DOWNTIME] {sym} {side_label}: "
+              f"ep={entry_price:.4f} → cp={close_price:.4f} "
+              f"ROI={roi:+.2f}% PnL=${realized_pnl:+.2f}")
+
+        await asyncio.sleep(0.1)  # rate limit 방지
+
+    # ⑥ 텔레그램 알림 발송
+    if alerts and _TELEGRAM_OK:
+        header = (
+            f"⚠️ <b>다운타임 청산 감지</b>\n"
+            f"다운타임: {downtime_min:.0f}분 "
+            f"({datetime.fromtimestamp(last_save).strftime('%H:%M')} "
+            f"→ {datetime.fromtimestamp(now).strftime('%H:%M')})\n"
+            f"청산 {len(alerts)}건:\n"
+        )
+        msg = header + "\n".join(alerts)
+        try:
+            from telegram_engine import send_telegram_message
+            await send_telegram_message(msg)
+            print(f"[DOWNTIME] ★ 텔레그램 알림 발송 완료 ({len(alerts)}건)")
+        except Exception as e:
+            print(f"[DOWNTIME] 텔레그램 발송 실패: {e}")
 
 
 # ── 경로 상수 ────────────────────────────────────────────────────
@@ -258,6 +486,15 @@ def _write_json_atomic(path: str, obj: dict):
                 pass  # tmp 삭제 실패 무시
     except Exception as _log_e:
         print(f"[V9 Runner] 로그 순환 오류(무시): {_log_e}")
+
+
+def _get_pending_limits_count() -> int:
+    """pending limit 주문 수 조회 (system_state.json용)"""
+    try:
+        from v9.execution.order_router import get_pending_limits
+        return len(get_pending_limits())
+    except Exception:
+        return 0
 
 
 def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, st: dict):
@@ -311,6 +548,8 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
                     "role":         str(p.get("role", "") if isinstance(p, dict) else ""),
                     "source_sym":   str(p.get("source_sym", "") if isinstance(p, dict) else ""),
                     "entry_type":   str(p.get("entry_type", "MR") if isinstance(p, dict) else "MR"),
+                    # ★ v10.24: tag 필드 추가 (RECOVERED 마커용)
+                    "tag":          str(p.get("tag", "") if isinstance(p, dict) else ""),
                 })
 
         mr = float(snapshot.margin_ratio) if snapshot else 0.0
@@ -332,7 +571,23 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
             # ★ v10.6: 레짐 + crash freeze
             "regime": str(system_state.get("_current_regime", "")),
             "btc_crash_freeze_until": float(system_state.get("btc_crash_freeze_until", 0)),
+            # ★ v10.24: pending limits 카운트 + 슬롯 상세
+            "pending_limits_count": _get_pending_limits_count(),
+            "slot_mr_long": 0,
+            "slot_mr_short": 0,
+            "slot_total": 0,
         }
+
+        # ★ v10.24: 슬롯 상세 정보 채우기
+        try:
+            from v9.risk.slot_manager import count_slots as _cs_compat
+            _sc = _cs_compat(st, role_filter="CORE_MR")
+            _sc_all = _cs_compat(st)
+            payload["slot_mr_long"] = _sc.long
+            payload["slot_mr_short"] = _sc.short
+            payload["slot_total"] = _sc_all.total
+        except Exception:
+            pass
 
         path = os.path.join(_PROJECT_DIR, "system_state.json")
         _write_json_atomic(path, payload)
@@ -355,6 +610,190 @@ def _make_exchange() -> ccxt.Exchange:
     })
 
 
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.25: TP1 선주문 관리
+# ═══════════════════════════════════════════════════════════════
+_TP1_PREORDER_REPRICE_PCT = 0.003  # 0.3% 이상 차이나면 재배치
+
+
+async def _cancel_tp1_preorder(ex, p: dict, sym: str):
+    """기존 TP1 선주문 취소 + 레지스트리 정리."""
+    oid = p.get("tp1_preorder_id")
+    if not oid or oid == "DRY_PREORDER":
+        p["tp1_preorder_id"] = None
+        p["tp1_preorder_price"] = None
+        p["tp1_preorder_ts"] = None
+        return
+    try:
+        import asyncio as _aio
+        await _aio.to_thread(ex.cancel_order, oid, sym)
+        print(f"[TP1_PRE] {sym} 선주문 취소 oid={oid}")
+    except Exception as _e:
+        _err = str(_e)
+        if "Unknown order" in _err or "-2011" in _err:
+            pass  # 이미 체결 또는 만료
+        else:
+            print(f"[TP1_PRE] {sym} 선주문 취소 실패: {_e}")
+    # 레지스트리 정리
+    try:
+        from v9.execution.order_router import remove_pending_limit, _PENDING_ORDERS
+        remove_pending_limit(str(oid))
+        _orders = _PENDING_ORDERS.get(sym, [])
+        _PENDING_ORDERS[sym] = [(o, t) for o, t in _orders if o != str(oid)]
+        if not _PENDING_ORDERS[sym]:
+            _PENDING_ORDERS.pop(sym, None)
+    except Exception:
+        pass
+    p["tp1_preorder_id"] = None
+    p["tp1_preorder_price"] = None
+    p["tp1_preorder_ts"] = None
+
+
+async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
+    """TP1 목표가에 지정가 선주문 배치/갱신/취소.
+
+    매 틱 실행. 포지션별로:
+      - step=0, tp1_done=False, CORE 포지션만 대상
+      - worst_roi + alpha 기반 target price 계산
+      - 선주문 없으면 배치, target 변경 시 재배치, 부적격 시 취소
+    """
+    from v9.config import LEVERAGE, REBOUND_ALPHA, TP1_PARTIAL_RATIO, HEDGE_MODE
+    from v9.utils.utils_math import calc_roi_pct
+    from v9.strategy.planners import _skew_tp_adjustment
+
+    prices = snapshot.all_prices or {}
+
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for pos_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+
+            # ── 부적격 → 기존 선주문 취소 ──
+            _step = int(p.get("step", 0) or 0)
+            if _step != 0 or p.get("tp1_done") or p.get("pending_dca"):
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+            _role = p.get("role", "")
+            if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
+                continue
+
+            ep = float(p.get("ep", 0) or 0)
+            curr_p = float(prices.get(sym, 0) or 0)
+            if ep <= 0 or curr_p <= 0:
+                continue
+
+            dca_level = int(p.get("dca_level", 1) or 1)
+            is_long = (pos_side == "buy")
+
+            # skew 블록 체크
+            _skew = _skew_tp_adjustment(pos_side, st, snapshot)
+            if _skew["blocked"]:
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+
+            # TP1 target 계산
+            # ★ V10.27: 고정값 TP1 (ATR 스케일링 제거)
+            from v9.config import TP1_FIXED
+            _worst = 0.0  # ★ V10.27 FIX: T1~T3에서도 로그용 초기화
+            if dca_level <= 3:
+                tp1_base = TP1_FIXED.get(dca_level, 2.0)
+            else:
+                _worst = float(p.get("worst_roi", 0.0) or 0.0)
+                tp1_base = max(_worst + 2.0, TP1_FIXED.get(4, 0.8))
+            tp1_thresh = tp1_base * _skew["skew_mult"]
+
+            # ROI → price 변환
+            if is_long:
+                target_price = ep * (1.0 + tp1_thresh / (LEVERAGE * 100.0))
+            else:
+                target_price = ep * (1.0 - tp1_thresh / (LEVERAGE * 100.0))
+            if target_price <= 0:
+                continue
+
+            # 이미 ROI >= threshold → plan_tp1이 처리, 선주문 불필요
+            roi_now = calc_roi_pct(ep, curr_p, pos_side, LEVERAGE)
+            if roi_now >= tp1_thresh:
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+
+            # 수량 계산
+            total_qty = float(p.get("amt", 0) or 0)
+            close_qty = total_qty if _skew.get("full_close") else total_qty * TP1_PARTIAL_RATIO
+            _min_qty = {"ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
+                        "BTC/USDT": 0.001, "AVAX/USDT": 0.1}.get(sym, 1.0)
+            if close_qty < _min_qty:
+                close_qty = total_qty
+            if close_qty <= 0:
+                continue
+
+            # 기존 선주문과 비교
+            existing_id = p.get("tp1_preorder_id")
+            existing_price = float(p.get("tp1_preorder_price", 0) or 0)
+            if existing_id and existing_price > 0:
+                _diff = abs(target_price - existing_price) / existing_price
+                if _diff < _TP1_PREORDER_REPRICE_PCT:
+                    continue  # 0.3% 미만 차이 → 유지
+                await _cancel_tp1_preorder(ex, p, sym)
+
+            # 선주문 배치
+            if dry_run:
+                p["tp1_preorder_id"] = "DRY_PREORDER"
+                p["tp1_preorder_price"] = target_price
+                p["tp1_preorder_ts"] = time.time()
+                continue
+            try:
+                import asyncio as _aio
+                close_side = "sell" if is_long else "buy"
+                safe_qty = float(ex.amount_to_precision(sym, close_qty))
+                safe_price = float(ex.price_to_precision(sym, target_price))
+                if safe_qty <= 0 or safe_price <= 0:
+                    continue
+                params = {}
+                if HEDGE_MODE:
+                    params["positionSide"] = "LONG" if is_long else "SHORT"
+                order = await _aio.to_thread(
+                    ex.create_order, sym, 'limit', close_side, safe_qty, safe_price, params=params
+                )
+                oid = order.get('id')
+                p["tp1_preorder_id"] = oid
+                p["tp1_preorder_price"] = safe_price
+                p["tp1_preorder_ts"] = time.time()
+                # ★ PENDING_LIMITS + PENDING_ORDERS 등록
+                # → _manage_pending_limits가 체결 감지 + 텔레그램 "TP1_LIMIT" 알림
+                # → cancel_pending_orders가 TRAIL_ON 전 취소 (-2022 방지)
+                from v9.execution.order_router import (
+                    _register_pending_limit as _rpl,
+                    _register_pending as _rp,
+                )
+                from v9.types import Intent as _PreIntent, IntentType as _PreIT
+                _pre_intent = _PreIntent(
+                    trace_id=f"tp1pre_{oid}",
+                    intent_type=_PreIT.TP1,
+                    symbol=sym, side=close_side,
+                    qty=safe_qty, price=safe_price,
+                    reason="TP1_PREORDER",
+                    metadata={
+                        "positionSide": params.get("positionSide", ""),
+                        "role": p.get("role", ""),
+                        "_expected_role": p.get("role", ""),
+                        "tier": 0,
+                    },
+                )
+                _rpl(f"tp1pre_{oid}", sym, close_side, safe_qty, safe_price, oid,
+                     f"V9_TP1_PRE_{sym}", _pre_intent)
+                _rp(sym, oid, "TP1")
+                print(f"[TP1_PRE] {sym} {pos_side} T{dca_level} 선주문 "
+                      f"@{safe_price:.4f} qty={safe_qty} thresh={tp1_thresh:.1f}% "
+                      f"worst={_worst:.1f}%")
+            except Exception as _e:
+                print(f"[TP1_PRE] {sym} 선주문 실패: {_e}")
+
+
 def _trim_ohlcv_pool(snapshot) -> None:
     """
     ohlcv_pool 메모리 누수 방지.
@@ -363,10 +802,10 @@ def _trim_ohlcv_pool(snapshot) -> None:
     pool = getattr(snapshot, 'ohlcv_pool', None)
     if not pool:
         return
-    MAX_1M  = 300
-    MAX_5M  = 100   # [추가-2 FIX] 5m 50봉 × 2배 여유
-    MAX_15M = 150
-    MAX_1H  = 50    # [추가-2 FIX] 1h 25봉 × 2배 여유
+    MAX_1M  = 200   # ★ V10.16: 300→200 (planners 최대 65봉 × 3배 여유)
+    MAX_5M  = 80    # 5m 40봉 × 2배 여유
+    MAX_15M = 100   # 15m 50봉 × 2배 여유
+    MAX_1H  = 40    # 1h 20봉 × 2배 여유
     for sym in pool:
         tf_map = pool[sym]
         if not isinstance(tf_map, dict):
@@ -460,270 +899,6 @@ def _rotate_logs() -> None:
 # DCA 시 기존 취소 → 새 기준가로 재주문
 # ═══════════════════════════════════════════════════════════════
 
-_tp1_pre_check_ts = 0.0
-_TP1_PRE_CHECK_SEC = 5.0  # 체결 확인 주기
-
-
-def _calc_tp1_params(p: dict) -> tuple:
-    """
-    ★ v10.14c: min_roi 반등 기반 TP1 선주문 가격 계산.
-    target_roi = worst_roi + α → ep 기준 가격 역산.
-    반환: (target_price, close_qty, ref_ep, alpha) 또는 (None,)*4
-    """
-    from v9.config import REBOUND_ALPHA, TP1_PARTIAL_RATIO
-    dca_level = int(p.get("dca_level", 1) or 1)
-    side = p.get("side", "buy")
-    amt = float(p.get("amt", 0) or 0)
-    ep = float(p.get("ep", 0) or 0)
-    if amt <= 0 or ep <= 0:
-        return None, None, None, None
-
-    alpha = REBOUND_ALPHA.get(dca_level, 2.0)
-    worst = float(p.get("worst_roi", 0.0) or 0.0)
-    target_roi = worst + alpha  # leveraged %
-
-    # ROI → 가격 역산: roi = ((cp-ep)/ep)*LEV*100 → cp = ep*(1+roi/LEV/100)
-    lev = 3.0
-    if side == "buy":
-        target = ep * (1.0 + target_roi / lev / 100.0)
-    else:
-        target = ep * (1.0 - target_roi / lev / 100.0)
-
-    if target <= 0:
-        return None, None, None, None
-
-    close_qty = amt * TP1_PARTIAL_RATIO
-    return target, close_qty, ep, alpha
-
-
-async def _manage_tp1_preorders(ex, st, snapshot):
-    """
-    TP1 limit 선주문 관리 — 매 틱 실행.
-    ★ v10.13b: 병렬 fetch_order + 5초 타임아웃 (순차 블로킹 해소)
-
-    Phase 1: 활성 선주문 일괄 조회 (병렬)
-    Phase 2: 결과 처리 (체결/취소/DCA 가격 불일치)
-    Phase 3: 신규 선주문 배치 (병렬)
-    """
-    global _tp1_pre_check_ts
-    now = time.time()
-    do_check = (now - _tp1_pre_check_ts >= _TP1_PRE_CHECK_SEC)
-    if do_check:
-        _tp1_pre_check_ts = now
-
-    from v9.config import HEDGE_MODE
-
-    # ══════════════════════════════════════════════════════════
-    # Phase 1: 활성 선주문 수집 + 병렬 조회
-    # ══════════════════════════════════════════════════════════
-    active_preorders = []  # [(sym, pos_side, p, oid), ...]
-    new_candidates = []    # [(sym, pos_side, p, dca), ...]
-
-    for sym, sym_st in list(st.items()):
-        if not isinstance(sym_st, dict):
-            continue
-        for pos_side, p in iter_positions(sym_st):
-            if not isinstance(p, dict):
-                continue
-            if p.get("step", 0) >= 1:
-                continue
-            if p.get("tp1_done"):
-                continue
-            role = p.get("role", "")
-            if role in ("CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"):
-                continue
-
-            oid = p.get("tp1_preorder_id")
-            dca = int(p.get("dca_level", 1) or 1)
-
-            if oid and do_check:
-                active_preorders.append((sym, pos_side, p, oid))
-            elif not oid:
-                new_candidates.append((sym, pos_side, p, dca))
-
-    # ── 병렬 fetch_order (5초 타임아웃) ──
-    if active_preorders:
-        async def _safe_fetch(oid, sym):
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(ex.fetch_order, oid, sym),
-                    timeout=5.0,
-                )
-            except asyncio.TimeoutError:
-                return {"status": "_timeout"}
-            except Exception as e:
-                return {"status": "_error", "_err": str(e)}
-
-        fetch_results = await asyncio.gather(
-            *[_safe_fetch(oid, sym) for sym, _, _, oid in active_preorders]
-        )
-
-        # ══════════════════════════════════════════════════════
-        # Phase 2: 결과 처리
-        # ══════════════════════════════════════════════════════
-        cancel_tasks = []  # DCA 가격 불일치 → 취소 후 재주문
-
-        for (sym, pos_side, p, oid), info in zip(active_preorders, fetch_results):
-            status = info.get("status", "")
-
-            # 타임아웃/에러 → stale 체크
-            if status.startswith("_"):
-                # ★ v10.13b: 조회 실패 → stale oid 정리
-                _placed_ts = float(p.get("tp1_preorder_ts", 0) or 0)
-                if _placed_ts <= 0 or now - _placed_ts > 60:
-                    # 타임스탬프 없음(재시작) 또는 60초 초과 → 정리
-                    p["tp1_preorder_id"] = None
-                    p["tp1_preorder_price"] = None
-                    p["tp1_preorder_ts"] = None
-                    print(f"[TP1_PRE] {sym} stale preorder 정리 (oid={oid})")
-                continue
-
-            filled = float(info.get("filled", 0) or 0)
-            avg_price = float(info.get("average", 0) or 0)
-
-            if status == "closed" or (status == "canceled" and filled > 0):
-                # ★ TP1 체결
-                old_ep = float(p.get("ep", 0) or 0)
-                if filled > 0 and old_ep > 0:
-                    if pos_side == "buy":
-                        raw_pnl = (avg_price - old_ep) * filled
-                    else:
-                        raw_pnl = (old_ep - avg_price) * filled
-                    p["amt"] = max(0, float(p.get("amt", 0)) - filled)
-                    p["tp1_done"] = True
-                    p["step"] = 1
-                    p["trailing_on_time"] = now
-                    p["max_roi_seen"] = max(
-                        float(p.get("max_roi_seen", 0) or 0),
-                        abs(raw_pnl / (old_ep * filled) * 3.0 * 100) if old_ep * filled > 0 else 0,
-                    )
-                    print(f"[TP1_PRE] ★ {sym} {pos_side} 체결! "
-                          f"{filled:.2f}@{avg_price:.4f} "
-                          f"PnL=${raw_pnl:+.2f} → trailing")
-                    try:
-                        from v9.logging.logger_csv import log_fill
-                        log_fill(
-                            f"tp1pre_{str(oid)[:8]}",
-                            sym, "sell" if pos_side == "buy" else "buy",
-                            avg_price, filled,
-                            f"V9_TP1_PRE_{sym}", str(oid),
-                        )
-                    except Exception:
-                        pass
-                    # ★ v10.14: 전량 체결 시(amt≤0) 포지션 클리어 (무한 trailing 방지)
-                    if p["amt"] <= 0:
-                        from v9.execution.position_book import clear_position
-                        clear_position(st, sym, pos_side)
-                        print(f"[TP1_PRE] {sym} {pos_side} 전량 체결 → 포지션 클리어")
-                p["tp1_preorder_id"] = None
-                p["tp1_preorder_price"] = None
-
-            elif status == "canceled":
-                p["tp1_preorder_id"] = None
-                p["tp1_preorder_price"] = None
-
-            elif status == "open":
-                # DCA 가격 불일치 확인
-                target_p, _, _, _ = _calc_tp1_params(p)
-                if target_p:
-                    try:
-                        safe_target = float(ex.price_to_precision(sym, target_p))
-                    except Exception:
-                        continue
-                    stored = float(p.get("tp1_preorder_price", 0) or 0)
-                    if stored > 0 and abs(stored - safe_target) / safe_target > 0.0005:
-                        cancel_tasks.append((sym, pos_side, oid, p, safe_target, stored))
-
-        # ── DCA 불일치 취소 (병렬) ──
-        if cancel_tasks:
-            async def _safe_cancel(sym, oid):
-                try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(ex.cancel_order, oid, sym),
-                        timeout=5.0,
-                    )
-                    return True
-                except Exception:
-                    return False
-
-            cancel_results = await asyncio.gather(
-                *[_safe_cancel(sym, oid) for sym, _, oid, _, _, _ in cancel_tasks]
-            )
-            for (sym, pos_side, oid, p, new_target, old_target), ok in zip(cancel_tasks, cancel_results):
-                if ok:
-                    print(f"[TP1_PRE] {sym} DCA 감지 → 기존 취소 "
-                          f"(old={old_target:.4f} new={new_target:.4f})")
-                p["tp1_preorder_id"] = None
-                p["tp1_preorder_price"] = None
-                dca = int(p.get("dca_level", 1) or 1)
-                new_candidates.append((sym, pos_side, p, dca))
-
-    # ══════════════════════════════════════════════════════════
-    # Phase 3: 신규 선주문 배치 (병렬)
-    # ══════════════════════════════════════════════════════════
-    place_tasks = []  # [(sym, pos_side, p, close_side, safe_qty, safe_price, ref_ep, tp1_pct, dca, params), ...]
-
-    for sym, pos_side, p, dca in new_candidates:
-        if p.get("tp1_preorder_id"):
-            continue
-
-        target_p, close_qty, ref_ep, tp1_pct = _calc_tp1_params(p)
-        if not target_p or not close_qty:
-            continue
-
-        try:
-            safe_price = float(ex.price_to_precision(sym, target_p))
-            safe_qty = float(ex.amount_to_precision(sym, close_qty))
-        except Exception:
-            continue
-        if safe_qty <= 0 or safe_price <= 0:
-            continue
-
-        close_side = "sell" if pos_side == "buy" else "buy"
-        params = {}
-        if HEDGE_MODE:
-            params["positionSide"] = "LONG" if pos_side == "buy" else "SHORT"
-
-        place_tasks.append((sym, pos_side, p, close_side, safe_qty, safe_price, ref_ep, tp1_pct, dca, params))
-
-    if place_tasks:
-        async def _safe_place(sym, close_side, safe_qty, safe_price, params):
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(
-                        ex.create_order, sym, 'limit', close_side,
-                        safe_qty, safe_price, params=params,
-                    ),
-                    timeout=5.0,
-                )
-            except Exception as e:
-                return {"_error": str(e)}
-
-        place_results = await asyncio.gather(
-            *[_safe_place(sym, cs, sq, sp, pa)
-              for sym, _, _, cs, sq, sp, _, _, _, pa in place_tasks]
-        )
-
-        for (sym, pos_side, p, close_side, safe_qty, safe_price, ref_ep, tp1_pct, dca, params), result in zip(place_tasks, place_results):
-            err = result.get("_error") if isinstance(result, dict) else None
-            if err:
-                if "MIN_NOTIONAL" not in err and "minimum" not in err.lower():
-                    print(f"[TP1_PRE] {sym} 주문 실패: {err[:80]}")
-                continue
-
-            new_oid = result.get("id")
-            p["tp1_preorder_id"] = new_oid
-            p["tp1_preorder_price"] = safe_price
-            p["tp1_preorder_ts"] = time.time()  # ★ stale 판단용
-
-            from v9.execution.order_router import _register_pending
-            _register_pending(sym, new_oid, "TP1_PRE")
-
-            print(f"[TP1_PRE] {sym} {pos_side} T{dca} "
-                  f"limit {close_side} {safe_qty}@{safe_price} "
-                  f"(ref={ref_ep:.4f} +{tp1_pct}%)")
-
-
 # ═══════════════════════════════════════════════════════════════
 # ★ v10.13: Pending Limit 추적 (order_router fire-and-forget)
 # ═══════════════════════════════════════════════════════════════
@@ -801,9 +976,23 @@ async def _manage_pending_limits(ex, st, snapshot):
             # ★ v10.14b: pending_entry 반드시 해제 (_apply_pending_fill 실패해도)
             from v9.execution.position_book import set_pending_entry as _spe2
             ensure_slot(st, sym)
-            _spe2(st[sym], info["side"], None)
+            # ★ v10.21: TP1 limit은 reduce → pending_entry 해제 불필요
+            if info["intent_type"] != "TP1":
+                _spe2(st[sym], info["side"], None)
             print(f"[PENDING_LIMIT] ★ {sym} {info['intent_type']} 체결! "
                   f"{filled_qty}@{avg_price:.4f}")
+            # ★ V10.17: Pending limit 체결 텔레그램 알림
+            if _TELEGRAM_OK:
+                if info["intent_type"] == "TP1":
+                    _pl_type = "TP1_LIMIT"
+                elif info["intent_type"] == "DCA":
+                    _pl_type = "PENDING_DCA"
+                else:
+                    _pl_type = "PENDING_OPEN"
+                asyncio.ensure_future(_notify_async_fill(
+                    sym, info["side"], avg_price, filled_qty, _pl_type,
+                    tier=info.get("tier", 0), role=info.get("role", ""),
+                ))
 
         elif status == "canceled":
             remove_pending_limit(oid)
@@ -849,6 +1038,13 @@ async def _manage_pending_limits(ex, st, snapshot):
                         log_fill(info["trace_id"], info["sym"], info["side"],
                                  avg_p, part_filled, info["tag"] + "_PARTIAL", oid)
                         print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소")
+                        # ★ V10.17: 부분체결 텔레그램 알림
+                        if _TELEGRAM_OK:
+                            asyncio.ensure_future(_notify_async_fill(
+                                info["sym"], info["side"], avg_p, part_filled,
+                                "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN",
+                                tier=info.get("tier", 0), role=info.get("role", ""),
+                            ))
                 except Exception:
                     pass
             remove_pending_limit(oid)
@@ -859,6 +1055,10 @@ async def _manage_pending_limits(ex, st, snapshot):
             from v9.execution.position_book import set_pending_entry, ensure_slot
             ensure_slot(st, info["sym"])
             set_pending_entry(st[info["sym"]], info["side"], None)
+            # ★ v10.24 Fix D: TP1 pending limit 타임아웃 시 exit_fail_cooldown 설정
+            # 즉시 재생성 방지 (30초 쿨다운)
+            if info.get("intent_type") == "TP1":
+                st[info["sym"]]["exit_fail_cooldown_until"] = now + 30
 
 
 def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
@@ -1005,9 +1205,66 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["insurance_sh_trigger"] = None
         p["tp1_preorder_id"] = None
         p["tp1_preorder_price"] = None
+        # ★ V10.26: DCA 새 출발 — worst_roi/max_roi 0 리셋
+        p["worst_roi"] = 0.0
+        p["max_roi_seen"] = 0.0
 
         print(f"[PENDING_FILL] {sym} {side} DCA T{tier} 반영 "
               f"ep={p['ep']:.4f} qty={p['amt']:.1f}")
+
+    elif itype == "TP1":
+        # ★ v10.21: TP1 지정가 체결 → 포지션 amt 감소 + step=1 전환
+        # ★ V10.26b: side 수정 — TP1 주문 side(청산방향)의 반대가 포지션 side
+        from v9.utils.utils_math import calc_roi_pct
+        pos_side = "sell" if side == "buy" else "buy"  # ★ FIX: 포지션은 주문 반대방향
+        p = get_p(sym_st, pos_side)
+        if not (p and isinstance(p, dict)):
+            print(f"[PENDING_FILL] {sym} TP1 대상 포지션 없음 (pos_side={pos_side}) — 무시")
+            return
+
+        old_ep = float(p.get("ep", 0))
+        p["amt"] = max(0.0, float(p.get("amt", 0)) - filled_qty)
+
+        if p["amt"] <= 0:
+            # 전량 체결 → 포지션 클리어
+            from v9.execution.position_book import clear_position
+            from v9.logging.logger_csv import log_trade  # ★ V10.27 FIX: 올바른 import 경로
+            _hold = now - float(p.get("time", now) or now)
+            _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
+            if pos_side == "buy":
+                _pnl = filled_qty * (avg_price - old_ep)
+            else:
+                _pnl = filled_qty * (old_ep - avg_price)
+            log_trade(
+                trace_id=info["trace_id"], symbol=sym, side=pos_side,
+                ep=old_ep, exit_price=avg_price, amt=filled_qty,
+                pnl_usdt=_pnl, roi_pct=_roi,
+                dca_level=int(p.get("dca_level", 1) or 1),
+                hold_sec=_hold, reason="TP1_LIMIT_FULL",
+                hedge_mode=bool(p.get("hedge_mode", False)),
+                was_hedge=bool(p.get("was_hedge", False)),
+                max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
+                entry_type=str(p.get("entry_type", "MR") or "MR"),
+                role=str(p.get("role", "") or ""),
+                source_sym=str(p.get("source_sym", "") or ""),
+            )
+            clear_position(st, sym, pos_side)
+            print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
+        else:
+            # 부분 체결 → step=1 + trailing 전환
+            p["step"] = 1
+            p["tp1_done"] = True
+            p["tp1_price"] = avg_price
+            p["trailing_on_time"] = now
+            dca = int(p.get("dca_level", 1) or 1)
+            if pos_side == "buy":
+                _pnl = filled_qty * (avg_price - old_ep)
+            else:
+                _pnl = filled_qty * (old_ep - avg_price)
+            _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
+            print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
+                  f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
+                  f"→ trailing(잔량={p['amt']:.1f})")
 
 
 async def _main_loop(ex_init, dry_run: bool):
@@ -1067,11 +1324,83 @@ async def _main_loop(ex_init, dry_run: bool):
     except Exception as _startup_e:
         print(f"[STARTUP] 미체결 주문 정리 실패(무시): {_startup_e}")
 
+    # ★ FIX-1: 부팅 시 pending_entry + tp1_preorder_id 전부 클리어
+    # 이전 세션의 limit 주문은 위에서 전부 취소했으므로, state에 남은 건 전부 유령
+    _startup_clear_count = 0
+    for _sc_sym, _sc_ss in st.items():
+        if not isinstance(_sc_ss, dict):
+            continue
+        for _sc_key in ('pending_entry_long', 'pending_entry_short'):
+            if _sc_ss.get(_sc_key):
+                _sc_ss[_sc_key] = None
+                _startup_clear_count += 1
+        for _sc_side_key in ('p_long', 'p_short'):
+            _sc_p = _sc_ss.get(_sc_side_key)
+            if isinstance(_sc_p, dict) and _sc_p.get('tp1_preorder_id'):
+                _sc_p['tp1_preorder_id'] = None
+                _sc_p['tp1_preorder_price'] = None
+                _sc_p['tp1_preorder_ts'] = None
+                _startup_clear_count += 1
+            # pending_dca도 클리어 (이전 limit DCA 미체결 잔여)
+            if isinstance(_sc_p, dict) and _sc_p.get('pending_dca'):
+                _sc_p['pending_dca'] = None
+                _startup_clear_count += 1
+            # ★ V10.22: tp_locked 레거시 필드 정리 (재시작 시 클리어)
+            if isinstance(_sc_p, dict):
+                for _legacy_key in ('tp_locked', 'tp_lock_reason', 'tp_lock_ts', 'tp_lock_force_dca'):
+                    if _sc_p.get(_legacy_key):
+                        _sc_p.pop(_legacy_key, None)
+                        _startup_clear_count += 1
+    if _startup_clear_count > 0:
+        print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
+              f"(pending_entry + tp1_preorder + pending_dca)")
+        save_position_book(st, cooldowns, system_state)
+
+    # ★ v10.18: 다운타임 중 청산 감지 & 알림
+    try:
+        await _check_downtime_trades(ex, st, system_state)
+    except Exception as _dt_e:
+        print(f"[STARTUP] 다운타임 감지 실패(무시): {_dt_e}")
+
+    # ★ v10.17: _skew_stage2_enter_ts 복원 (재시작 후 15분 타이머 유지)
+    try:
+        import v9.engines.hedge_core as _hc_mod
+        _saved_s2ts = float(system_state.get('_skew_stage2_enter_ts', 0.0) or 0.0)
+        if _saved_s2ts > 0 and time.time() - _saved_s2ts < 3600:  # 1시간 이내만 복원
+            _hc_mod._skew_stage2_enter_ts = _saved_s2ts
+            _elapsed = (time.time() - _saved_s2ts) / 60
+            print(f"[STARTUP] _skew_stage2_enter_ts 복원: {_elapsed:.0f}분 경과")
+        else:
+            _hc_mod._skew_stage2_enter_ts = 0.0
+    except Exception as _s2e:
+        print(f"[STARTUP] stage2 타이머 복원 실패(무시): {_s2e}")
+
     while True:
         now = time.time()
         loop_start = now
 
         try:
+            # ── ★ v10.17: config_override.json 핫리로드 ─────────────
+            # 파일 있으면 v9.config 모듈 속성을 런타임 오버라이드
+            # 파일 없으면 기존 동작 완전히 동일 (zero-risk)
+            # 허용 키만 오버라이드 (안전 화이트리스트)
+            _OVERRIDE_WHITELIST = {
+                "SKEW_STAGE2_TRIGGER", "SKEW_STAGE2_TIMEOUT_SEC",
+                "SKEW_HEDGE_STRESS_ROI", "SKEW_HEDGE_TRIGGER",
+                "REBOUND_ALPHA",
+            }
+            _override_path = os.path.join(_PROJECT_DIR, "config_override.json")
+            if os.path.exists(_override_path):
+                try:
+                    import v9.config as _v9cfg
+                    with open(_override_path, encoding='utf-8') as _ov_f:
+                        _overrides = json.load(_ov_f)
+                    for _ok, _ov in _overrides.items():
+                        if _ok in _OVERRIDE_WHITELIST and hasattr(_v9cfg, _ok):
+                            setattr(_v9cfg, _ok, _ov)
+                except Exception as _ov_e:
+                    print(f"[OVERRIDE] config_override.json 로드 실패(무시): {_ov_e}")
+
             # ── 텔레그램 봇 명령 싱크 (system_state.json → in-memory) ───
             try:
                 _ss_path = os.path.join(_PROJECT_DIR, "system_state.json")
@@ -1293,6 +1622,74 @@ async def _main_loop(ex_init, dry_run: bool):
             except Exception:
                 pass
 
+            # ★ v10.24 Fix C: RECOVERED 좀비 자동 청산
+            # tag=V9_RECOVERED + step=0 + 30분 경과 → FORCE_CLOSE
+            # ★ V10.26b: 위험한 강제 클리어 제거 — 거래소 포지션 보호
+            #   - amt=0만 클리어 (확실히 없는 경우)
+            #   - 3회 실패 → _zombie_stuck=True → 재시도 중단 (포지션은 유지)
+            #   - 60초 간격으로만 재시도 (스팸 방지)
+            _recovered_close_intents = []
+            from v9.types import Intent as _Intent_rc
+            for _rc_sym, _rc_ss in st.items():
+                if not isinstance(_rc_ss, dict):
+                    continue
+                for _rc_side, _rc_p in iter_positions(_rc_ss):
+                    if _rc_p is None:
+                        continue
+                    if str(_rc_p.get("tag", "")) != "V9_RECOVERED":
+                        continue
+                    if int(_rc_p.get("step", 0) or 0) != 0:
+                        continue
+                    if now - float(_rc_p.get("time", now) or now) <= 1800:
+                        continue
+
+                    # amt=0 → 안전하게 클리어
+                    _rc_amt = float(_rc_p.get("amt", 0) or 0)
+                    if _rc_amt <= 0:
+                        from v9.execution.position_book import clear_position as _cp_rc
+                        _cp_rc(st, _rc_sym, _rc_side)
+                        print(f"[V9] RECOVERED amt=0 클리어: {_rc_sym} {_rc_side}")
+                        continue
+
+                    # 이미 stuck → 건너뜀 (다음 sync가 정리)
+                    if _rc_p.get("_zombie_stuck"):
+                        continue
+
+                    # 60초 간격 재시도 제한
+                    _last_try = float(_rc_p.get("_zombie_last_try", 0) or 0)
+                    if now - _last_try < 60:
+                        continue
+                    _rc_p["_zombie_last_try"] = now
+
+                    # 3회 실패 → stuck 마킹 (절대 포지션 삭제하지 않음)
+                    _retry = int(_rc_p.get("_zombie_retry", 0) or 0)
+                    if _retry >= 3:
+                        _rc_p["_zombie_stuck"] = True
+                        print(f"[V9] RECOVERED 좀비 3회 실패 → stuck 마킹 (수동 확인 필요): {_rc_sym} {_rc_side}")
+                        continue
+                    _rc_p["_zombie_retry"] = _retry + 1
+
+                    _rc_cp = float((snapshot.all_prices or {}).get(_rc_sym, 0) or 0)
+                    if _rc_cp > 0:
+                        _rc_close_side = "sell" if _rc_side == "buy" else "buy"
+                        _recovered_close_intents.append(_Intent_rc(
+                            trace_id=str(uuid.uuid4())[:8],
+                            intent_type=IntentType.FORCE_CLOSE,
+                            symbol=_rc_sym,
+                            side=_rc_close_side,
+                            qty=_rc_amt,
+                            price=None,
+                            reason="RECOVERED_ZOMBIE_30MIN",
+                            metadata={"positionSide": "LONG" if _rc_side == "buy" else "SHORT"},
+                        ))
+            if _recovered_close_intents:
+                _rc_results = await execute_intents(
+                    ex, _recovered_close_intents, dry_run=dry_run, st=st
+                )
+                _rc_map = {i.trace_id: i for i in _recovered_close_intents}
+                apply_order_results(_rc_results, _rc_map, st, cooldowns, snapshot)
+                save_position_book(st, cooldowns, system_state)
+
             # ── Intent 생성 ──────────────────────────────────────
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
             # ★ v10.14d: plan_dca는 generate_all_intents 안에서 실행 (보험 타이밍 수정)
@@ -1337,13 +1734,37 @@ async def _main_loop(ex_init, dry_run: bool):
             # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)
             await _sync_positions_with_exchange(ex, st, snapshot)
 
-            # ★ v10.14b: 유령 pending_entry 일괄 정리 (매틱 유지)
+            # ★ v10.24 Fix B: _manage_pending_limits 호출 추가
+            # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
+            await _manage_pending_limits(ex, st, snapshot)
+
+            # ★ V10.25: TP1 선주문 관리 (매 틱)
+            await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
+
+            # ★ FIX-2: 유령 pending_entry 일괄 정리 (조건 확장)
+            # 기존: 포지션+pending 동시 → 클리어
+            # 추가: pending만 남은 경우도 클리어 (in-memory에 대응 주문 없으면 유령)
+            try:
+                from v9.execution.order_router import get_pending_limits as _gpl_ghost
+                _live_oids = {str(info.get("order_id","")) for info in _gpl_ghost().values()}
+            except Exception:
+                _live_oids = set()
             for _pe_sym, _pe_ss in st.items():
                 if not isinstance(_pe_ss, dict):
                     continue
                 for _pe_side in ("buy", "sell"):
-                    if get_p(_pe_ss, _pe_side) is not None and get_pending_entry(_pe_ss, _pe_side) is not None:
+                    _pe_val = get_pending_entry(_pe_ss, _pe_side)
+                    if _pe_val is None:
+                        continue
+                    # 케이스1: 포지션 있는데 pending도 있음 (기존 로직)
+                    if get_p(_pe_ss, _pe_side) is not None:
                         set_pending_entry(_pe_ss, _pe_side, None)
+                        continue
+                    # 케이스2: 포지션 없고 pending만 있는데, in-memory 추적에 없음 → 유령
+                    _pe_oid = str((_pe_val or {}).get("order_id", "")) if isinstance(_pe_val, dict) else ""
+                    if _pe_oid and _pe_oid not in _live_oids:
+                        set_pending_entry(_pe_ss, _pe_side, None)
+                        print(f"[GHOST] {_pe_sym} {_pe_side} 유령 pending_entry 클리어 (oid={_pe_oid})")
 
             # ── [BUG-5 FIX] 체결 알림 ─────────────────────────
             if _TELEGRAM_OK:
@@ -1397,19 +1818,46 @@ async def _main_loop(ex_init, dry_run: bool):
             # ── 포지션 스냅샷 로그 (30초 주기) ──────────────────
             if now - last_save_ts >= 10:
                 snapshot_positions(st, snapshot)
+                # ★ v10.17: stage2 타이머 system_state에 저장 (재시작 복원용)
+                try:
+                    import v9.engines.hedge_core as _hc_sv
+                    system_state['_skew_stage2_enter_ts'] = _hc_sv._skew_stage2_enter_ts
+                except Exception:
+                    pass
                 save_position_book(st, cooldowns, system_state)
                 last_save_ts = now
+                # ★ v10.17: 스큐 상태 로그 (log_skew.csv)
+                try:
+                    from v9.engines.hedge_core import (
+                        calc_skew as _cs, _skew_stage2_enter_ts as _s2ts,
+                        _is_hedge_required as _ihr,
+                    )
+                    from v9.logging.logger_csv import log_skew as _lskew
+                    from v9.config import SKEW_STAGE2_TRIGGER as _s2t
+                    _tc = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                    if _tc > 0:
+                        _sk, _lm, _sm = _cs(st, _tc)
+                        _hvy = "buy" if _lm > _sm else "sell"
+                        _hact = any(
+                            isinstance(get_p(ss, s), dict)
+                            and (get_p(ss, s) or {}).get("role") == "CORE_HEDGE"
+                            for ss in st.values() if isinstance(ss, dict)
+                            for s in ("buy", "sell")
+                        )
+                        _hreq = _ihr(st, snapshot, _sk, _hvy) if _sk >= _s2t else False
+                        _s2m = (now - _s2ts) / 60 if _s2ts > 0 else 0.0
+                        _lc = (2 if _sk >= _s2t else 1) if _sk >= 0.10 else 0
+                        _lskew(
+                            skew=_sk, long_mr=_lm, short_mr=_sm, heavy_side=_hvy,
+                            lock_count=_lc, hedge_active=_hact, hedge_required=_hreq,
+                            stage2_min=_s2m, mr=float(getattr(snapshot, "margin_ratio", 0) or 0),
+                        )
+                except Exception as _lse:
+                    pass  # 로그 실패는 무시
                 # ★ v10.15: minroi 30초마다 저장
                 if now - _last_minroi_save_ts >= 30:
                     save_minroi(_minroi)
                     _last_minroi_save_ts = now
-
-            # ── ★ v10.13: TP1 limit 선주문 관리 ─────────────────
-            if not dry_run:
-                try:
-                    await _manage_tp1_preorders(ex, st, snapshot)
-                except Exception as _tp1e:
-                    print(f"[TP1_PRE] 관리 오류(무시): {_tp1e}")
 
             # ── 슬롯 상태 출력 (디버그) ──────────────────────────
             slots = count_slots(st)

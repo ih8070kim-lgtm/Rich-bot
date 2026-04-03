@@ -216,7 +216,7 @@ async def report_system_status(snapshot, st: dict):
     _stats_str = "\n".join(_stats_lines)
 
     msg = (
-        f"<b>Trinity V10.11b 리포트</b>\n"
+        f"<b>Trinity V10.24 리포트</b>\n"
         f"────────────────\n"
         f"🌡️ <b>{regime_ui}</b>  💰 <b>${current_bal:,.2f}</b>  일MDD: {mdd_pct:+.2f}%\n"
         f"📊 마진: {_margin_bar}\n"
@@ -343,3 +343,58 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
 
     except Exception as e:
         print(f"[Telegram] notify_fill 오류: {e}")
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.17: 비동기 체결 알림 (TP1 선주문 / Pending Limit)
+# notify_fill은 Intent+OrderResult 객체 필요 → 비동기 매니저는 이 객체 없음
+# ═════════════════════════════════════════════════════════════════
+async def notify_async_fill(
+    sym: str, side: str, avg_px: float, filled: float,
+    fill_type: str, pnl: float = 0.0, roi: float = 0.0,
+    ep: float = 0.0, tier: int = 0, role: str = "",
+):
+    """TP1 선주문 / Pending Limit 체결 알림 (경량 버전)."""
+    try:
+        notional = avg_px * filled
+        badge = "🛡️ " if "HEDGE" in role else ("🩹 " if "INSURANCE" in role else "")
+        ts_str = datetime.now().strftime('%H:%M:%S')
+
+        if fill_type in ("TP1_PRE", "TP1_LIMIT"):
+            # ★ v10.24: TP1_LIMIT 추가 (pending limit TP1 체결 알림)
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            _tp1_label = "TP1 선주문 체결" if fill_type == "TP1_PRE" else "TP1 Limit 체결"
+            msg = (
+                f"✅ <b>{badge}{_tp1_label}</b>\n"
+                f"────────────────\n"
+                f"📌 <b>{sym}</b>\n"
+                f"💵 청산가: <b>{avg_px:.4f}</b>  (진입: {ep:.4f})\n"
+                f"{emoji} <b>{roi:+.2f}%</b>  💵 <b>${pnl:+.2f}</b>\n"
+                f"📦 {filled:.4f} | 💰 ${notional:.2f}\n"
+                f"⏱ {ts_str}"
+            )
+        elif fill_type == "PENDING_OPEN":
+            side_emoji = "📈 <b>롱 진입</b>" if side == "buy" else "📉 <b>숏 진입</b>"
+            msg = (
+                f"{side_emoji}  🔁 <b>{badge}Limit 체결</b>\n"
+                f"────────────────\n"
+                f"📌 <b>{sym}</b>\n"
+                f"💵 체결가: <b>{avg_px:.4f}</b>\n"
+                f"📦 {filled:.4f} | 💰 ${notional:.2f}\n"
+                f"⏱ {ts_str}"
+            )
+        elif fill_type == "PENDING_DCA":
+            msg = (
+                f"📦 <b>{badge}DCA T{tier} Limit 체결</b>\n"
+                f"────────────────\n"
+                f"📌 <b>{sym}</b>  {'롱' if side == 'buy' else '숏'}\n"
+                f"💵 체결가: <b>{avg_px:.4f}</b>\n"
+                f"📦 {filled:.4f} | 💰 ${notional:.2f}\n"
+                f"⏱ {ts_str}"
+            )
+        else:
+            return
+
+        await send_telegram_message(msg)
+    except Exception as e:
+        print(f"[Telegram] notify_async_fill 오류: {e}")

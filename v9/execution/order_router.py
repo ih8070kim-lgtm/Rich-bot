@@ -119,22 +119,30 @@ async def route_order(
     trace_id  = intent.trace_id
     tag       = f"V9_{intent.intent_type.value}_{sym}"
 
-    # ── v10.13: 라우팅 모드 결정 ──
+    # ── v10.21: 라우팅 모드 결정 ──
+    # TP1: 지정가 (수익 목표 도달 → 슬리피지 0)
+    # TRAIL_ON/FORCE_CLOSE: 시장가 (급히 빠져야 → 즉시 체결)
     _meta_role = (intent.metadata or {}).get("role", "")
     _meta_entry = (intent.metadata or {}).get("entry_type", "")
+    from v9.types import IntentType as _IT_route
     _force_market = (
-        _is_reduce(intent)                           # TP1, TRAIL_ON, FORCE_CLOSE → 시장가
-        or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")  # ★ PATCH: 헷지 진입도 시장가 (limit → 체결 전 SL 방지)
-        # ★ v10.15: HIGH 레짐 DCA → metadata에서 force_market=True
+        _is_reduce(intent) and intent.intent_type != _IT_route.TP1  # TP1 제외 — 지정가
+        or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")
         or bool((intent.metadata or {}).get("force_market", False))
     )
     order_type = 'market' if (_force_market or not price) else 'limit'
 
     # ── Idempotency Key 중복주문 방지 ──────────────────────────
     tier = intent.metadata.get('tier', 0) if intent.metadata else 0
-    price_key = round(float(getattr(intent, "price", 0.0) or 0.0), 2)
     side_key  = str(getattr(intent, "side", "") or "")
-    idem_key  = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}|{price_key}"
+    # ★ v10.24 Fix E: TP1/TP2 DEDUP 키에서 price 제거
+    # 가격이 미세 변동(2152.78→2153.82→2152.93)하면 DEDUP 미스 → 30초 내 6개 동시 배치
+    from v9.types import IntentType as _IT_dedup
+    if intent.intent_type in (_IT_dedup.TP1, _IT_dedup.TP2):
+        idem_key = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}"
+    else:
+        price_key = round(float(getattr(intent, "price", 0.0) or 0.0), 2)
+        idem_key  = f"{sym}|{intent.intent_type.value}|{tier}|{side_key}|{price_key}"
 
     # 만료된 캐시 정리
     now_ts = time.time()
