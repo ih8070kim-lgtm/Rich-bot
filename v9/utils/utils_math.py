@@ -41,46 +41,6 @@ def safe_corr(btc_lr: np.ndarray, alt_lr: np.ndarray) -> float:
         return 0.0
 
 
-def capture_ratios(btc_lr: np.ndarray, alt_lr: np.ndarray) -> tuple[float, float]:
-    """
-    Up Capture / Down Capture 계산.
-    반환: (up_capture, down_capture)
-    """
-    try:
-        min_len = min(len(btc_lr), len(alt_lr))
-        if min_len < 5:
-            return 0.0, 0.0
-        b = btc_lr[-min_len:]
-        a = alt_lr[-min_len:]
-        mask = np.isfinite(b) & np.isfinite(a)
-        b, a = b[mask], a[mask]
-
-        up_mask = b > 0
-        down_mask = b < 0
-
-        if up_mask.sum() < 2 or down_mask.sum() < 2:
-            return 0.0, 0.0
-
-        mean_btc_up = np.mean(b[up_mask])
-        mean_alt_up = np.mean(a[up_mask])
-        mean_btc_dn = np.mean(b[down_mask])
-        mean_alt_dn = np.mean(a[down_mask])
-
-        if abs(mean_btc_up) < 1e-12 or abs(mean_btc_dn) < 1e-12:
-            return 0.0, 0.0
-
-        up_cap = mean_alt_up / mean_btc_up
-        dn_cap = mean_alt_dn / mean_btc_dn
-
-        if not np.isfinite(up_cap):
-            up_cap = 0.0
-        if not np.isfinite(dn_cap):
-            dn_cap = 0.0
-
-        return float(up_cap), float(dn_cap)
-    except Exception:
-        return 0.0, 0.0
-
 
 def atr_from_ohlcv(ohlcv: list, period: int = 10) -> float:
     """
@@ -146,11 +106,6 @@ def calc_ema(closes: list[float], period: int = 20) -> float:
 def log_returns(prices: np.ndarray) -> np.ndarray:
     """log-return 계산: np.diff(np.log(prices))"""
     return np.diff(np.log(prices))
-
-
-def clamp(val: float, lo: float, hi: float) -> float:
-    """값을 [lo, hi] 범위로 클램프"""
-    return max(lo, min(hi, val))
 
 
 def calc_roi_pct(ep: float, cp: float, side: str, leverage: float) -> float:

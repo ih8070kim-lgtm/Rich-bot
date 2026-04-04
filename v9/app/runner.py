@@ -44,7 +44,6 @@ try:
 except Exception as _tg_err:
     print(f"[V9 Runner] telegram_engine import 실패 (알림 비활성): {_tg_err}")
     _TELEGRAM_OK = False
-from v9.engines.dca_engine import generate_dca_intents
 from v9.risk.risk_manager import generate_corrguard_intents
 
 
@@ -848,26 +847,6 @@ def _cleanup_inactive_slots(st: dict) -> None:
     if to_remove:
         print(f"[V9 Runner] 비활성 슬롯 {len(to_remove)}개 정리: {to_remove}")
 
-
-def _normalize_symbol(raw: str) -> str:
-    """
-    거래소 심볼 → 내부 심볼 정규화.
-    XRP/USDT:USDT → XRP/USDT
-    XRPUSDT       → XRP/USDT  (CCXT id 형태)
-    BTC/USDT      → BTC/USDT  (이미 정규화된 경우 pass-through)
-    """
-    if not raw:
-        return raw
-    # ':USDT' 제거 (CCXT unified perpetual 포맷)
-    s = raw.replace(':USDT', '').replace(':USD', '')
-    # 이미 '/' 포함 → 정규화 완료
-    if '/' in s:
-        return s
-    # XRPUSDT 형태 → XRP/USDT
-    if s.endswith('USDT'):
-        base = s[:-4]
-        return f"{base}/USDT"
-    return s
 
 
 def _rotate_logs() -> None:
