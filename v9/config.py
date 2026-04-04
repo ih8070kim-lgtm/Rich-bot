@@ -8,10 +8,10 @@ v10.26 → v10.27 변경:
   TRAIL_GAP             0.3 → 0.5
   INSURANCE_SH          BTC 급변 직접 감지 기반 재설계
   _skew_tp_adjustment   heavy floor 0.5 + light 무한블록 + 매도후 스큐 시뮬
-  E30                   완전 비활성화
+  E30                   2슬롯 한정 A/B 테스트 (15mE30 태그)
 """
 
-VERSION = "10.27c"  # ★ 서버 확인용: grep VERSION v9/config.py
+VERSION = "10.27d"  # ★ 서버 확인용: grep VERSION v9/config.py
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
@@ -20,6 +20,7 @@ TOTAL_MAX_SLOTS = 10   # ★ v10.15: 양방향 합산 (한쪽 5 × 2)
 MAX_LONG        = 5    # ★ v10.15: 한쪽 5 (MR+HEDGE 합산)
 MAX_SHORT       = 5
 MAX_MR_PER_SIDE = 4    # ★ v10.15: MR은 방향당 최대 4
+MAX_E30_SLOTS   = 2    # ★ V10.27d: EMA30 A/B 테스트 슬롯 (롱+숏 합산)
 MAX_HEDGE_SLOTS = 1    # ★ 최종 아키텍처: tail-risk 보험 1개만
 GRID_DIVISOR    = 8    # ★ v10.15: 포지션 사이징 분모 (슬롯 상한과 독립)
 

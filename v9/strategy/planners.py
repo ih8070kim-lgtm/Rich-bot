@@ -564,6 +564,13 @@ def plan_open(
     # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
     _open_longs, _open_shorts = _count_active_by_side(st)
 
+    # ★ V10.27d: EMA30 활성 슬롯 카운트 (2개 한정 A/B 테스트)
+    from v9.config import MAX_E30_SLOTS
+    _active_e30 = 0
+    for _e30_sym, _e30_p in _pos_items(st):
+        if _e30_p.get("entry_type") == "15mE30" and int(_e30_p.get("step", 0) or 0) >= 1:
+            _active_e30 += 1
+
     for symbol in list(set(long_targets + short_targets)):
         # [UnboundLocalError 방지] Python 스코프 선점 — 반드시 루프 최상단
         can_long  = False
@@ -659,6 +666,8 @@ def plan_open(
         ema_10_15m  = calc_ema(closes_15m, period=10) if len(closes_15m) >= 10 else ema_20_15m
         # ★ v10.12: 숏 전용 EMA5 (빠른 추적)
         ema_5_15m   = calc_ema(closes_15m, period=5) if len(closes_15m) >= 5 else ema_10_15m
+        # ★ V10.27d: EMA30 A/B 테스트
+        ema_30_15m  = calc_ema(closes_15m, period=30) if len(closes_15m) >= 30 else None
 
         closes_5m_all = [float(x[4]) for x in ohlcv_5m]
         ema_20_5m     = calc_ema(closes_5m_all, period=20) if len(closes_5m_all) >= 20 else 0.0
@@ -679,6 +688,12 @@ def plan_open(
         _mr_short_ema10 = ema_10_15m > 0 and curr_p > ema_10_15m + atr_coin * _mr_atr_mult_long
         mr_short_ok = can_short and (_mr_short_ema5 or _mr_short_ema10)
 
+        # ★ V10.27d: EMA30 A/B 테스트 — EMA10 미충족 시에만 발동
+        mr_e30_long_ok  = (not mr_long_ok) and can_long and ema_30_15m is not None and \
+                          (curr_p < ema_30_15m - atr_coin * _mr_atr_mult_long)
+        mr_e30_short_ok = (not mr_short_ok) and can_short and ema_30_15m is not None and \
+                          (curr_p > ema_30_15m + atr_coin * _mr_atr_mult_short)
+
         # ★ v10.7: TDECAY 제거 — ZOMBIE로 통합
 
         # ── (4-b) RSI 트리거 (5m RSI14 기준)
@@ -696,12 +711,31 @@ def plan_open(
         micro_long_ok  = _bull_cnt >= 2
         micro_short_ok = _bear_cnt >= 2
 
-        # ★ V10.27c: MR 전용 (Breakout/E30 삭제)
+        # ★ V10.27d: MR + E30 A/B 테스트
         _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok
         _mr_short_final = mr_short_ok and short_trig and micro_short_ok
 
-        final_long_trig  = _mr_long_final
-        final_short_trig = _mr_short_final
+        # E30: EMA10 미충족 + EMA30 충족 + 같은 RSI/micro 조건 + 슬롯 여유
+        _e30_long_final  = mr_e30_long_ok  and long_trig  and micro_long_ok  and _active_e30 < MAX_E30_SLOTS
+        _e30_short_final = mr_e30_short_ok and short_trig and micro_short_ok and _active_e30 < MAX_E30_SLOTS
+
+        # MR 우선, E30 보조
+        _is_e30_entry = False
+        if _mr_long_final:
+            final_long_trig = True
+        elif _e30_long_final:
+            final_long_trig = True
+            _is_e30_entry = True
+        else:
+            final_long_trig = False
+
+        if _mr_short_final:
+            final_short_trig = True
+        elif _e30_short_final:
+            final_short_trig = True
+            _is_e30_entry = True
+        else:
+            final_short_trig = False
 
 
         # (reason 태깅은 pending_map/entry_type_tag에서 처리)
@@ -730,6 +764,10 @@ def plan_open(
             if armed_age_sec > OPEN_PENDING_TTL_SEC:
                 pending_map.pop(symbol, None)
             elif armed_side in ("buy", "sell") and last_5m_ts > armed_ts_ms:
+                # ★ V10.27d: E30 pending 발화 시 슬롯 한도 재확인
+                if pend.get("entry_type") == "15mE30" and _active_e30 >= MAX_E30_SLOTS:
+                    pending_map.pop(symbol, None)
+                    continue
                 trigger_side      = armed_side
                 reason            = pend.get("reason", "HF_5M_NEXTBAR")
                 _pend_entry_type  = pend.get("entry_type", None)  # 발화 시 armed 시점 entry_type 사용
@@ -742,13 +780,13 @@ def plan_open(
                         "armed":       True,
                         "armed_ts_ms": last_5m_ts,
                         "side":        "sell",
-                        "entry_type":  "MR",
-                        "reason":      f"HF_MR_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)",
+                        "entry_type":  "15mE30" if _is_e30_entry else "MR",
+                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)",
                     }
                     continue
                 else:
                     trigger_side = "sell"
-                    reason = f"HF_MR_5mRSI_ATR({atr_mult:.1f}x)"
+                    reason = f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI_ATR({atr_mult:.1f}x)"
 
             if final_long_trig and trigger_side is None:
                 if OPEN_WAIT_NEXT_BAR:
@@ -756,13 +794,13 @@ def plan_open(
                         "armed":       True,
                         "armed_ts_ms": last_5m_ts,
                         "side":        "buy",
-                        "entry_type":  "MR",
-                        "reason":      f"HF_MR_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)",
+                        "entry_type":  "15mE30" if _is_e30_entry else "MR",
+                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)",
                     }
                     continue
                 else:
                     trigger_side = "buy"
-                    reason = f"HF_MR_5mRSI_ATR({atr_mult:.1f}x)"
+                    reason = f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI_ATR({atr_mult:.1f}x)"
 
         if trigger_side is None:
             continue
@@ -787,9 +825,11 @@ def plan_open(
         if corr < OPEN_CORR_MIN:
             continue
 
-        # ── entry_type 확정 — V10.27c: MR 전용 ──
+        # ── entry_type 확정 — V10.27d: MR + E30 A/B 테스트 ──
         if _pend_entry_type is not None:
             entry_type_tag = _pend_entry_type
+        elif _is_e30_entry:
+            entry_type_tag = "15mE30"
         else:
             entry_type_tag = "MR"
         _pend_entry_type = None
@@ -839,6 +879,9 @@ def plan_open(
         ))
         # ★ V10.27: 방향별 글로벌 쿨다운 기록
         _open_dir_cd[trigger_side] = now_ts + OPEN_DIR_COOLDOWN_SEC
+        # ★ V10.27d: E30 슬롯 카운터 증가 (루프 내 중복 방지)
+        if entry_type_tag == "15mE30":
+            _active_e30 += 1
 
     return intents
 
