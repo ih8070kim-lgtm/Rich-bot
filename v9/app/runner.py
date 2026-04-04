@@ -656,7 +656,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
       - worst_roi + alpha 기반 target price 계산
       - 선주문 없으면 배치, target 변경 시 재배치, 부적격 시 취소
     """
-    from v9.config import LEVERAGE, REBOUND_ALPHA, TP1_PARTIAL_RATIO, HEDGE_MODE
+    from v9.config import LEVERAGE, TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
     from v9.utils.utils_math import calc_roi_pct
     from v9.strategy.planners import _skew_tp_adjustment
 
@@ -696,7 +696,6 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
 
             # TP1 target 계산
             # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
-            from v9.config import TP1_FIXED
             _worst = 0.0
             if dca_level <= 2:
                 tp1_base = TP1_FIXED.get(dca_level, 2.0)
@@ -727,6 +726,10 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             _min_qty = {"ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
                         "BTC/USDT": 0.001, "AVAX/USDT": 0.1}.get(sym, 1.0)
             if close_qty < _min_qty:
+                close_qty = total_qty
+            # ★ V10.27e: 잔량이 min_qty 미만이면 전량 청산 (RESIDUAL 0.1 무한루프 방지)
+            remaining = total_qty - close_qty
+            if 0 < remaining < _min_qty:
                 close_qty = total_qty
             if close_qty <= 0:
                 continue

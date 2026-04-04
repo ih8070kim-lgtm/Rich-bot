@@ -564,11 +564,11 @@ def plan_open(
     # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
     _open_longs, _open_shorts = _count_active_by_side(st)
 
-    # ★ V10.27d: EMA30 활성 슬롯 카운트 (2개 한정 A/B 테스트)
+    # ★ V10.27e: EMA30 활성 슬롯 카운트 (step 무관 — 보유 중이면 카운트)
     from v9.config import MAX_E30_SLOTS
     _active_e30 = 0
     for _e30_sym, _e30_p in _pos_items(st):
-        if _e30_p.get("entry_type") == "15mE30" and int(_e30_p.get("step", 0) or 0) >= 1:
+        if _e30_p.get("entry_type") == "15mE30":
             _active_e30 += 1
 
     for symbol in list(set(long_targets + short_targets)):
@@ -1262,6 +1262,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             continue
         if p.get("pending_close"):
             continue
+        # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
+        if p.get("tp1_preorder_id"):
+            continue
         _sym_st_tp1 = st.get(symbol, {})
         if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
             continue
@@ -1353,6 +1356,10 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
             }.get(symbol, 1.0)
             if close_qty < _sym_min_qty:
+                close_qty = total_qty
+            # ★ V10.27e: 잔량 < min_qty → 전량 (RESIDUAL 무한루프 방지)
+            _remaining = total_qty - close_qty
+            if 0 < _remaining < _sym_min_qty:
                 close_qty = total_qty
             if close_qty <= 0:
                 continue

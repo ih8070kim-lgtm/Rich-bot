@@ -1,12 +1,11 @@
 """
-V10.24 Trinity 관제 봇
+V10.27e Trinity 관제 봇
 =============================================
 변경:
-  - /status: pending limits 카운트, 슬롯 상세 (MR/TOTAL), RECOVERED 마커,
-    시스템 건강 지표 (heartbeat 경과, 연속 오류)
-  - build_position_list: RECOVERED 뱃지 (♻️) 추가
-  - /closeall: 긴급 전량청산
-  - /slots: 슬롯 상세 정보 신규 명령
+  - /status: 대시보드 스타일, 레짐 제거, 일별 PnL 히스토리
+  - /perf: 일별 PnL 7일 히스토리 + 누적합
+  - /regime 제거 (불필요)
+  - build_position_list: 간결 표시
 """
 import json, os, asyncio, requests, time as _time, csv
 from datetime import datetime, date
@@ -115,86 +114,116 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        mtime   = os.path.getmtime(STATE_FILE)
+        mtime = os.path.getmtime(STATE_FILE)
         elapsed = int(datetime.now().timestamp() - mtime)
-        freshness = ("🟢" if elapsed<60 else "🟡" if elapsed<300 else "🔴") + \
-                    (f" {elapsed}초 전" if elapsed<60 else f" {elapsed//60}분 전")
+        if elapsed < 30:
+            freshness = "🟢"
+        elif elapsed < 300:
+            freshness = f"🟡 {elapsed}s"
+        else:
+            freshness = f"🔴 {elapsed // 60}m"
     except Exception:
-        freshness = "⚪ 불명"
+        freshness = "⚪"
 
-    total_bal = float(s.get("total_equity",     0.0) or 0.0)
-    mr        = float(s.get("margin_ratio",     0.0) or 0.0)
-    shutdown  = bool(s.get("shutdown_active",   False))
-    baseline  = float(s.get("baseline_balance", total_bal) or total_bal)
-    initial   = float(s.get("initial_balance",  total_bal) or total_bal)
+    total_bal = float(s.get("total_equity", 0.0) or 0.0)
+    mr = float(s.get("margin_ratio", 0.0) or 0.0)
+    shutdown = bool(s.get("shutdown_active", False))
+    baseline = float(s.get("baseline_balance", total_bal) or total_bal)
+    initial = float(s.get("initial_balance", total_bal) or total_bal)
     daily_roi = (total_bal - baseline) / baseline * 100 if baseline > 0 else 0.0
-    total_roi = (total_bal - initial)  / initial  * 100 if initial  > 0 else 0.0
+    total_roi = (total_bal - initial) / initial * 100 if initial > 0 else 0.0
+    daily_icon = "🟢" if daily_roi >= 0 else "🔴"
 
-    if mr >= 0.9:   ks = f"🔴 동결 (MR {mr*100:.1f}%)"
-    elif mr >= 0.8: ks = f"🔴 전면차단 (MR {mr*100:.1f}%)"
-    elif mr >= 0.7: ks = f"🟡 신규차단 (MR {mr*100:.1f}%)"
-    else:           ks = f"🟢 정상 (MR {mr*100:.1f}%)"
-    if shutdown:    ks += "\n  └ ⛔ DD 셧다운"
-
-    regime    = s.get("regime", "")
-    regime_map = {"HIGH": "⚡ HIGH", "NORMAL": "🟢 NORMAL", "LOW": "😴 LOW"}
-    regime_ui = regime_map.get(regime, f"🟢 {regime or '...'}")
-
-    crash_until  = float(s.get("btc_crash_freeze_until", 0.0) or 0.0)
-    crash_active = crash_until > _time.time()
-    crash_tag    = "  🚨 <b>BTC CRASH FREEZE</b>\n" if crash_active else ""
+    # 킬스위치
+    if shutdown:
+        ks = "⛔ DD셧다운"
+    elif mr >= 0.8:
+        ks = f"🔴 {mr*100:.0f}%"
+    elif mr >= 0.7:
+        ks = f"🟡 {mr*100:.0f}%"
+    else:
+        ks = f"🟢 {mr*100:.0f}%"
 
     positions = s.get("positions", [])
-    long_text, short_text, hedge_text, long_active, short_active = build_position_list(positions)
 
-    long_status  = ("💰 보유" if long_active  else "⏳ 대기")
-    short_status = ("💰 보유" if short_active else "⏳ 대기")
-    if not s.get("use_long",  True): long_status  = "🔴 중지"
-    if not s.get("use_short", True): short_status = "🔴 중지"
+    # 포지션 빌드 — 간결 스타일
+    _lev = 3
+    long_lines = []
+    short_lines = []
+    hedge_lines = []
+    _bal = total_bal or 1.0
 
-    _bal = total_bal or 1.0; _lev = 3
-    _exclude = ("HEDGE","SOFT_HEDGE","CORE_HEDGE","INSURANCE_SH","CORE_BALANCE")
-    _long_margin  = sum(float(p.get("ep",0) or 0)*float(p.get("amt",0) or 0)
-                        for p in positions if p.get("side")=="BUY") / _lev / _bal * 100
-    _short_margin = sum(float(p.get("ep",0) or 0)*float(p.get("amt",0) or 0)
-                        for p in positions if p.get("side")=="SELL") / _lev / _bal * 100
-    core_long  = sum(1 for p in positions if p.get("side")=="BUY"  and p.get("role","") not in _exclude)
-    core_short = sum(1 for p in positions if p.get("side")=="SELL" and p.get("role","") not in _exclude)
-    hedge_cnt  = sum(1 for p in positions if p.get("role","") in ("CORE_HEDGE","HEDGE","SOFT_HEDGE"))
-    # 최종 아키텍처: 헷지 최대 1개
-    hedge_status = f"🛡️ 헷지: {hedge_cnt}/1" if hedge_cnt > 0 else ""
-    # ★ v10.24: RECOVERED 카운트
-    recovered_cnt = sum(1 for p in positions if p.get("tag","") == "V9_RECOVERED")
-    recovered_tag = f"  ♻️ RECOVERED: {recovered_cnt}\n" if recovered_cnt > 0 else ""
+    _long_margin = sum(
+        float(p.get("ep", 0) or 0) * float(p.get("amt", 0) or 0)
+        for p in positions if p.get("side") == "BUY"
+    ) / _lev / _bal * 100
+    _short_margin = sum(
+        float(p.get("ep", 0) or 0) * float(p.get("amt", 0) or 0)
+        for p in positions if p.get("side") == "SELL"
+    ) / _lev / _bal * 100
 
-    # ★ v10.24: 슬롯 상세 + pending limits
+    for pos in positions:
+        sym = pos.get("symbol", "?").replace("/USDT", "")
+        side = pos.get("side", "BUY")
+        tier = int(pos.get("tier", 1) or 1)
+        roi = float(pos.get("roi_pct", 0.0) or 0.0)
+        step = int(pos.get("step", 0) or 0)
+        role = pos.get("role", "")
+
+        icon = "🟢" if roi >= 0 else "🔴"
+        trail = "✂" if step >= 1 else ""
+
+        if role in ("HEDGE", "SOFT_HEDGE", "CORE_HEDGE"):
+            line = f"  {icon}🛡 {sym} T{tier}{trail} {roi:+.1f}%"
+            hedge_lines.append(line)
+        elif role == "INSURANCE_SH":
+            line = f"  {icon}🩹 {sym} {roi:+.1f}%"
+            if side == "BUY":
+                long_lines.append(line)
+            else:
+                short_lines.append(line)
+        else:
+            line = f"  {icon} {sym} T{tier}{trail} {roi:+.1f}%"
+            if side == "BUY":
+                long_lines.append(line)
+            else:
+                short_lines.append(line)
+
+    long_text = "\n".join(long_lines) if long_lines else "  <i>없음</i>"
+    short_text = "\n".join(short_lines) if short_lines else "  <i>없음</i>"
+    hedge_text = "\n🛡 <b>Hedge</b>\n" + "\n".join(hedge_lines) if hedge_lines else ""
+
+    # 일별 PnL 히스토리
+    try:
+        from telegram_engine import _load_daily_pnl
+        daily_hist = _load_daily_pnl(5)
+        hist_lines = []
+        for dstr, dpnl, dwin, dtotal in daily_hist:
+            bar = "▓" if dpnl >= 0 else "░"
+            hist_lines.append(f"{dstr[5:]} {bar} ${dpnl:+.1f} ({dwin}/{dtotal})")
+        hist_str = "\n".join(hist_lines) if hist_lines else "—"
+    except Exception:
+        hist_str = "—"
+
+    # 슬롯
     _slot_mr_l = int(s.get("slot_mr_long", 0) or 0)
     _slot_mr_s = int(s.get("slot_mr_short", 0) or 0)
-    _slot_total = int(s.get("slot_total", 0) or 0)
-    _pending_cnt = int(s.get("pending_limits_count", 0) or 0)
-    _slot_line = f"🎰 슬롯: MR L{_slot_mr_l}/S{_slot_mr_s} | 전체 {_slot_total}/10"
-    _pending_line = f"  ⏳ Pending: {_pending_cnt}" if _pending_cnt > 0 else ""
 
     msg = (
-        f"<b>Trinity V10.24</b>  {freshness}\n"
-        f"────────────────\n"
-        f"⚡ {ks}\n"
-        f"🌡️ 레짐: <b>{regime_ui}</b>\n"
-        f"{crash_tag}"
-        f"💰 <b>${total_bal:,.2f}</b>  📊 일 {daily_roi:+.2f}% | 총 {total_roi:+.2f}%\n"
-        f"📊 마진: L {_long_margin:.0f}% | S {_short_margin:.0f}%\n"
-        f"{_slot_line}{_pending_line}\n"
-        f"────────────────\n"
-        f"📈 <b>Long</b> {long_status} ({core_long})\n"
-        f"{long_text}\n\n"
-        f"📉 <b>Short</b> {short_status} ({core_short})\n"
+        f"<b>Trinity v10.27e</b> {freshness}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>${total_bal:,.2f}</b>  {daily_icon} {daily_roi:+.2f}%\n"
+        f"📊 MR {ks}  L{_long_margin:.0f}%│S{_short_margin:.0f}%\n"
+        f"🎰 L{_slot_mr_l}│S{_slot_mr_s}  총{total_roi:+.1f}%\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📈 <b>Long</b> ({len(long_lines)})\n"
+        f"{long_text}\n"
+        f"📉 <b>Short</b> ({len(short_lines)})\n"
         f"{short_text}"
         f"{hedge_text}\n"
-        f"{('  '+hedge_status+chr(10)) if hedge_status else ''}"
-        f"{recovered_tag}"
-        f"────────────────\n"
-        f"🔁=MR  🛡️=헷지  🩹=보험  ♻️=복구  ✂️=Trail\n"
-        f"/status /perf /regime /slots /unlock /closeall"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"<pre>{hist_str}</pre>\n"
+        f"/status /perf /slots /unlock /closeall"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -208,70 +237,74 @@ async def perf_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     trades_path = os.path.join(log_dir, "log_trades.csv")
 
     stats = {
-        "total":0,"win":0,"pnl":0.0,
-        "t1":{"w":0,"t":0,"pnl":0},"t2":{"w":0,"t":0,"pnl":0},
-        "t3":{"w":0,"t":0,"pnl":0},"t4":{"w":0,"t":0,"pnl":0},
-        "t5":{"w":0,"t":0,"pnl":0},
-        "hedge":{"w":0,"t":0,"pnl":0},"ins":{"w":0,"t":0,"pnl":0},
-        "core":{"w":0,"t":0,"pnl":0},
+        "total": 0, "win": 0, "pnl": 0.0,
+        "t1": {"w": 0, "t": 0, "pnl": 0}, "t2": {"w": 0, "t": 0, "pnl": 0},
+        "t3": {"w": 0, "t": 0, "pnl": 0}, "t4": {"w": 0, "t": 0, "pnl": 0},
     }
 
     if os.path.exists(trades_path):
         try:
             with open(trades_path, newline="", encoding="utf-8") as fh:
                 for row in csv.DictReader(fh):
-                    if not row.get("time","").startswith(today):
+                    if not row.get("time", "").startswith(today):
                         continue
                     try:
-                        pnl  = float(row.get("pnl_usdt",0) or 0)
-                        tier = max(1, min(5, int(row.get("dca_level",1) or 1)))
-                        role = row.get("role","CORE_MR") or "CORE_MR"
+                        pnl = float(row.get("pnl_usdt", 0) or 0)
+                        tier = max(1, min(4, int(row.get("dca_level", 1) or 1)))
                     except (ValueError, TypeError):
                         continue
-                    stats["total"]+=1; stats["pnl"]+=pnl
-                    w = pnl>0
-                    if w: stats["win"]+=1
-                    tk=f"t{tier}"
+                    stats["total"] += 1
+                    stats["pnl"] += pnl
+                    w = pnl > 0
+                    if w:
+                        stats["win"] += 1
+                    tk = f"t{tier}"
                     if tk in stats:
-                        stats[tk]["t"]+=1; stats[tk]["pnl"]+=pnl
-                        if w: stats[tk]["w"]+=1
-                    if role=="CORE_HEDGE":
-                        stats["hedge"]["t"]+=1; stats["hedge"]["pnl"]+=pnl
-                        if w: stats["hedge"]["w"]+=1
-                    elif role=="INSURANCE_SH":
-                        stats["ins"]["t"]+=1; stats["ins"]["pnl"]+=pnl
-                        if w: stats["ins"]["w"]+=1
-                    else:
-                        stats["core"]["t"]+=1; stats["core"]["pnl"]+=pnl
-                        if w: stats["core"]["w"]+=1
+                        stats[tk]["t"] += 1
+                        stats[tk]["pnl"] += pnl
+                        if w:
+                            stats[tk]["w"] += 1
         except Exception:
             pass
 
     def _wr(d):
-        return f"{d['w']}/{d['t']}({d['w']/d['t']*100:.0f}%)" if d['t'] else "—"
-    def _pnl(d):
-        return f" ${d['pnl']:+.1f}" if d['t'] else ""
+        return f"{d['w']}/{d['t']}" if d['t'] else "—"
 
-    total_wr = f"{stats['win']}/{stats['total']}({stats['win']/stats['total']*100:.0f}%)" \
-               if stats['total'] else "N/A"
-    pnl_icon = "🟢" if stats["pnl"]>=0 else "🔴"
+    def _pnl(d):
+        return f"${d['pnl']:+.1f}" if d['t'] else ""
+
+    total_wr = f"{stats['win']}/{stats['total']}" if stats['total'] else "—"
+    pnl_icon = "🟢" if stats["pnl"] >= 0 else "🔴"
+
+    # 일별 히스토리
+    try:
+        from telegram_engine import _load_daily_pnl
+        daily_hist = _load_daily_pnl(7)
+        hist_lines = []
+        cumulative = 0.0
+        for dstr, dpnl, dwin, dtotal in daily_hist:
+            cumulative += dpnl
+            bar = "▓" if dpnl >= 0 else "░"
+            hist_lines.append(f"{dstr[5:]} {bar} ${dpnl:+.1f} ({dwin}/{dtotal})")
+        hist_str = "\n".join(hist_lines) if hist_lines else "—"
+        cum_icon = "🟢" if cumulative >= 0 else "🔴"
+        cum_line = f"\n{cum_icon} 7일합계 <b>${cumulative:+.2f}</b>"
+    except Exception:
+        hist_str = "—"
+        cum_line = ""
 
     msg = (
-        f"<b>📊 금일 성과</b>\n"
-        f"────────────────\n"
-        f"거래: {stats['total']}건  승률: {total_wr}\n"
-        f"{pnl_icon} PnL: <b>${stats['pnl']:+.2f}</b>\n"
-        f"────────────────\n"
-        f"<b>티어별</b>\n"
-        f"  T1: {_wr(stats['t1'])}{_pnl(stats['t1'])}\n"
-        f"  T2: {_wr(stats['t2'])}{_pnl(stats['t2'])}\n"
-        f"  T3: {_wr(stats['t3'])}{_pnl(stats['t3'])}\n"
-        f"  T4: {_wr(stats['t4'])}{_pnl(stats['t4'])}\n"
-        f"  T5: {_wr(stats['t5'])}{_pnl(stats['t5'])}\n"
-        f"<b>역할별</b>\n"
-        f"  🔁 CORE: {_wr(stats['core'])}{_pnl(stats['core'])}\n"
-        f"  🛡️ 헷지: {_wr(stats['hedge'])}{_pnl(stats['hedge'])}\n"
-        f"  🩹 보험: {_wr(stats['ins'])}{_pnl(stats['ins'])}\n"
+        f"📊 <b>금일 성과</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{pnl_icon} <b>${stats['pnl']:+.2f}</b>  {total_wr}\n"
+        f"T1 {_wr(stats['t1'])} {_pnl(stats['t1'])}  "
+        f"T2 {_wr(stats['t2'])} {_pnl(stats['t2'])}\n"
+        f"T3 {_wr(stats['t3'])} {_pnl(stats['t3'])}  "
+        f"T4 {_wr(stats['t4'])} {_pnl(stats['t4'])}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📅 <b>일별 PnL</b>\n"
+        f"<pre>{hist_str}</pre>"
+        f"{cum_line}"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -463,7 +496,7 @@ async def control_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 def main():
-    print("📢 Trinity V10.24 관제 봇 가동")
+    print("📢 Trinity V10.27e 관제 봇 가동")
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -475,7 +508,6 @@ def main():
     )
     app.add_handler(CommandHandler("status",   status_command))
     app.add_handler(CommandHandler("perf",     perf_command))
-    app.add_handler(CommandHandler("regime",   regime_command))
     app.add_handler(CommandHandler("log",      log_command))
     app.add_handler(CommandHandler("unlock",   unlock_command))
     app.add_handler(CommandHandler("slots",    slots_command))
