@@ -22,6 +22,7 @@ from v9.config import (
     DCA_MIN_CORR,
     DD_SHUTDOWN_THRESHOLD,
     HEDGE_OPEN_CORR_MIN,
+    OPEN_CORR_MIN,
     KILLSWITCH_BLOCK_ALL_MR,
     KILLSWITCH_BLOCK_NEW_MR,
     KILLSWITCH_FREEZE_ALL_MR,
@@ -191,7 +192,12 @@ def evaluate_intent(
             return _reject(RejectCode.REJECT_COOLDOWN, f"cooldown until {cd_until:.0f}")
 
         corr     = (snapshot.correlations or {}).get(sym, 1.0)
-        min_corr = HEDGE_OPEN_CORR_MIN if itype == IntentType.OPEN else DCA_MIN_CORR
+        # ★ V10.27d: OPEN은 OPEN_CORR_MIN(0.50), HEDGE만 0.6, DCA는 DCA_MIN_CORR
+        if itype == IntentType.OPEN:
+            _is_hedge_open = meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH")
+            min_corr = HEDGE_OPEN_CORR_MIN if _is_hedge_open else OPEN_CORR_MIN
+        else:
+            min_corr = DCA_MIN_CORR
         if corr < min_corr:
             return _reject(RejectCode.REJECT_CORR_LOW, f"corr={corr:.3f}<{min_corr}")
 
