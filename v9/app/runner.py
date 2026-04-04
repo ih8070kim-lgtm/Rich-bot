@@ -696,14 +696,15 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 continue
 
             # TP1 target 계산
-            # ★ V10.27: 고정값 TP1 (ATR 스케일링 제거)
+            # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
             from v9.config import TP1_FIXED
-            _worst = 0.0  # ★ V10.27 FIX: T1~T3에서도 로그용 초기화
-            if dca_level <= 3:
+            _worst = 0.0
+            if dca_level <= 2:
                 tp1_base = TP1_FIXED.get(dca_level, 2.0)
             else:
                 _worst = float(p.get("worst_roi", 0.0) or 0.0)
-                tp1_base = max(_worst + 2.0, TP1_FIXED.get(4, 0.8))
+                _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
+                tp1_base = max(_worst + 2.0, _floor)
             tp1_thresh = tp1_base * _skew["skew_mult"]
 
             # ROI → price 변환

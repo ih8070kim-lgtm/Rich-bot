@@ -480,7 +480,7 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # ═════════════════════════════════════════════════════════════════
 # DCA ROI 트리거 (avg_ep 기준 실시간 ROI)
 # T2: -3.5% / T3: -5.0% / T4: -5.5%
-DCA_ROI_TRIGGERS = {2: -5.0, 3: -6.5, 4: -8.0}  # ★ V10.26: 얕은 DCA (기존 -8.25 → SL까지 여유 확보)
+DCA_ROI_TRIGGERS = {2: -3.0, 3: -5.0, 4: -7.0}  # ★ V10.27b: 좁은 DCA (빠른 평단 압축)
 
 REGIME_HARD_SL       = {"BAD": -5.0, "LOW": -6.5, "NORMAL": -8.0, "HIGH": -10.0}
 _REGIME_WIDTH = {"HIGH": 4, "NORMAL": 3, "LOW": 2, "BAD": 1}
@@ -1816,14 +1816,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
-        # ★ V10.27: 고정값 TP1 threshold
+        # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
         from v9.config import TP1_FIXED
-        if dca_level <= 3:
+        if dca_level <= 2:
             tp1_base = TP1_FIXED.get(dca_level, 2.0)
         else:
-            # T4: worst_roi 반등 (유일한 동적 로직)
+            # T3/T4: worst_roi + 2.0 반등, tier별 floor
             _worst = float(p.get("worst_roi", 0.0) or 0.0)
-            tp1_base = max(_worst + 2.0, TP1_FIXED.get(4, 0.8))
+            _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
+            tp1_base = max(_worst + 2.0, _floor)
 
         tp1_thresh = tp1_base * _skew["skew_mult"]
 
@@ -2170,15 +2171,18 @@ def plan_force_close(
 
         else:
             # ── HARD_SL (CORE 포지션 전용) ────────────────────────
-            # ★ V10.27: tier별 고정값 (ATR 스케일링/MR 압력 제거)
+            # ★ V10.27c: DCA 트리거 -1% 뒤 SL / T4는 체결가 -2%
             _dca_lv_sl = int(p.get("dca_level", 1) or 1)
 
             from v9.config import HARD_SL_BY_TIER
-            _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -7.0)
+            _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
 
-            _entry_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
-            _sl_ep = float(p.get(_entry_keys.get(_dca_lv_sl, ""), 0.0) or 0.0)
-            if _sl_ep <= 0:
+            # T1~T3: 평균 EP 기준 / T4: T4 체결가 기준
+            if _dca_lv_sl >= 4:
+                _sl_ep = float(p.get("t4_entry_price", 0.0) or 0.0)
+                if _sl_ep <= 0:
+                    _sl_ep = float(p.get("ep", 0.0) or 0.0)
+            else:
                 _sl_ep = float(p.get("ep", 0.0) or 0.0)
 
             if _sl_ep > 0:
