@@ -150,6 +150,7 @@ def plan_hedge_core_entry(
     """스큐 기반 CORE_HEDGE 진입.
     Returns: intents 리스트 + asym_syms 업데이트
     """
+    global _skew_stage2_enter_ts
     intents: List[Intent] = []
 
     if skew < skew_thresh:
@@ -287,6 +288,10 @@ def plan_hedge_core_entry(
         print(f"[HEDGE_CORE] {src_sym} {hedge_side} src_roi={src_roi:.1f}% "
               f"src_dca=T{src_dca} skew={skew*100:.0f}% ${notional:.0f} "
               f"stressed={'Y' if heavy_stressed else 'N'}")
+
+    # ★ V10.27d: 헷지 진입 성공 시 stage2 타이머 리셋 (pair_cut 중복 방지)
+    if intents:
+        _skew_stage2_enter_ts = 0.0
 
     return intents
 

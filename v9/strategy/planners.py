@@ -997,12 +997,12 @@ def plan_dca(
             if _dca_side == "sell" and _dca_longs == 0 and _dca_shorts >= 3:
                 continue
 
-        # ★ V10.26 Rule B: 스큐 비례 light side DCA 단계적 제한
+        # ★ V10.27d Rule B: 스큐 비례 heavy side DCA 단계적 제한
         if _dca_skew >= 0.10 and _dca_heavy_side:
-            if _dca_side != _dca_heavy_side and p.get("role", "") not in _HEDGE_ROLES_SLOT:
+            if _dca_side == _dca_heavy_side and p.get("role", "") not in _HEDGE_ROLES_SLOT:
                 _cur_dca_lv = int(p.get("dca_level", 1) or 1)
                 if _dca_skew >= 0.20:
-                    continue  # 20%+ → light DCA 완전 차단
+                    continue  # 20%+ → heavy DCA 완전 차단
                 elif _dca_skew >= SKEW_STAGE2_TRIGGER:
                     if _cur_dca_lv >= 2:  # 15%+ → T2 상한
                         continue
@@ -1908,7 +1908,6 @@ def plan_pair_cut(
       - light side에 ROI > 0 포지션 존재
       - 순 P&L > heavy 단독 HARD_SL 손실 (안전장치)
     """
-    global _pair_cut_cooldown_ts
     global _pair_cut_cooldown_ts
     intents: List[Intent] = []
     now = time.time()
