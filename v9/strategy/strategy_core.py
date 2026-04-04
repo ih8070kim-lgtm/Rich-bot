@@ -236,6 +236,34 @@ def apply_order_results(
                     clear_position(st, sym, pos_side)
                     _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
                     continue
+                # ★ V10.27c: DCA Trim — tier 복귀 + DCA 재활용
+                if meta.get("is_trim"):
+                    _target_tier = meta.get("target_tier", max(1, int(p.get("dca_level", 2)) - 1))
+                    _old_tier = int(p.get("dca_level", 1))
+                    p["dca_level"] = _target_tier
+                    p["worst_roi"] = 0.0
+                    p["max_roi_seen"] = 0.0
+                    p["pending_dca"] = None
+                    # DCA targets 재생성
+                    try:
+                        from v9.strategy.planners import _build_dca_targets
+                        from v9.config import DCA_WEIGHTS, GRID_DIVISOR, LEVERAGE as _TRIM_LEV
+                        _trim_ep = float(p.get("ep", 0) or 0)
+                        _trim_amt = float(p.get("amt", 0) or 0)
+                        _cum_w = sum(DCA_WEIGHTS[:_target_tier])
+                        _total_w = sum(DCA_WEIGHTS)
+                        _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
+                        p["dca_targets"] = [
+                            t for t in _build_dca_targets(_trim_ep, pos_side, _grid_est, p.get("locked_regime", "LOW"))
+                            if t.get("tier", 0) > _target_tier
+                        ]
+                    except Exception as _te:
+                        p["dca_targets"] = []
+                        print(f"[DCA_TRIM] {sym} dca_targets 재생성 실패: {_te}")
+                    print(f"[DCA_TRIM] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
+                          f"sold={filled:.1f} remain={p['amt']:.1f} ep={p.get('ep',0):.4f}")
+                    _log_pos(result.trace_id, sym, p, snapshot)
+                    continue
                 if meta.get("is_tp2"):
                     p["tp2_done"] = True
                     _log_pos(result.trace_id, sym, p, snapshot)

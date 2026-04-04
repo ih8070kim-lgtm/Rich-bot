@@ -1266,6 +1266,39 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         tp1_thresh = tp1_base * _skew["skew_mult"]
 
+        # ★ V10.27c: DCA Trim — DCA 체결가 기준 +2% → 매도, tier-1 복귀
+        _DCA_TRIM_ROI = 2.0
+        if (dca_level >= 2
+                and not _skew["blocked"]
+                and not _skew["full_close"]):
+            _trim_ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
+            _trim_ep = float(p.get(_trim_ep_keys.get(dca_level, ""), 0.0) or 0.0)
+            if _trim_ep > 0:
+                _trim_roi = calc_roi_pct(_trim_ep, curr_p, p.get("side", ""), LEVERAGE)
+                if _trim_roi >= _DCA_TRIM_ROI and roi_gross < tp1_thresh:
+                    _cum_w = sum(DCA_WEIGHTS[:dca_level])
+                    _tier_w = DCA_WEIGHTS[dca_level - 1]
+                    total_qty = float(p.get("amt", 0.0))
+                    trim_qty = total_qty * (_tier_w / _cum_w)
+                    _sym_min_qty = {
+                        "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
+                        "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
+                    }.get(symbol, 1.0)
+                    if trim_qty >= _sym_min_qty:
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.TP1,
+                            symbol=symbol,
+                            side="sell" if is_long else "buy",
+                            qty=trim_qty,
+                            price=curr_p,
+                            reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
+                            metadata={"roi_gross": roi_gross, "is_trim": True,
+                                      "target_tier": dca_level - 1,
+                                      "skew": _skew["skew"]},
+                        ))
+                        continue
+
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
             if _skew["full_close"]:
