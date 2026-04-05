@@ -1310,6 +1310,88 @@ def plan_dca(
                 print(f"[ML_LOG] DCA 피처 기록 오류(무시): {_ml_e}")
             break
 
+    # ═════════════════════════════════════════════════════════════
+    # ★ V10.27f: URGENCY_DCA — light side 불타기 (ROI 높은 순, 2슬롯 한정)
+    # urgency >= 15 → T2까지 / urgency >= 20 → T3까지
+    # 기존 DCA ROI 트리거 무관, urgency 자체가 트리거
+    # ═════════════════════════════════════════════════════════════
+    _URG_DCA_MED = 15
+    _URG_DCA_HIGH = 20
+    _URG_DCA_MAX_SLOTS = 2
+
+    if _urg_dca["urgency"] >= _URG_DCA_MED and _dca_heavy_side:
+        _urg_light_side = _urg_dca["light_side"]
+        _urg_max_tier = 3 if _urg_dca["urgency"] >= _URG_DCA_HIGH else 2
+        _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
+
+        # light side 후보: ROI 높은 순 정렬
+        _urg_candidates = []
+        _urg_prices = snapshot.all_prices or {}
+        for _us, _up in _pos_items(st):
+            if _up.get("side", "") != _urg_light_side:
+                continue
+            if _up.get("role", "") in _HEDGE_ROLES_SLOT:
+                continue
+            if _us in _urg_dca_syms:
+                continue  # 이미 정상 DCA intent 생성됨
+            _u_dca_lv = int(_up.get("dca_level", 1) or 1)
+            if _u_dca_lv >= _urg_max_tier:
+                continue
+            if _up.get("max_dca_reached"):
+                continue
+            # 쿨다운 체크
+            _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
+            _u_next_tier = _u_dca_lv + 1
+            _u_cd = DCA_COOLDOWN_BY_TIER.get(_u_next_tier, DCA_COOLDOWN_SEC)
+            _u_cd = int(_u_cd * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
+            if time.time() - _u_last_dca < _u_cd:
+                continue
+            _u_cp = float(_urg_prices.get(_us, 0))
+            _u_ep = float(_up.get("ep", 0))
+            if _u_cp <= 0 or _u_ep <= 0:
+                continue
+            _u_roi = calc_roi_pct(_u_ep, _u_cp, _urg_light_side, LEVERAGE)
+            _urg_candidates.append((_us, _up, _u_cp, _u_roi, _u_dca_lv))
+
+        # ROI 높은 순 정렬 → 상위 2개
+        _urg_candidates.sort(key=lambda x: -x[3])
+        _urg_filled = 0
+
+        for _us, _up, _u_cp, _u_roi, _u_dca_lv in _urg_candidates:
+            if _urg_filled >= _URG_DCA_MAX_SLOTS:
+                break
+            _u_next_tier = _u_dca_lv + 1
+            # 사이징: 기존 DCA weight 기반
+            _u_ep = float(_up.get("ep", 0))
+            _u_amt = float(_up.get("amt", 0))
+            _u_notional = _u_ep * _u_amt
+            _u_cum_w = sum(DCA_WEIGHTS[:_u_dca_lv])
+            _u_total_w = sum(DCA_WEIGHTS)
+            _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
+            _u_tier_w = DCA_WEIGHTS[_u_next_tier - 1] if _u_next_tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
+            _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
+            if _u_qty <= 0:
+                continue
+
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.DCA,
+                symbol=_us,
+                side=_urg_light_side,
+                qty=_u_qty,
+                price=_u_cp,
+                reason=f"URGENCY_DCA(urg={_urg_dca['urgency']:.0f},roi={_u_roi:+.1f}%)_T{_u_next_tier}",
+                metadata={
+                    "tier": _u_next_tier,
+                    "roi_now": _u_roi,
+                    "_expected_role": _up.get("role", ""),
+                    "locked_regime": _up.get("locked_regime", "LOW"),
+                },
+            ))
+            _urg_filled += 1
+            print(f"[URGENCY_DCA] {_us} {_urg_light_side} T{_u_dca_lv}→T{_u_next_tier} "
+                  f"roi={_u_roi:+.1f}% urg={_urg_dca['urgency']:.0f}")
+
     return intents
 
 
@@ -1371,7 +1453,10 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         # ★ V10.27: Skew — full_close/blocked 판단
         _skew = _skew_tp_adjustment(p.get("side", ""), st, snapshot)
-        if _skew["blocked"]:
+        _is_blocked = _skew["blocked"]
+
+        # blocked + T1 → trim 불가 + TP1 불가 → 스킵
+        if _is_blocked and dca_level < 2:
             continue
 
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
@@ -1395,35 +1480,51 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         else:
             tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
 
-        # ★ V10.27c: DCA Trim — DCA 체결가 기준 +2% → 매도, tier-1 복귀
+        # ★ V10.27f: DCA Trim — blocked 시에도 trim-sized 스큐 시뮬로 허용 판단
         _DCA_TRIM_ROI = 2.0
-        if (dca_level >= 2
-                and not _skew["blocked"]
-                and not _skew["full_close"]):
+        if (dca_level >= 2 and not _skew["full_close"]):
             _trim_ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
             _trim_ep = float(p.get(_trim_ep_keys.get(dca_level, ""), 0.0) or 0.0)
             if _trim_ep > 0:
                 _trim_roi = calc_roi_pct(_trim_ep, curr_p, p.get("side", ""), LEVERAGE)
-                if _trim_roi >= _DCA_TRIM_ROI and roi_gross < tp1_thresh:
+                if _trim_roi >= _DCA_TRIM_ROI and (_is_blocked or roi_gross < tp1_thresh):
                     _cum_w = sum(DCA_WEIGHTS[:dca_level])
                     _tier_w = DCA_WEIGHTS[dca_level - 1]
                     total_qty = float(p.get("amt", 0.0))
                     trim_qty = total_qty * (_tier_w / _cum_w)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
-                        intents.append(Intent(
-                            trace_id=_tid(),
-                            intent_type=IntentType.TP1,
-                            symbol=symbol,
-                            side="sell" if is_long else "buy",
-                            qty=trim_qty,
-                            price=curr_p,
-                            reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
-                            metadata={"roi_gross": roi_gross, "is_trim": True,
-                                      "target_tier": dca_level - 1,
-                                      "skew": _skew["skew"]},
-                        ))
-                        continue
+                        # ★ blocked 상태면 trim 후 스큐 시뮬
+                        _trim_ok = True
+                        if _is_blocked:
+                            _trim_margin_delta = (trim_qty * curr_p) / LEVERAGE
+                            _tc = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                            if _tc > 0:
+                                _, _tl, _ts = calc_skew(st, _tc)
+                                if p.get("side") == "buy":
+                                    _post_skew = abs((_tl - _trim_margin_delta / _tc) - _ts)
+                                else:
+                                    _post_skew = abs(_tl - (_ts - _trim_margin_delta / _tc))
+                                if _post_skew >= _skew["skew"] * 1.1:
+                                    _trim_ok = False  # trim이 스큐를 악화시킴
+                        if _trim_ok:
+                            intents.append(Intent(
+                                trace_id=_tid(),
+                                intent_type=IntentType.TP1,
+                                symbol=symbol,
+                                side="sell" if is_long else "buy",
+                                qty=trim_qty,
+                                price=curr_p,
+                                reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
+                                metadata={"roi_gross": roi_gross, "is_trim": True,
+                                          "target_tier": dca_level - 1,
+                                          "skew": _skew["skew"]},
+                            ))
+                            continue
+
+        # ★ blocked → 정규 TP1 차단 (trim만 허용)
+        if _is_blocked:
+            continue
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
