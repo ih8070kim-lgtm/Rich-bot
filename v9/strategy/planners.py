@@ -243,6 +243,7 @@ from v9.config import (
     LONG_ONLY_SYMBOLS, SHORT_ONLY_SYMBOLS,
     OPEN_CORR_MIN,
     SKEW_STAGE2_TRIGGER,
+    SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1326,10 +1327,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                     _tier_w = DCA_WEIGHTS[dca_level - 1]
                     total_qty = float(p.get("amt", 0.0))
                     trim_qty = total_qty * (_tier_w / _cum_w)
-                    _sym_min_qty = {
-                        "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
-                        "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
-                    }.get(symbol, 1.0)
+                    _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
                         intents.append(Intent(
                             trace_id=_tid(),
@@ -1351,10 +1349,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 close_qty = total_qty
             else:
                 close_qty = total_qty * TP1_PARTIAL_RATIO
-            _sym_min_qty = {
-                "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
-                "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
-            }.get(symbol, 1.0)
+            _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
             if close_qty < _sym_min_qty:
                 close_qty = total_qty
             # ★ V10.27e: 잔량 < min_qty → 전량 (RESIDUAL 무한루프 방지)

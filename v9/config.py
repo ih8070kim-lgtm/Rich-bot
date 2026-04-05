@@ -4,7 +4,7 @@ V9 Trinity Config  (v10.27 — 2026-04-03 수익률 개선 패치)
 v10.26 → v10.27 변경:
   TP1_FIXED             고정값 {1:2.0, 2:1.5, 3:1.2, 4:0.8} (worst_roi/ATR 스케일링 제거)
   DCA_WEIGHTS           [15,20,30,35] → [20,25,30,25] (T1↑ T4↓)
-  HARD_SL_BY_TIER       {1:-7, 2:-7, 3:-4, 4:-3} (T3/T4 타이트)
+  HARD_SL_BY_TIER       {1:-4, 2:-6, 3:-8, 4:-2} (T4 체결가 기준 빠른 SL)
   TRAIL_GAP             0.3 → 0.5
   INSURANCE_SH          BTC 급변 직접 감지 기반 재설계
   _skew_tp_adjustment   heavy floor 0.5 + light 무한블록 + 매도후 스큐 시뮬
@@ -119,6 +119,13 @@ TP1_PARTIAL_RATIO  = 0.40
 TP2_PCT            = 4.0
 TP2_PARTIAL_RATIO  = 0.30
 TRAILING_TIMEOUT_MIN = 45
+
+# ★ V10.27e: 심볼별 최소 주문 수량 (하드코딩 통합)
+SYM_MIN_QTY = {
+    "ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
+    "BTC/USDT": 0.001, "AVAX/USDT": 0.1,
+}
+SYM_MIN_QTY_DEFAULT = 1.0
 
 # ═══════════════════════════════════════════════════════════════════
 # OPEN / CORR

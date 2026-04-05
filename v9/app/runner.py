@@ -17,6 +17,7 @@ from v9.config import (
     ACTIVATION_THRESHOLD, HEARTBEAT_FILE,
     DD_SHUTDOWN_THRESHOLD, DD_SHUTDOWN_HOURS,
     LEVERAGE,
+    SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
 )
 from v9.types import MarketSnapshot, IntentType
 from v9.datafeed.market_snapshot import fetch_market_snapshot
@@ -723,8 +724,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             # 수량 계산
             total_qty = float(p.get("amt", 0) or 0)
             close_qty = total_qty if _skew.get("full_close") else total_qty * TP1_PARTIAL_RATIO
-            _min_qty = {"ETH/USDT": 0.001, "BNB/USDT": 0.01, "SOL/USDT": 0.1,
-                        "BTC/USDT": 0.001, "AVAX/USDT": 0.1}.get(sym, 1.0)
+            _min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
             if close_qty < _min_qty:
                 close_qty = total_qty
             # ★ V10.27e: 잔량이 min_qty 미만이면 전량 청산 (RESIDUAL 0.1 무한루프 방지)

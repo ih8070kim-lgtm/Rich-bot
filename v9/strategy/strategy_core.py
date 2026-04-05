@@ -244,6 +244,14 @@ def apply_order_results(
                     p["worst_roi"] = 0.0
                     p["max_roi_seen"] = 0.0
                     p["pending_dca"] = None
+                    p["step"] = 0           # ★ V10.27e: trail 상태 리셋
+                    p["tp1_done"] = False    # ★ V10.27e: TP1 재진입 허용
+                    p["trailing_on_time"] = None  # ★ V10.27e: stale 타임아웃 방지
+                    # ★ V10.27e: trim된 tier들의 entry_price 클리어 (연속 trim 오판 방지)
+                    _ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
+                    for _t in range(_target_tier + 1, _old_tier + 1):
+                        if _t in _ep_keys:
+                            p[_ep_keys[_t]] = 0.0
                     # DCA targets 재생성
                     try:
                         from v9.strategy.planners import _build_dca_targets
