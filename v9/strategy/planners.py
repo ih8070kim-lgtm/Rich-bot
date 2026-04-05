@@ -1180,6 +1180,11 @@ def plan_dca(
         for target in dca_targets:
             tier_now = target.get("tier", 2)
 
+            # ★ V10.28b FIX: 순차 DCA만 허용 — 반드시 다음 tier만 (T1→T2→T3→T4)
+            _curr_dca_level = int(p.get("dca_level", 1) or 1)
+            if tier_now != _curr_dca_level + 1:
+                continue
+
             # ★ V10.28b: 이전 tier entry 기준 ROI로 트리거
             if DCA_ENTRY_BASED:
                 _prev_tier_ep_map = {
@@ -1188,9 +1193,10 @@ def plan_dca(
                     4: float(p.get("t3_entry_price", 0) or 0),
                 }
                 _prev_ep = _prev_tier_ep_map.get(tier_now, 0)
+                # ★ V10.28b FIX: 이전 tier entry 없으면 스킵 (blended EP fallback 제거)
                 if _prev_ep <= 0:
-                    _prev_ep = _ref_ep  # fallback to blended EP
-                _entry_roi = calc_roi_pct(_prev_ep, curr_p, p.get("side", ""), LEVERAGE) if _prev_ep > 0 else 0
+                    continue
+                _entry_roi = calc_roi_pct(_prev_ep, curr_p, p.get("side", ""), LEVERAGE)
                 is_hit = _entry_roi <= DCA_ENTRY_ROI
             else:
                 roi_trig = DCA_ROI_TRIGGERS.get(tier_now, -8.0)
@@ -1208,11 +1214,6 @@ def plan_dca(
                 _orig_cd = tier_cooldown
                 tier_cooldown = int(tier_cooldown * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
                 _dca_accel = True
-
-            # ★ v10.11b: 이미 완료된 tier 스킵 (JSON 잔여 타겟 방어)
-            _curr_dca_level = int(p.get("dca_level", 1) or 1)
-            if tier_now <= _curr_dca_level:
-                continue
 
             # ★ v10.13: DCA 조건 도달 — 차단 여부 확인 → 보험 시그널
             _block = None
@@ -1441,7 +1442,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         if p.get("tp1_limit_oid"):
             continue
         # ★ V10.28b: trim 선주문 대기 중 + DCA T2+ → plan_tp1 스킵 (trim이 exit 담당)
-        if p.get("trim_preorders") and int(p.get("dca_level", 1) or 1) >= 2:
+        # trim_to_place도 체크 (DCA 직후 같은 틱)
+        if (p.get("trim_preorders") or p.get("trim_to_place")) and int(p.get("dca_level", 1) or 1) >= 2:
             continue
         _sym_st_tp1 = st.get(symbol, {})
         if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():

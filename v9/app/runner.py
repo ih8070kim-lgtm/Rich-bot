@@ -112,27 +112,13 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
                 old_ep = book_ep
                 if qty_diff:
                     book_p['amt'] = ex_qty
-                    # ★ v10.12: qty 증가 시 dca_level 역추정
+                    # ★ V10.28b FIX: qty 증가 시 dca_level 역추정 제거
+                    # 이유: notional 기반 추정이 balance 변동에 취약 → T2를 T4로 오추정
+                    # DCA 체결은 _manage_pending_limits → _apply_pending_fill에서 정확하게 처리됨
+                    # 역추정은 RECOVERED 포지션(고아 복구)에서만 사용
                     if ex_qty > book_qty * 1.05:
-                        from v9.config import DCA_WEIGHTS as _DW, LEVERAGE as _LV, GRID_DIVISOR as _TS
-                        _cur_dca = int(book_p.get('dca_level', 1) or 1)
-                        _bal_est = float(getattr(snapshot, 'real_balance_usdt', 4000) or 4000) if snapshot is not None else 4000
-                        _grid_est = (_bal_est / _TS) * _LV
-                        _tw = sum(_DW)
-                        _notional = ex_qty * (ex_ep if ex_ep > 0 else old_ep)
-                        _cum = 0; _est_dca = 1
-                        for _wi in range(len(_DW)):
-                            _cum += _DW[_wi] / _tw
-                            if _notional <= _grid_est * _cum * 1.15:
-                                _est_dca = _wi + 1; break
-                            _est_dca = _wi + 1
-                        _est_dca = min(_est_dca, 5)
-                        if _est_dca > _cur_dca:
-                            print(f"[SYNC] ★ {sym} {side} dca_level 역추정: "
-                                  f"{_cur_dca}→{_est_dca} (notional=${_notional:.0f} grid=${_grid_est:.0f})")
-                            book_p['dca_level'] = _est_dca
-                            if _est_dca >= 5:
-                                book_p['max_dca_reached'] = True
+                        print(f"[SYNC] {sym} {side} qty 증가 감지 "
+                              f"({book_qty:.1f}→{ex_qty:.1f}) — dca_level 유지 T{int(book_p.get('dca_level', 1))}")
                 if ep_diff and ex_ep > 0:
                     book_p['ep'] = ex_ep
                 _what = []
@@ -693,8 +679,9 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
                 continue
             # ★ V10.28b FIX: trim 선주문 활성 + DCA T2+ → TP1 선주문 스킵 (trim이 exit 담당)
+            # trim_to_place도 체크: 같은 틱에서 _place_trim_preorders보다 먼저 실행되므로
             _dca_lv = int(p.get("dca_level", 1) or 1)
-            if p.get("trim_preorders") and _dca_lv >= 2:
+            if _dca_lv >= 2 and (p.get("trim_preorders") or p.get("trim_to_place")):
                 if p.get("tp1_preorder_id"):
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue
