@@ -2093,3 +2093,23 @@ def generate_all_intents(
             _i.metadata = {}
         _i.metadata["snap_ts"] = _snap_ts
     return intents
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.27e: 글로벌 전략 state 영속화
+# ═════════════════════════════════════════════════════════════════
+def save_strategy_state(system_state: dict):
+    """모듈 글로벌 → system_state (save_position_book 직전 호출)."""
+    system_state["_zombie_cooldown"] = _zombie_cooldown
+    system_state["_open_dir_cd"] = _open_dir_cd
+    system_state["_bad_regime_active"] = _bad_regime_active
+
+
+def restore_strategy_state(system_state: dict):
+    """system_state → 모듈 글로벌 (부팅 시 호출)."""
+    global _zombie_cooldown, _open_dir_cd, _bad_regime_active
+    _zombie_cooldown = system_state.get("_zombie_cooldown", {"buy": 0.0, "sell": 0.0})
+    _open_dir_cd = system_state.get("_open_dir_cd", {"buy": 0.0, "sell": 0.0})
+    _bad_regime_active = system_state.get("_bad_regime_active", False)
+    print(f"[RESTORE] strategy state: zombie_cd={_zombie_cooldown}, "
+          f"bad_regime={_bad_regime_active}")

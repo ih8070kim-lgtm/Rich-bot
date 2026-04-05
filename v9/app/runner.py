@@ -268,6 +268,21 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
 
 
 # ═══════════════════════════════════════════════════════════════
+# ★ V10.27e: save 래퍼 — 글로벌 state 영속화 포함
+# ═══════════════════════════════════════════════════════════════
+def _save_all(st, cooldowns, system_state):
+    """save_position_book + 글로벌 전략/헷지 state 동기화."""
+    try:
+        from v9.strategy.planners import save_strategy_state
+        from v9.engines.hedge_core import save_hedge_state
+        save_strategy_state(system_state)
+        save_hedge_state(system_state)
+    except Exception as _e:
+        print(f"[_save_all] global state save 실패(무시): {_e}")
+    save_position_book(st, cooldowns, system_state)
+
+
+# ═══════════════════════════════════════════════════════════════
 # ★ 다운타임 중 청산 감지 (v10.18)
 # 봇 재시작 시 _last_save_ts ~ 현재 사이에 청산된 포지션을 감지하고
 # 텔레그램으로 알림 발송
@@ -1273,6 +1288,12 @@ async def _main_loop(ex_init, dry_run: bool):
     # ★ v10.12: 부팅 시각 기록 (INSURANCE_SH 오발동 방지)
     system_state["_boot_ts"] = start_ts
 
+    # ★ V10.27e: 글로벌 전략/헷지 state 복원
+    from v9.strategy.planners import restore_strategy_state
+    from v9.engines.hedge_core import restore_hedge_state
+    restore_strategy_state(system_state)
+    restore_hedge_state(system_state)
+
     # ★ v10.15: minroi 상태 로드
     _minroi = load_minroi()
     _last_minroi_save_ts = start_ts
@@ -1301,7 +1322,7 @@ async def _main_loop(ex_init, dry_run: bool):
             await asyncio.sleep(0.05)  # rate limit 방지
         if _cancel_count > 0:
             print(f"[STARTUP] ★ 미체결 주문 {_cancel_count}건 취소 완료")
-            save_position_book(st, cooldowns, system_state)
+            _save_all(st, cooldowns, system_state)
         else:
             print(f"[STARTUP] 미체결 주문 없음")
     except Exception as _startup_e:
@@ -1337,7 +1358,7 @@ async def _main_loop(ex_init, dry_run: bool):
     if _startup_clear_count > 0:
         print(f"[STARTUP] ★ state 유령 {_startup_clear_count}건 클리어 "
               f"(pending_entry + tp1_preorder + pending_dca)")
-        save_position_book(st, cooldowns, system_state)
+        _save_all(st, cooldowns, system_state)
 
     # ★ v10.18: 다운타임 중 청산 감지 & 알림
     try:
@@ -1479,7 +1500,7 @@ async def _main_loop(ex_init, dry_run: bool):
                     system_state['shutdown_until'] = now + DD_SHUTDOWN_HOURS * 3600
                     system_state['shutdown_reason'] = f"DD {dd_pct*100:.2f}%"
                     print(f"[V9 Runner] DD 셧다운 발동! dd={dd_pct*100:.2f}%")
-                    save_position_book(st, cooldowns, system_state)
+                    _save_all(st, cooldowns, system_state)
 
             # ── 셧다운 만료 체크 ─────────────────────────────────
             if system_state.get('shutdown_active', False):
@@ -1487,7 +1508,7 @@ async def _main_loop(ex_init, dry_run: bool):
                     system_state['shutdown_active'] = False
                     system_state['shutdown_reason'] = ''
                     print("[V9 Runner] 셧다운 만료 → 정상 복귀")
-                    save_position_book(st, cooldowns, system_state)
+                    _save_all(st, cooldowns, system_state)
 
             # ── Kill Switch 상태 업데이트 ────────────────────────
             mr = snapshot.margin_ratio
@@ -1594,7 +1615,7 @@ async def _main_loop(ex_init, dry_run: bool):
                     _cr = await execute_intents(ex, _close_intents, dry_run=dry_run, st=st)
                     _cm = {i.trace_id: i for i in _close_intents}
                     apply_order_results(_cr, _cm, st, cooldowns, snapshot)
-                    save_position_book(st, cooldowns, system_state)
+                    _save_all(st, cooldowns, system_state)
                     print(f"[V9] 텔레그램 전체 청산: {len(_close_intents)}건 ({_close_mode})")
                     continue
 
@@ -1671,7 +1692,7 @@ async def _main_loop(ex_init, dry_run: bool):
                 )
                 _rc_map = {i.trace_id: i for i in _recovered_close_intents}
                 apply_order_results(_rc_results, _rc_map, st, cooldowns, snapshot)
-                save_position_book(st, cooldowns, system_state)
+                _save_all(st, cooldowns, system_state)
 
             # ── Intent 생성 ──────────────────────────────────────
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
@@ -1807,7 +1828,7 @@ async def _main_loop(ex_init, dry_run: bool):
                     system_state['_skew_stage2_enter_ts'] = _hc_sv._skew_stage2_enter_ts
                 except Exception:
                     pass
-                save_position_book(st, cooldowns, system_state)
+                _save_all(st, cooldowns, system_state)
                 last_save_ts = now
                 # ★ v10.17: 스큐 상태 로그 (log_skew.csv)
                 try:
@@ -1888,7 +1909,7 @@ async def _main_loop(ex_init, dry_run: bool):
             if consecutive_errors >= 3:
                 print(f"[V9 Runner] ⚠ 연속 {consecutive_errors}회 오류 → 포지션 저장 후 5분 대기")
                 try:
-                    save_position_book(st, cooldowns, system_state)
+                    _save_all(st, cooldowns, system_state)
                 except Exception as _sv_e:
                     print(f"[V9 Runner] 저장 오류(무시): {_sv_e}")
                 system_state['_consecutive_errors'] = 0

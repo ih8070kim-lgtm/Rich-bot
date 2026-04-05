@@ -537,3 +537,21 @@ def is_hedge_dca_blocked(p: dict, snapshot: MarketSnapshot, symbol: str) -> bool
         return True
 
     return False
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.27e: 글로벌 헷지 state 영속화
+# ═════════════════════════════════════════════════════════════════
+def save_hedge_state(system_state: dict):
+    """모듈 글로벌 → system_state."""
+    system_state["_hedge_core_cooldowns"] = _hedge_core_cooldowns
+    system_state["_skew_stage2_enter_ts"] = _skew_stage2_enter_ts
+
+
+def restore_hedge_state(system_state: dict):
+    """system_state → 모듈 글로벌."""
+    global _hedge_core_cooldowns, _skew_stage2_enter_ts
+    _hedge_core_cooldowns = system_state.get("_hedge_core_cooldowns", {})
+    _skew_stage2_enter_ts = system_state.get("_skew_stage2_enter_ts", 0.0)
+    print(f"[RESTORE] hedge state: stage2_ts={_skew_stage2_enter_ts:.0f}, "
+          f"cooldowns={len(_hedge_core_cooldowns)}syms")
