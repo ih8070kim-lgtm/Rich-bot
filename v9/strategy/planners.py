@@ -421,7 +421,8 @@ def _calc_urgency(st: Dict, snapshot) -> dict:
             heavy_rois.append(calc_roi_pct(ep, cp, heavy_side, LEVERAGE))
 
     heavy_avg_roi = sum(heavy_rois) / len(heavy_rois) if heavy_rois else 0.0
-    urgency = skew * 100 + max(0.0, -heavy_avg_roi)
+    # ★ V10.27f: ROI 가중치 2x — 스큐 해소돼도 heavy 고통 중이면 urgency 유지
+    urgency = skew * 100 + max(0.0, -heavy_avg_roi) * 2
 
     return {
         "urgency": urgency,
