@@ -244,6 +244,7 @@ from v9.config import (
     OPEN_CORR_MIN,
     SKEW_STAGE2_TRIGGER,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
+    DCA_ENTRY_BASED, DCA_ENTRY_ROI, TRIM_PREORDER_ROI,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -449,9 +450,10 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # ═════════════════════════════════════════════════════════════════
 # DCA 타겟 빌더
 # ═════════════════════════════════════════════════════════════════
-# DCA ROI 트리거 (avg_ep 기준 실시간 ROI)
-# T2: -3.5% / T3: -5.0% / T4: -5.5%
-DCA_ROI_TRIGGERS = {2: -3.0, 3: -5.0, 4: -7.0}  # ★ V10.27b: 좁은 DCA (빠른 평단 압축)
+# DCA ROI 트리거
+# ★ V10.28b: Entry 기준 -1.8% 균일 (config.DCA_ENTRY_ROI 사용)
+# 레거시 호환: _build_dca_targets 사이징용으로만 사용
+DCA_ROI_TRIGGERS = {2: -1.8, 3: -1.8, 4: -1.8}
 
 REGIME_HARD_SL       = {"BAD": -5.0, "LOW": -6.5, "NORMAL": -8.0, "HIGH": -10.0}
 _REGIME_WIDTH = {"HIGH": 4, "NORMAL": 3, "LOW": 2, "BAD": 1}
@@ -1175,19 +1177,31 @@ def plan_dca(
             closes_5m_dca = [float(c[4]) for c in ohlcv_5m_dca]
             ema20_5m_live = calc_ema(closes_5m_dca, period=20)
 
-        # ★ v10.11b: 현재 평단(ep) 기준 ROI — DCA 체결 후 평단 기준으로 다음 DCA 판단
+        # ★ V10.28b: Entry 기준 DCA — 이전 tier entry에서 -1.8% ROI
         _ref_ep = float(p.get("ep", 0.0) or 0.0)
         roi_now = calc_roi_pct(_ref_ep, curr_p, p.get("side", ""), LEVERAGE) if _ref_ep > 0 else 0.0
 
         for target in dca_targets:
-            # avg_ep 기준 ROI 트리거 (T2:-3.5% / T3:-5.0% / T4:-5.5%)
-            roi_trig = DCA_ROI_TRIGGERS.get(target.get("tier", 2), -8.0)  # ★ PATCH: 항상 config 기준 (저장값 무시 → 런타임 변경 즉시 반영)
+            tier_now = target.get("tier", 2)
 
-            is_hit = roi_now <= roi_trig
+            # ★ V10.28b: 이전 tier entry 기준 ROI로 트리거
+            if DCA_ENTRY_BASED:
+                _prev_tier_ep_map = {
+                    2: float(p.get("original_ep", p.get("ep", 0)) or 0),
+                    3: float(p.get("t2_entry_price", 0) or 0),
+                    4: float(p.get("t3_entry_price", 0) or 0),
+                }
+                _prev_ep = _prev_tier_ep_map.get(tier_now, 0)
+                if _prev_ep <= 0:
+                    _prev_ep = _ref_ep  # fallback to blended EP
+                _entry_roi = calc_roi_pct(_prev_ep, curr_p, p.get("side", ""), LEVERAGE) if _prev_ep > 0 else 0
+                is_hit = _entry_roi <= DCA_ENTRY_ROI
+            else:
+                roi_trig = DCA_ROI_TRIGGERS.get(tier_now, -8.0)
+                is_hit = roi_now <= roi_trig
             if not is_hit:
                 continue
 
-            tier_now = target.get("tier", 2)
             # ★ PATCH BUG3: 루프 내부에서 tier_now 기준 쿨다운 계산
             tier_cooldown = DCA_COOLDOWN_BY_TIER.get(tier_now, DCA_COOLDOWN_SEC)
             # ★ V10.27f: light side DCA 가속 (urgency 연동)
@@ -1426,6 +1440,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             continue
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
+            continue
+        # ★ V10.28b: trim 선주문 대기 중 + DCA T2+ → plan_tp1 스킵 (trim이 exit 담당)
+        if p.get("trim_preorders") and int(p.get("dca_level", 1) or 1) >= 2:
             continue
         _sym_st_tp1 = st.get(symbol, {})
         if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():

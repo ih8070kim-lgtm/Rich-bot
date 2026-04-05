@@ -992,7 +992,9 @@ async def _manage_pending_limits(ex, st, snapshot):
                   f"{filled_qty}@{avg_price:.4f}")
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
-                if info["intent_type"] == "TP1":
+                if info.get("is_trim"):
+                    _pl_type = "TRIM_FILL"  # ★ V10.28b: trim 체결 시만 알림
+                elif info["intent_type"] == "TP1":
                     _pl_type = "TP1_LIMIT"
                 elif info["intent_type"] == "DCA":
                     _pl_type = "PENDING_DCA"
@@ -1218,6 +1220,26 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["worst_roi"] = 0.0
         p["max_roi_seen"] = 0.0
 
+        # ★ V10.28b: Trim 선주문 플래그
+        if tier >= 2 and tier <= 4:
+            from v9.config import TRIM_PREORDER_ROI
+            _pos_side = side  # DCA side = position side
+            _trim_price = avg_price * (1 + TRIM_PREORDER_ROI / LEVERAGE / 100) if _pos_side == "buy" \
+                else avg_price * (1 - TRIM_PREORDER_ROI / LEVERAGE / 100)
+            _cum_w = sum(DCA_WEIGHTS[:tier])
+            _tier_w = DCA_WEIGHTS[tier - 1]
+            _trim_qty = float(p["amt"]) * (_tier_w / _cum_w)
+            p.setdefault("trim_preorders", {})
+            p["trim_to_place"] = {
+                "tier": tier,
+                "price": round(_trim_price, 8),
+                "qty": _trim_qty,
+                "side": "sell" if _pos_side == "buy" else "buy",
+                "entry_price": avg_price,
+            }
+            print(f"[TRIM_PREP] {sym} {_pos_side} T{tier}: "
+                  f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f}")
+
         print(f"[PENDING_FILL] {sym} {side} DCA T{tier} 반영 "
               f"ep={p['ep']:.4f} qty={p['amt']:.1f}")
 
@@ -1296,6 +1318,11 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                     print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
                 print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
                       f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
+                # ★ V10.28b: 체결된 tier의 trim_preorders 제거
+                _trp = p.get("trim_preorders", {})
+                _trp.pop(_old_tier, None)
+                if _target_tier <= 1:
+                    p["trim_preorders"] = {}  # T1이면 전부 클리어
             else:
                 # 부분 체결 → step=1 + trailing 전환
                 p["step"] = 1
@@ -1312,6 +1339,114 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
                       f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                       f"→ trailing(잔량={p['amt']:.1f})")
+
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.28b: Trim 선주문 관리
+# ═════════════════════════════════════════════════════════════════
+async def _place_trim_preorders(ex, st, snapshot):
+    """DCA 체결 후 trim_to_place 플래그 → 바이낸스 limit 주문 + pending_limits 등록."""
+    from v9.execution.position_book import ensure_slot, get_p, iter_positions
+    from v9.execution.order_router import _PENDING_LIMITS
+    from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT, LEVERAGE
+    import asyncio
+
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for pos_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            ttp = p.get("trim_to_place")
+            if not ttp:
+                continue
+
+            tier = ttp["tier"]
+            trim_price = ttp["price"]
+            trim_qty = ttp["qty"]
+            order_side = ttp["side"]  # sell for long, buy for short
+            entry_price = ttp["entry_price"]
+
+            # 최소 수량 체크
+            min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
+            if trim_qty < min_qty:
+                print(f"[TRIM_SKIP] {sym} T{tier} qty {trim_qty:.4f} < min {min_qty}")
+                p.pop("trim_to_place", None)
+                continue
+
+            # positionSide (hedge mode)
+            ps = "LONG" if pos_side == "buy" else "SHORT"
+
+            try:
+                order = await asyncio.to_thread(
+                    ex.create_order,
+                    sym, "limit", order_side, trim_qty, trim_price,
+                    params={"positionSide": ps, "reduceOnly": True}
+                )
+                oid = str(order.get("id", ""))
+                if oid:
+                    # pending_limits 등록 (is_trim + target_tier 포함)
+                    _PENDING_LIMITS[oid] = {
+                        "sym": sym,
+                        "side": order_side,
+                        "qty": trim_qty,
+                        "price": trim_price,
+                        "trace_id": f"trim_T{tier}_{sym}",
+                        "tag": f"V9_TRIM_T{tier}_{sym}",
+                        "placed_at": __import__("time").time(),
+                        "intent_type": "TP1",
+                        "positionSide": ps,
+                        "role": p.get("role", "CORE_MR"),
+                        "tier": tier,
+                        "is_trim": True,
+                        "target_tier": tier - 1,
+                        "_expected_role": p.get("role", ""),
+                    }
+                    # position에 trim 주문 기록
+                    p.setdefault("trim_preorders", {})[tier] = {
+                        "oid": oid, "price": trim_price, "qty": trim_qty,
+                    }
+                    # ★ 선주문 시 텔레그램 알림 없음 (체결 시만)
+                    print(f"[TRIM_PLACED] {sym} {pos_side} T{tier}: "
+                          f"{order_side} {trim_qty:.4f}@${trim_price:.4f} oid={oid}")
+                else:
+                    print(f"[TRIM_FAIL] {sym} T{tier}: 주문 ID 없음")
+            except Exception as e:
+                print(f"[TRIM_ERR] {sym} T{tier}: {e}")
+
+            p.pop("trim_to_place", None)
+
+
+async def _cancel_trim_preorders(ex, st, sym, pos_side):
+    """포지션 청산 시 해당 심볼의 trim 선주문 전량 취소."""
+    from v9.execution.position_book import get_p
+    from v9.execution.order_router import _PENDING_LIMITS, remove_pending_limit
+    import asyncio
+
+    sym_st = st.get(sym, {})
+    p = get_p(sym_st, pos_side)
+    if not isinstance(p, dict):
+        return
+
+    trim_orders = p.get("trim_preorders", {})
+    if not trim_orders:
+        return
+
+    for tier, info in list(trim_orders.items()):
+        oid = info.get("oid", "")
+        if not oid:
+            continue
+        try:
+            await asyncio.to_thread(ex.cancel_order, oid, sym)
+            remove_pending_limit(oid)
+            print(f"[TRIM_CANCEL] {sym} {pos_side} T{tier} oid={oid} 취소")
+        except Exception as e:
+            # 이미 체결/취소된 경우 무시
+            remove_pending_limit(oid)
+            print(f"[TRIM_CANCEL] {sym} T{tier} 취소 시도: {e}")
+
+    p["trim_preorders"] = {}
 
 
 async def _main_loop(ex_init, dry_run: bool):
@@ -1793,6 +1928,26 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ V10.25: TP1 선주문 관리 (매 틱)
             await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
+
+            # ★ V10.28b: Trim 선주문 — DCA 체결 후 즉시 배치
+            await _place_trim_preorders(ex, st, snapshot)
+
+            # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
+            try:
+                from v9.strategy.strategy_core import get_trim_cancel_queue
+                from v9.execution.order_router import remove_pending_limit
+                for _tcq in get_trim_cancel_queue():
+                    _tc_oid = _tcq.get("oid", "")
+                    _tc_sym = _tcq.get("sym", "")
+                    if _tc_oid and _tc_sym:
+                        try:
+                            await asyncio.to_thread(ex.cancel_order, _tc_oid, _tc_sym)
+                            print(f"[TRIM_CANCEL] {_tc_sym} oid={_tc_oid} 취소 완료")
+                        except Exception as _tce:
+                            print(f"[TRIM_CANCEL] {_tc_sym} oid={_tc_oid}: {_tce}")
+                        remove_pending_limit(_tc_oid)
+            except Exception:
+                pass
 
             # ★ FIX-2: 유령 pending_entry 일괄 정리 (조건 확장)
             # 기존: 포지션+pending 동시 → 클리어

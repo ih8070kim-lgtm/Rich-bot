@@ -17,6 +17,16 @@ from v9.execution.position_book import (
 from v9.logging.logger_csv import log_position
 from v9.types import IntentType, MarketSnapshot, OrderResult
 
+# ★ V10.28b: Trim 선주문 취소 큐 (포지션 청산 시 runner가 처리)
+_TRIM_CANCEL_QUEUE = []
+
+def get_trim_cancel_queue():
+    """runner.py에서 호출 — 취소 대상 반환 후 클리어."""
+    global _TRIM_CANCEL_QUEUE
+    q = list(_TRIM_CANCEL_QUEUE)
+    _TRIM_CANCEL_QUEUE.clear()
+    return q
+
 
 def _tid() -> str:
     return str(uuid.uuid4())[:8]
@@ -217,6 +227,24 @@ def apply_order_results(
                 # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
                 p["worst_roi"] = 0.0
                 p["max_roi_seen"] = 0.0
+                # ★ V10.28b: Trim 선주문 플래그 — runner가 실제 주문
+                if tier >= 2 and tier <= 4:
+                    from v9.config import TRIM_PREORDER_ROI, LEVERAGE as _TRIM_LEV, DCA_WEIGHTS as _DW_TRIM
+                    _trim_price = avg_px * (1 + TRIM_PREORDER_ROI / _TRIM_LEV / 100) if pos_side == "buy" \
+                        else avg_px * (1 - TRIM_PREORDER_ROI / _TRIM_LEV / 100)
+                    _cum_w = sum(_DW_TRIM[:tier])
+                    _tier_w = _DW_TRIM[tier - 1]
+                    _trim_qty = float(p["amt"]) * (_tier_w / _cum_w)
+                    p.setdefault("trim_preorders", {})
+                    p["trim_to_place"] = {
+                        "tier": tier,
+                        "price": round(_trim_price, 8),
+                        "qty": _trim_qty,
+                        "side": "sell" if pos_side == "buy" else "buy",
+                        "entry_price": avg_px,
+                    }
+                    print(f"[TRIM_PREP] {sym} {pos_side} T{tier}: "
+                          f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f}")
                 print(f"[DCA_RESET] {sym} {pos_side} T{tier}: "
                       f"worst_roi=0 max_roi=0 (새 ep={p['ep']:.4f})")
                 # ★ v10.10: sh_trigger 제거 — DCA_BLOCKED_INSURANCE로 대체
@@ -232,6 +260,10 @@ def apply_order_results(
             if p and filled > 0:
                 p["amt"] = max(0.0, p["amt"] - filled)
                 if p["amt"] <= 0:
+                    # ★ V10.28b: trim 선주문 취소 큐
+                    if p.get("trim_preorders"):
+                        for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _tc_info.get("oid", "")})
                     cooldowns[sym] = now + 900
                     clear_position(st, sym, pos_side)
                     _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
@@ -270,6 +302,16 @@ def apply_order_results(
                         print(f"[DCA_TRIM] {sym} dca_targets 재생성 실패: {_te}")
                     print(f"[DCA_TRIM] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
                           f"sold={filled:.1f} remain={p['amt']:.1f} ep={p.get('ep',0):.4f}")
+                    # ★ V10.28b: 체결된 tier의 trim_preorders 제거 + 취소 큐
+                    _trp = p.get("trim_preorders", {})
+                    _removed = _trp.pop(_old_tier, None)
+                    if _removed and _removed.get("oid"):
+                        _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _removed["oid"]})
+                    if _target_tier <= 1:
+                        for _rt, _ri in _trp.items():
+                            if _ri.get("oid"):
+                                _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _ri["oid"]})
+                        p["trim_preorders"] = {}
                     _log_pos(result.trace_id, sym, p, snapshot)
                     continue
                 if meta.get("is_tp2"):
@@ -343,6 +385,11 @@ def apply_order_results(
                 if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") in ("HEDGE", "CORE_HEDGE"):
                     _opp_p_orphan["source_sl_orphan"] = True
                     print(f"[strategy_core] {sym} CORE 청산 → {_opp_p_orphan.get('role')} source_sl_orphan 세팅")
+            # ★ V10.28b: 포지션 청산 전 trim 선주문 취소 큐
+            if p and p.get("trim_preorders"):
+                for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():
+                    _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _tc_info.get("oid", "")})
+                print(f"[TRIM_CANCEL_Q] {sym} {pos_side} trim {len(p['trim_preorders'])}건 취소 대기")
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 
