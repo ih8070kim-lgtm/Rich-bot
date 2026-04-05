@@ -678,6 +678,10 @@ def plan_open(
         adj_rsi5_os = max(20, rsi5_os - shift)
         adj_rsi5_ob = min(80, rsi5_ob + shift)
 
+        # ★ V10.27f: urgency 높을 때 숏 RSI 문턱 완화
+        if _urg_open["urgency"] >= 10:
+            adj_rsi5_ob = max(55, adj_rsi5_ob - 5)  # 65→60 (urg≥10)
+
         # ── (2-b) BTC 변동성 레짐 보정 — ATR 배수 레짐별 조정 (루프 밖에서 계산됨)
 
         # ── (3) can_long/can_short 확정 + 추세 필터 먼저 적용

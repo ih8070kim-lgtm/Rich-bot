@@ -131,7 +131,7 @@ SYM_MIN_QTY_DEFAULT = 1.0
 # OPEN / CORR
 # ═══════════════════════════════════════════════════════════════════
 HEDGE_OPEN_CORR_MIN     = 0.6
-OPEN_CORR_MIN           = 0.50   # ★ PATCH: 진입 상관성 하한 (config 통합)
+OPEN_CORR_MIN           = 0.40   # ★ V10.27f: 0.50→0.40 (숏 진입 확대)
 HEDGE_STAGE1_MULTIPLIER = 1.4
 HEDGE_STAGE2_MULTIPLIER = 2.4
 HEDGE_MAX_MULTIPLIER    = 3.0
@@ -159,12 +159,12 @@ UNIVERSE_SHORT_N         = 8
 UNIVERSE_STICKY_MIN_SEC  = 600
 UNIVERSE_MIN_POOL_SIZE   = 3
 
-# ★ v10.15: 롱/숏 분리 파라미터  ★ PATCH: 상관성 0.50 통일 (숏 차단 해소)
+# ★ v10.15: 롱/숏 분리 파라미터
 LONG_MIN_CORR   = 0.50
 LONG_BETA_MIN   = 0.80
 LONG_BETA_MAX   = 2.00
-SHORT_MIN_CORR  = 0.50
-SHORT_BETA_MIN  = 0.70
+SHORT_MIN_CORR  = 0.40   # ★ V10.27f: 0.50→0.40 (숏 유니버스 확대)
+SHORT_BETA_MIN  = 0.50   # ★ V10.27f: 0.70→0.50 (저베타 숏 허용)
 SHORT_BETA_MAX  = 2.00
 
 # ★ v10.15: HIGH 레짐 sticky
@@ -203,13 +203,13 @@ GLOBAL_BLACKLIST = [
 ]
 
 # ★ v10.5: 심볼별 방향 바이어스
-# LONG_ONLY  — 숏 진입 금지 (대형주 / 회복력 강함)
-# SHORT_ONLY — 롱 진입 금지 (소형 알트 / 하락 드리프트)
+# LONG_ONLY  — 숏 진입 금지
+# SHORT_ONLY — 롱 진입 금지
 # NEUTRAL    — 양방향 허용
 LONG_ONLY_SYMBOLS = {
-    "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT",
-    "AVAX/USDT", "TRX/USDT", "TON/USDT", "DOT/USDT", "LINK/USDT",
+    "BNB/USDT", "TRX/USDT", "TON/USDT",
     "ICP/USDT", "ETC/USDT", "XLM/USDT",
+    "XRP/USDT", "AVAX/USDT",  # ★ V10.27f: 독자 펌프 리스크 → 숏 제외
 }
 
 SHORT_ONLY_SYMBOLS = {
@@ -219,6 +219,9 @@ SHORT_ONLY_SYMBOLS = {
 }
 
 NEUTRAL_SYMBOLS = {
+    # ★ V10.27f: 대형주 NEUTRAL 이동 (하락장 숏 허용)
+    "ETH/USDT", "SOL/USDT", "LINK/USDT", "ADA/USDT", "DOT/USDT",
+    # 기존 NEUTRAL
     "SUI/USDT", "APT/USDT", "NEAR/USDT", "ATOM/USDT",
     "AAVE/USDT", "UNI/USDT", "STX/USDT", "MATIC/USDT", "EOS/USDT",
 }
