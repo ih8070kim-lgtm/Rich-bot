@@ -674,9 +674,10 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
     """
     from v9.config import LEVERAGE, TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
     from v9.utils.utils_math import calc_roi_pct
-    from v9.strategy.planners import _skew_tp_adjustment
+    from v9.strategy.planners import _skew_tp_adjustment, _calc_urgency
 
     prices = snapshot.all_prices or {}
+    _urg = _calc_urgency(st, snapshot)  # ★ V10.27f
 
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
@@ -719,13 +720,14 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 _worst = float(p.get("worst_roi", 0.0) or 0.0)
                 _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
                 tp1_base = max(_worst + 2.0, _floor)
-            # ★ V10.27f: Skew-Aware TP1 — floor 고정 + light ceiling 확장
-            _is_heavy_tp = (_skew["heavy_side"] == pos_side)
-            if _is_heavy_tp or _skew["skew"] < 0.03:
-                tp1_thresh = tp1_base * _skew["skew_mult"]
+            # ★ V10.27f: Urgency-Aware TP1
+            _is_heavy_tp = (_urg["heavy_side"] == pos_side)
+            if _urg["urgency"] < 3:
+                tp1_thresh = tp1_base
+            elif _is_heavy_tp:
+                tp1_thresh = tp1_base * max(0.5, 1.0 - _urg["urgency"] * 0.03)
             else:
-                _light_mult = min(1.5, 1.0 + _skew["skew"] * 3.0)
-                tp1_thresh = tp1_base * _light_mult
+                tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
 
             # ROI → price 변환
             if is_long:

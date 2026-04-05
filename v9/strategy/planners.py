@@ -386,6 +386,52 @@ def _skew_tp_adjustment(pos_side: str, st: Dict, snapshot) -> dict:
 
 
 
+# ★ V10.27f: Urgency Score — skew + heavy pain 통합 점수
+# ═════════════════════════════════════════════════════════════════
+def _calc_urgency(st: Dict, snapshot) -> dict:
+    """스큐 + heavy side 평균 ROI → 단일 urgency 점수.
+
+    urgency = skew×100 + max(0, -heavy_avg_roi)
+    0~30 범위. 10+부터 SKEW_E30/TP1 ceiling/DCA 가속 발동.
+    """
+    total_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+    if total_cap <= 0:
+        return {"urgency": 0.0, "skew": 0.0, "heavy_avg_roi": 0.0,
+                "heavy_side": "", "light_side": ""}
+
+    skew, long_m, short_m = calc_skew(st, total_cap)
+    heavy_side = "buy" if long_m > short_m else "sell"
+    light_side = "sell" if heavy_side == "buy" else "buy"
+
+    # heavy side 평균 ROI
+    _HEDGE_ROLES_U = {"HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"}
+    heavy_rois = []
+    prices = snapshot.all_prices or {}
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        hp = get_p(sym_st, heavy_side)
+        if not isinstance(hp, dict):
+            continue
+        if hp.get("role", "") in _HEDGE_ROLES_U:
+            continue
+        cp = float(prices.get(sym, 0))
+        ep = float(hp.get("ep", 0))
+        if cp > 0 and ep > 0:
+            heavy_rois.append(calc_roi_pct(ep, cp, heavy_side, LEVERAGE))
+
+    heavy_avg_roi = sum(heavy_rois) / len(heavy_rois) if heavy_rois else 0.0
+    urgency = skew * 100 + max(0.0, -heavy_avg_roi)
+
+    return {
+        "urgency": urgency,
+        "skew": skew,
+        "heavy_avg_roi": heavy_avg_roi,
+        "heavy_side": heavy_side,
+        "light_side": light_side,
+    }
+
+
 # ★ V10.22: plan_heavy_rebalance 삭제 — _skew_tp_adjustment()의 full_close로 대체
 _heavy_rebalance_deleted = True  # 참조 방지용 마커
 
@@ -502,6 +548,7 @@ def plan_open(
 
     # ── SOURCE_LINKED_HEDGE_CORE (v10.11: hedge_core 모듈) ───
     _skew, _long_margin, _short_margin = calc_skew(st, total_cap)
+    _urg_open = _calc_urgency(st, snapshot)  # ★ V10.27f
 
     # CORE 카운트 (FORCE_BALANCE reason용)
     _core_long = 0; _core_short = 0
@@ -739,11 +786,11 @@ def plan_open(
         else:
             final_short_trig = False
 
-        # ★ V10.27f: SKEW_E30 — 스큐 10%+ 시 light side 5m EMA30+ATR1.8 진입
+        # ★ V10.27f: SKEW_E30 — urgency 10+ 시 light side 5m EMA30+ATR1.8 진입
         _SKEW_E30_ATR = 1.8
-        _skew_e30_ok = _skew >= 0.10
+        _skew_e30_ok = _urg_open["urgency"] >= 10
         if _skew_e30_ok:
-            _light_side = "sell" if _long_margin > _short_margin else "buy"
+            _light_side = _urg_open["light_side"]
             if _light_side == "buy" and not final_long_trig:
                 if (can_long and ema_30_5m is not None
                         and curr_p < ema_30_5m - atr_coin * _SKEW_E30_ATR
@@ -989,6 +1036,7 @@ def plan_dca(
     if _total_cap_skew > 0:
         _dca_skew, _dca_long_m, _dca_short_m = calc_skew(st, _total_cap_skew)
         _dca_heavy_side = "buy" if _dca_long_m > _dca_short_m else "sell"
+    _urg_dca = _calc_urgency(st, snapshot)  # ★ V10.27f
 
     # ★ V10.25: light side DCA 후보 ROI 정렬 (스큐 ≥ 15% 시 ROI 높은 순)
     _dca_positions = list(_pos_items(st))
@@ -1142,6 +1190,11 @@ def plan_dca(
             tier_now = target.get("tier", 2)
             # ★ PATCH BUG3: 루프 내부에서 tier_now 기준 쿨다운 계산
             tier_cooldown = DCA_COOLDOWN_BY_TIER.get(tier_now, DCA_COOLDOWN_SEC)
+            # ★ V10.27f: light side DCA 가속 (urgency 연동)
+            if (_dca_heavy_side
+                    and p.get("side", "") != _dca_heavy_side
+                    and _urg_dca["urgency"] >= 10):
+                tier_cooldown = int(tier_cooldown * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
 
             # ★ v10.11b: 이미 완료된 tier 스킵 (JSON 잔여 타겟 방어)
             _curr_dca_level = int(p.get("dca_level", 1) or 1)
@@ -1276,6 +1329,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
     """
     intents: List[Intent] = []
     _tp1_excl = exclude_syms or set()
+    _urg = _calc_urgency(st, snapshot)  # ★ V10.27f: 루프 밖 1회 계산
 
     for symbol, p in _pos_items(st):
         if symbol in _tp1_excl:
@@ -1332,15 +1386,14 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
             tp1_base = max(_worst + 2.0, _floor)
 
-        # ★ V10.27f: Skew-Aware TP1 — floor 고정 + light ceiling 확장
-        # heavy side: tp1_base × skew_mult (할인 → 빠른 탈출)
-        # light side: tp1_base × (1 + skew×3) (스큐 클수록 더 끌고감, cap 1.5x)
-        _is_heavy_tp = (_skew["heavy_side"] == p.get("side", ""))
-        if _is_heavy_tp or _skew["skew"] < 0.03:
-            tp1_thresh = tp1_base * _skew["skew_mult"]
+        # ★ V10.27f: Urgency-Aware TP1 — heavy 할인 + light ceiling (점수 연동)
+        _is_heavy_tp = (_urg["heavy_side"] == p.get("side", ""))
+        if _urg["urgency"] < 3:
+            tp1_thresh = tp1_base
+        elif _is_heavy_tp:
+            tp1_thresh = tp1_base * max(0.5, 1.0 - _urg["urgency"] * 0.03)
         else:
-            _light_mult = min(1.5, 1.0 + _skew["skew"] * 3.0)
-            tp1_thresh = tp1_base * _light_mult
+            tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
 
         # ★ V10.27c: DCA Trim — DCA 체결가 기준 +2% → 매도, tier-1 복귀
         _DCA_TRIM_ROI = 2.0
@@ -1396,7 +1449,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 qty=close_qty,
                 price=curr_p,
                 reason=(f"TP1_F({tp1_thresh:.1f},roi={roi_gross:.1f},"
-                        f"sk={_skew['skew']:.2f},{_fc})_T{dca_level}"),
+                        f"sk={_skew['skew']:.2f},urg={_urg['urgency']:.0f},{_fc})_T{dca_level}"),
                 metadata={"roi_gross": roi_gross, "tp1_thresh": tp1_thresh,
                            "skew": _skew["skew"], "full_close": _skew["full_close"]},
             ))
