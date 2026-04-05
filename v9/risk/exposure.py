@@ -39,6 +39,9 @@ def calc_directional_exposure(
         if px <= 0:
             continue
         for side, p in _iter_pos(sym_st):
+            # ★ V10.27f: trailing(step>=1) 제외 — 곧 청산될 포지션이 신규 진입 차단 방지
+            if int(p.get("step", 0) or 0) >= 1:
+                continue
             amt = float(p.get("amt", 0.0) or 0.0)
             if amt <= 0:
                 continue
