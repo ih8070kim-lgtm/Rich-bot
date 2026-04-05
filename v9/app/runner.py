@@ -692,6 +692,15 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             _role = p.get("role", "")
             if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
                 continue
+            # ★ V10.28b FIX: trim 선주문 활성 + DCA T2+ → TP1 선주문 스킵 (trim이 exit 담당)
+            _dca_lv = int(p.get("dca_level", 1) or 1)
+            if p.get("trim_preorders") and _dca_lv >= 2:
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+            # ★ V10.28b FIX: plan_tp1 경로 limit이 pending → 선주문 불필요
+            if p.get("tp1_limit_oid"):
+                continue
 
             ep = float(p.get("ep", 0) or 0)
             curr_p = float(prices.get(sym, 0) or 0)
@@ -734,11 +743,13 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             if target_price <= 0:
                 continue
 
-            # 이미 ROI >= threshold → plan_tp1이 처리, 선주문 불필요
+            # ★ V10.28b FIX: ROI >= threshold 시 선주문을 취소하지 않음
+            # plan_tp1은 tp1_preorder_id가 있으면 스킵하므로 이중배치 없음.
+            # 취소하면 레이스컨디션 발생: 취소 전 거래소에서 체결 + plan_tp1 새 주문 → 이중체결
             roi_now = calc_roi_pct(ep, curr_p, pos_side, LEVERAGE)
             if roi_now >= tp1_thresh:
-                if p.get("tp1_preorder_id"):
-                    await _cancel_tp1_preorder(ex, p, sym)
+                # 선주문이 있으면 유지 (거래소에서 자연 체결 대기)
+                # 선주문이 없으면 plan_tp1이 처리 → 스킵
                 continue
 
             # 수량 계산
@@ -757,6 +768,41 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             # 기존 선주문과 비교
             existing_id = p.get("tp1_preorder_id")
             existing_price = float(p.get("tp1_preorder_price", 0) or 0)
+            if existing_id and existing_price > 0:
+                # ★ V10.28b FIX: 10분 이상 된 선주문 → 거래소 확인 (유령 방지)
+                _pre_age = time.time() - float(p.get("tp1_preorder_ts", 0) or 0)
+                if _pre_age > 600:
+                    try:
+                        import asyncio as _aio2
+                        _chk = await _aio2.to_thread(ex.fetch_order, str(existing_id), sym)
+                        _chk_status = _chk.get("status", "")
+                        if _chk_status in ("canceled", "expired", "rejected"):
+                            print(f"[TP1_PRE] {sym} 유령 선주문 감지 (status={_chk_status}) → 재배치")
+                            p["tp1_preorder_id"] = None
+                            p["tp1_preorder_price"] = None
+                            p["tp1_preorder_ts"] = None
+                            existing_id = None
+                        elif _chk_status == "closed":
+                            # 이미 체결됨 — _manage_pending_limits에서 처리되지 않은 케이스
+                            print(f"[TP1_PRE] {sym} 선주문 이미 체결 감지 → 클리어")
+                            p["tp1_preorder_id"] = None
+                            p["tp1_preorder_price"] = None
+                            p["tp1_preorder_ts"] = None
+                            existing_id = None
+                        else:
+                            # open — 갱신만
+                            p["tp1_preorder_ts"] = time.time()
+                    except Exception as _stale_e:
+                        _stale_err = str(_stale_e)
+                        if "Unknown order" in _stale_err or "-2013" in _stale_err:
+                            print(f"[TP1_PRE] {sym} 유령 선주문 ({existing_id}) → 재배치")
+                            p["tp1_preorder_id"] = None
+                            p["tp1_preorder_price"] = None
+                            p["tp1_preorder_ts"] = None
+                            existing_id = None
+                        else:
+                            print(f"[TP1_PRE] {sym} 선주문 확인 실패: {_stale_e}")
+
             if existing_id and existing_price > 0:
                 _diff = abs(target_price - existing_price) / existing_price
                 if _diff < _TP1_PREORDER_REPRICE_PCT:
@@ -1005,6 +1051,18 @@ async def _manage_pending_limits(ex, st, snapshot):
             from v9.execution.position_book import set_pending_entry as _spe
             ensure_slot(st, sym)
             _spe(st[sym], info["side"], None)
+            # ★ V10.28b FIX: TP1 외부 취소 시 tp1_limit_oid + tp1_preorder_id 해제
+            if info.get("intent_type") == "TP1":
+                _cx_side = info.get("side", "")
+                _cx_pos_side = "sell" if _cx_side == "buy" else "buy"
+                _cx_p = get_p(st[sym], _cx_pos_side)
+                if isinstance(_cx_p, dict):
+                    _cx_p.pop("tp1_limit_oid", None)
+                    if _cx_p.get("tp1_preorder_id") == str(oid):
+                        _cx_p["tp1_preorder_id"] = None
+                        _cx_p["tp1_preorder_price"] = None
+                        _cx_p["tp1_preorder_ts"] = None
+                        print(f"[TP1_PRE] {sym} 외부취소 → tp1_preorder_id 클리어")
             print(f"[PENDING_LIMIT] {sym} 외부 취소")
 
         elif status == "open":
@@ -1064,6 +1122,18 @@ async def _manage_pending_limits(ex, st, snapshot):
             # 즉시 재생성 방지 (30초 쿨다운)
             if info.get("intent_type") == "TP1":
                 st[info["sym"]]["exit_fail_cooldown_until"] = now + 30
+                # ★ V10.28b FIX: tp1_limit_oid + tp1_preorder_id 해제 (유령 선주문 방지)
+                _cancel_side = info.get("side", "")
+                _cancel_pos_side = "sell" if _cancel_side == "buy" else "buy"
+                _cancel_p = get_p(st[info["sym"]], _cancel_pos_side)
+                if isinstance(_cancel_p, dict):
+                    _cancel_p.pop("tp1_limit_oid", None)
+                    # 선주문(tp1_preorder_id) 취소 시에도 클리어 → 유령 방지
+                    if _cancel_p.get("tp1_preorder_id") == str(oid):
+                        _cancel_p["tp1_preorder_id"] = None
+                        _cancel_p["tp1_preorder_price"] = None
+                        _cancel_p["tp1_preorder_ts"] = None
+                        print(f"[TP1_PRE] {info['sym']} 타임아웃/취소 → tp1_preorder_id 클리어")
 
 
 def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
@@ -1243,6 +1313,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         old_ep = float(p.get("ep", 0))
         p["amt"] = max(0.0, float(p.get("amt", 0)) - filled_qty)
+        # ★ V10.28b FIX: TP1 limit 체결 → pending 마커 해제
+        p.pop("tp1_limit_oid", None)
 
         if p["amt"] <= 0:
             # 전량 체결 → 포지션 클리어
@@ -1328,6 +1400,42 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                       f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                       f"→ trailing(잔량={p['amt']:.1f})")
 
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.28b: 일별 PnL 자동 리포트
+# ═════════════════════════════════════════════════════════════════
+_last_report_date = ""
+
+async def _daily_pnl_report(st):
+    """매일 00:05 UTC 자동 실행 — 전일 트레이드 요약 텔레그램 발송."""
+    global _last_report_date
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    if not (now.hour == 0 and 5 <= now.minute <= 10):
+        return
+    today = now.strftime("%Y-%m-%d")
+    if _last_report_date == today:
+        return
+    _last_report_date = today
+
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        from v9.execution.position_book import iter_positions as _ip
+        active = sum(
+            1 for _ss in st.values() if isinstance(_ss, dict)
+            for _, _p in _ip(_ss)
+            if isinstance(_p, dict) and float(_p.get("amt", 0) or 0) > 0
+        )
+
+        if _TELEGRAM_OK:
+            from telegram_engine import send_daily_report
+            await send_daily_report(yesterday, active_positions=active)
+            print(f"[DAILY_REPORT] {yesterday} 발송 완료")
+    except Exception as e:
+        print(f"[DAILY_REPORT] 오류: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -2022,6 +2130,8 @@ async def _main_loop(ex_init, dry_run: bool):
                     pass
                 _save_all(st, cooldowns, system_state)
                 last_save_ts = now
+                # ★ V10.28b: 일별 PnL 리포트 (00:05 UTC)
+                await _daily_pnl_report(st)
                 # ★ v10.17: 스큐 상태 로그 (log_skew.csv)
                 try:
                     from v9.engines.hedge_core import (

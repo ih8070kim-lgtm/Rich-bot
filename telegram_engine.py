@@ -47,17 +47,24 @@ async def send_telegram_message(message: str):
 
 
 # ═════════════════════════════════════════════════════════════════
+# 로그 경로 해결 (CWD 의존 버그 방지)
+# ═════════════════════════════════════════════════════════════════
+def _resolve_log_dir() -> str:
+    """LOG_DIR 절대경로 반환."""
+    _base = os.path.dirname(os.path.abspath(__file__))
+    try:
+        from v9.config import LOG_DIR as _LD
+        return os.path.join(_base, _LD)
+    except Exception:
+        return os.path.join(_base, "v9_logs")
+
+
+# ═════════════════════════════════════════════════════════════════
 # 일별 PnL 히스토리 (최근 N일)
 # ═════════════════════════════════════════════════════════════════
 def _load_daily_pnl(days: int = 7) -> list:
     """최근 N일간 일별 PnL. Returns: [(date_str, pnl, win, total), ...]"""
-    _base = os.path.dirname(os.path.abspath(__file__))
-    try:
-        from v9.config import LOG_DIR as _LD
-        log_dir = os.path.join(_base, _LD)
-    except Exception:
-        log_dir = os.path.join(_base, "v9_logs")
-
+    log_dir = _resolve_log_dir()
     trades_path = os.path.join(log_dir, "log_trades.csv")
     if not os.path.exists(trades_path):
         return []
@@ -92,13 +99,7 @@ def _load_daily_pnl(days: int = 7) -> list:
 
 
 def _load_trade_stats(today_str: str) -> dict:
-    _base = os.path.dirname(os.path.abspath(__file__))
-    try:
-        from v9.config import LOG_DIR as _LD
-        log_dir = os.path.join(_base, _LD)
-    except Exception:
-        log_dir = os.path.join(_base, "v9_logs")
-
+    log_dir = _resolve_log_dir()
     trades_path = os.path.join(log_dir, "log_trades.csv")
     stats = {
         "total": 0, "win": 0, "loss": 0, "pnl": 0.0,
@@ -376,3 +377,187 @@ async def notify_async_fill(
 
     except Exception as e:
         print(f"[Telegram] notify_async_fill 오류: {e}")
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.28b: 일일 리포트 생성 (재사용 가능)
+# ═════════════════════════════════════════════════════════════════
+def _load_trades_for_date(target_date: str) -> list:
+    """특정 날짜의 log_trades.csv 행을 파싱하여 dict list 반환."""
+    log_dir = _resolve_log_dir()
+    trades_path = os.path.join(log_dir, "log_trades.csv")
+    if not os.path.exists(trades_path):
+        return []
+
+    trades = []
+    try:
+        with open(trades_path, newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                ts = row.get("time", "")
+                if not ts.startswith(target_date):
+                    continue
+                try:
+                    pnl = float(row.get("pnl_usdt", 0) or 0)
+                    roi = float(row.get("roi_pct", 0) or 0)
+                    dca = max(1, min(4, int(row.get("dca_level", 1) or 1)))
+                    hold = float(row.get("hold_sec", 0) or 0)
+                except (ValueError, TypeError):
+                    continue
+                trades.append({
+                    "sym":    row.get("symbol", "").replace("/USDT", ""),
+                    "side":   row.get("side", ""),
+                    "pnl":    pnl,
+                    "roi":    roi,
+                    "dca":    dca,
+                    "reason": row.get("reason", ""),
+                    "hold":   hold,
+                    "entry":  row.get("entry_type", ""),
+                    "role":   row.get("role", ""),
+                })
+    except Exception as e:
+        print(f"[Report] trades 로드 실패: {e}")
+    return trades
+
+
+def generate_daily_report(target_date: str = None, active_positions: int = None) -> str:
+    """
+    일별 트레이드 리포트 문자열 생성.
+    target_date: "YYYY-MM-DD" (None이면 어제)
+    active_positions: 현재 활성 포지션 수 (runner에서 전달, bot에서는 state에서 읽음)
+    """
+    if target_date is None:
+        target_date = (date.today() - timedelta(days=1)).isoformat()
+
+    trades = _load_trades_for_date(target_date)
+
+    if not trades:
+        return (
+            f"📊 <b>일일 리포트</b> ({target_date})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"트레이드: 0건"
+        )
+
+    n = len(trades)
+    wins = sum(1 for t in trades if t["pnl"] > 0)
+    total_pnl = sum(t["pnl"] for t in trades)
+    avg_pnl = total_pnl / n
+    wr = wins / n * 100
+
+    best = max(trades, key=lambda t: t["pnl"])
+    worst = min(trades, key=lambda t: t["pnl"])
+    pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
+
+    # ── Tier 분포 ──
+    tier_map = {}
+    for t in trades:
+        tk = t["dca"]
+        if tk not in tier_map:
+            tier_map[tk] = {"n": 0, "w": 0, "pnl": 0.0}
+        tier_map[tk]["n"] += 1
+        tier_map[tk]["pnl"] += t["pnl"]
+        if t["pnl"] > 0:
+            tier_map[tk]["w"] += 1
+
+    tier_lines = []
+    for tk in sorted(tier_map):
+        d = tier_map[tk]
+        twr = d["w"] / d["n"] * 100 if d["n"] else 0
+        tier_lines.append(f"  T{tk}: {d['n']}건 ${d['pnl']:+.1f} ({twr:.0f}%)")
+    tier_str = "\n".join(tier_lines)
+
+    # ── 청산 유형 ──
+    reason_counts = {}
+    for t in trades:
+        r = t["reason"]
+        if "TRAIL" in r:
+            key = "Trail"
+        elif "TP1" in r:
+            key = "TP1"
+        elif "TRIM" in r:
+            key = "Trim"
+        elif "HARD_SL" in r:
+            key = "SL"
+        elif "FORCE" in r or "PAIR_CUT" in r:
+            key = "FC"
+        elif "CLOSE" in r or "CORR" in r:
+            key = "Close"
+        elif "GHOST" in r:
+            key = "Ghost"
+        else:
+            key = r[:8] if r else "기타"
+        reason_counts[key] = reason_counts.get(key, 0) + 1
+
+    exit_str = " / ".join(f"{k} {v}" for k, v in sorted(reason_counts.items(), key=lambda x: -x[1]))
+
+    # ── Role 분포 ──
+    role_map = {}
+    for t in trades:
+        rl = t["role"]
+        if "HEDGE" in rl:
+            rk = "Hedge"
+        elif "INSURANCE" in rl:
+            rk = "Ins"
+        elif "BREAKOUT" in rl or "E30" in rl:
+            rk = "E30"
+        else:
+            rk = "MR"
+        if rk not in role_map:
+            role_map[rk] = {"n": 0, "pnl": 0.0}
+        role_map[rk]["n"] += 1
+        role_map[rk]["pnl"] += t["pnl"]
+
+    role_str = " / ".join(f"{k} {d['n']}건 ${d['pnl']:+.1f}" for k, d in sorted(role_map.items(), key=lambda x: -x[1]["n"]))
+
+    # ── 평균 보유시간 ──
+    valid_holds = [t["hold"] for t in trades if t["hold"] > 0]
+    if valid_holds:
+        avg_hold_sec = sum(valid_holds) / len(valid_holds)
+        if avg_hold_sec >= 3600:
+            hold_str = f"{avg_hold_sec / 3600:.1f}h"
+        else:
+            hold_str = f"{avg_hold_sec / 60:.0f}m"
+    else:
+        hold_str = "—"
+
+    # ── 7일 히스토리 ──
+    daily_hist = _load_daily_pnl(7)
+    hist_lines = []
+    cumulative = 0.0
+    for dstr, dpnl, dwin, dtotal in daily_hist:
+        cumulative += dpnl
+        bar = "▓" if dpnl >= 0 else "░"
+        dwr = f"{dwin}/{dtotal}" if dtotal else "—"
+        hist_lines.append(f"{dstr[5:]} {bar} ${dpnl:+.1f} ({dwr})")
+    hist_str = "\n".join(hist_lines) if hist_lines else "기록 없음"
+    cum_icon = "🟢" if cumulative >= 0 else "🔴"
+
+    # ── 조립 ──
+    pos_line = ""
+    if active_positions is not None:
+        pos_line = f"\n📌 현재 포지션: {active_positions}개"
+
+    msg = (
+        f"📊 <b>일일 리포트</b> ({target_date})\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{pnl_icon} PnL <b>${total_pnl:+.2f}</b>  {wins}/{n} ({wr:.0f}%)\n"
+        f"평균 ${avg_pnl:+.2f} / 보유 {hold_str}\n"
+        f"📈 Best: {best['sym']} ${best['pnl']:+.2f}\n"
+        f"📉 Worst: {worst['sym']} ${worst['pnl']:+.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏷 <b>Tier</b>\n"
+        f"{tier_str}\n"
+        f"🔚 {exit_str}\n"
+        f"🎭 {role_str}"
+        f"{pos_line}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 <b>7일 히스토리</b>\n"
+        f"<pre>{hist_str}</pre>\n"
+        f"{cum_icon} 7일합계 <b>${cumulative:+.2f}</b>"
+    )
+    return msg
+
+
+async def send_daily_report(target_date: str = None, active_positions: int = None):
+    """일일 리포트 생성 후 텔레그램 발송."""
+    msg = generate_daily_report(target_date, active_positions)
+    await send_telegram_message(msg)

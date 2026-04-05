@@ -8,7 +8,7 @@ V10.27e Trinity 관제 봇
   - build_position_list: 간결 표시
 """
 import json, os, asyncio, requests, time as _time, csv
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from dotenv import load_dotenv
@@ -223,7 +223,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{hedge_text}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"<pre>{hist_str}</pre>\n"
-        f"/status /perf /slots /unlock /closeall"
+        f"/status /perf /report /slots /closeall"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -464,6 +464,38 @@ async def unlock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════
+# /report — 일일 리포트 (on-demand)
+# ═══════════════════════════════════════════════════════════════════
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /report         → 어제 리포트
+    /report today   → 오늘 (진행 중)
+    /report YYYY-MM-DD → 특정 날짜
+    """
+    args = context.args or []
+    if args:
+        arg = args[0].lower()
+        if arg == "today":
+            target = date.today().isoformat()
+        else:
+            target = args[0]  # YYYY-MM-DD
+    else:
+        target = (date.today() - timedelta(days=1)).isoformat()
+
+    # 현재 활성 포지션 수 (system_state.json에서 읽기)
+    s = load_state()
+    active_count = len(s.get("positions", []))
+
+    try:
+        from telegram_engine import generate_daily_report
+        msg = generate_daily_report(target, active_positions=active_count)
+    except Exception as e:
+        msg = f"⚠️ 리포트 생성 실패: {e}"
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # /log
 # ═══════════════════════════════════════════════════════════════════
 async def log_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -496,7 +528,7 @@ async def control_strategy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Main
 # ═══════════════════════════════════════════════════════════════════
 def main():
-    print("📢 Trinity V10.27e 관제 봇 가동")
+    print("📢 Trinity V10.28b 관제 봇 가동")
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -508,6 +540,7 @@ def main():
     )
     app.add_handler(CommandHandler("status",   status_command))
     app.add_handler(CommandHandler("perf",     perf_command))
+    app.add_handler(CommandHandler("report",   report_command))
     app.add_handler(CommandHandler("log",      log_command))
     app.add_handler(CommandHandler("unlock",   unlock_command))
     app.add_handler(CommandHandler("slots",    slots_command))

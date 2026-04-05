@@ -1437,6 +1437,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
             continue
+        # ★ V10.28b FIX: plan_tp1 경로로 배치된 TP1 limit이 pending이면 스킵
+        if p.get("tp1_limit_oid"):
+            continue
         # ★ V10.28b: trim 선주문 대기 중 + DCA T2+ → plan_tp1 스킵 (trim이 exit 담당)
         if p.get("trim_preorders") and int(p.get("dca_level", 1) or 1) >= 2:
             continue
