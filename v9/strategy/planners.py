@@ -672,6 +672,7 @@ def plan_open(
 
         closes_5m_all = [float(x[4]) for x in ohlcv_5m]
         ema_20_5m     = calc_ema(closes_5m_all, period=20) if len(closes_5m_all) >= 20 else 0.0
+        ema_30_5m     = calc_ema(closes_5m_all, period=30) if len(closes_5m_all) >= 30 else None  # ★ V10.27f: SKEW_E30용
 
         # MR ATR 배수: 추세 강도에 따라 스무스 조절
         # EMA 괴리율로 추세 강도 측정
@@ -737,6 +738,26 @@ def plan_open(
             _is_e30_entry = True
         else:
             final_short_trig = False
+
+        # ★ V10.27f: SKEW_E30 — 스큐 10%+ 시 light side 5m EMA30+ATR1.8 진입
+        _SKEW_E30_ATR = 1.8
+        _skew_e30_ok = _skew >= 0.10
+        if _skew_e30_ok:
+            _light_side = "sell" if _long_margin > _short_margin else "buy"
+            if _light_side == "buy" and not final_long_trig:
+                if (can_long and ema_30_5m is not None
+                        and curr_p < ema_30_5m - atr_coin * _SKEW_E30_ATR
+                        and long_trig and micro_long_ok):
+                    final_long_trig = True
+                    _is_e30_entry = True
+                    _pend_entry_type = "SKEW_E30"
+            elif _light_side == "sell" and not final_short_trig:
+                if (can_short and ema_30_5m is not None
+                        and curr_p > ema_30_5m + atr_coin * _SKEW_E30_ATR
+                        and short_trig and micro_short_ok):
+                    final_short_trig = True
+                    _is_e30_entry = True
+                    _pend_entry_type = "SKEW_E30"
 
 
         # (reason 태깅은 pending_map/entry_type_tag에서 처리)
@@ -1311,7 +1332,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
             tp1_base = max(_worst + 2.0, _floor)
 
-        tp1_thresh = tp1_base * _skew["skew_mult"]
+        # ★ V10.27f: Skew-Aware TP1 — floor 고정 + light ceiling 확장
+        # heavy side: tp1_base × skew_mult (할인 → 빠른 탈출)
+        # light side: tp1_base × (1 + skew×3) (스큐 클수록 더 끌고감, cap 1.5x)
+        _is_heavy_tp = (_skew["heavy_side"] == p.get("side", ""))
+        if _is_heavy_tp or _skew["skew"] < 0.03:
+            tp1_thresh = tp1_base * _skew["skew_mult"]
+        else:
+            _light_mult = min(1.5, 1.0 + _skew["skew"] * 3.0)
+            tp1_thresh = tp1_base * _light_mult
 
         # ★ V10.27c: DCA Trim — DCA 체결가 기준 +2% → 매도, tier-1 복귀
         _DCA_TRIM_ROI = 2.0

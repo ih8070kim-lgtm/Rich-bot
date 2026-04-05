@@ -719,7 +719,13 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 _worst = float(p.get("worst_roi", 0.0) or 0.0)
                 _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
                 tp1_base = max(_worst + 2.0, _floor)
-            tp1_thresh = tp1_base * _skew["skew_mult"]
+            # ★ V10.27f: Skew-Aware TP1 — floor 고정 + light ceiling 확장
+            _is_heavy_tp = (_skew["heavy_side"] == pos_side)
+            if _is_heavy_tp or _skew["skew"] < 0.03:
+                tp1_thresh = tp1_base * _skew["skew_mult"]
+            else:
+                _light_mult = min(1.5, 1.0 + _skew["skew"] * 3.0)
+                tp1_thresh = tp1_base * _light_mult
 
             # ROI → price 변환
             if is_long:
