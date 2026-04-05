@@ -855,7 +855,8 @@ def plan_open(
                     continue
                 else:
                     trigger_side = "sell"
-                    reason = f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI_ATR({atr_mult:.1f}x)"
+                    _e30_tag = "SKEW_E30" if _pend_entry_type == "SKEW_E30" else ("E30" if _is_e30_entry else "MR")
+                    reason = f"HF_{_e30_tag}_5mRSI_ATR({atr_mult:.1f}x)"
 
             if final_long_trig and trigger_side is None:
                 if OPEN_WAIT_NEXT_BAR:
@@ -863,13 +864,14 @@ def plan_open(
                         "armed":       True,
                         "armed_ts_ms": last_5m_ts,
                         "side":        "buy",
-                        "entry_type":  "15mE30" if _is_e30_entry else "MR",
+                        "entry_type":  _pend_entry_type or ("15mE30" if _is_e30_entry else "MR"),
                         "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)",
                     }
                     continue
                 else:
                     trigger_side = "buy"
-                    reason = f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI_ATR({atr_mult:.1f}x)"
+                    _e30_tag = "SKEW_E30" if _pend_entry_type == "SKEW_E30" else ("E30" if _is_e30_entry else "MR")
+                    reason = f"HF_{_e30_tag}_5mRSI_ATR({atr_mult:.1f}x)"
 
         if trigger_side is None:
             continue
@@ -1191,10 +1193,13 @@ def plan_dca(
             # ★ PATCH BUG3: 루프 내부에서 tier_now 기준 쿨다운 계산
             tier_cooldown = DCA_COOLDOWN_BY_TIER.get(tier_now, DCA_COOLDOWN_SEC)
             # ★ V10.27f: light side DCA 가속 (urgency 연동)
+            _dca_accel = False
             if (_dca_heavy_side
                     and p.get("side", "") != _dca_heavy_side
                     and _urg_dca["urgency"] >= 10):
+                _orig_cd = tier_cooldown
                 tier_cooldown = int(tier_cooldown * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
+                _dca_accel = True
 
             # ★ v10.11b: 이미 완료된 tier 스킵 (JSON 잔여 타겟 방어)
             _curr_dca_level = int(p.get("dca_level", 1) or 1)
@@ -1264,6 +1269,7 @@ def plan_dca(
             _dca_regime = _btc_vol_regime(snapshot)
             _force_mkt = (_dca_regime == "HIGH")
 
+            _accel_tag = f"_ACC({_orig_cd}→{tier_cooldown}s)" if _dca_accel else ""
             intents.append(Intent(
                 trace_id=_tid(),
                 intent_type=IntentType.DCA,
@@ -1271,7 +1277,7 @@ def plan_dca(
                 side=p.get("side", ""),
                 qty=qty,
                 price=curr_p,
-                reason=f"DCA_T{target['tier']}",
+                reason=f"DCA_T{target['tier']}{_accel_tag}",
                 metadata={"tier": target["tier"], "target": target,
                           "locked_regime": _dca_regime,
                           "_expected_role": p.get("role", "CORE_MR"),
@@ -1506,8 +1512,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                                 else:
                                     _post_skew = abs(_tl - (_ts - _trim_margin_delta / _tc))
                                 if _post_skew >= _skew["skew"] * 1.1:
-                                    _trim_ok = False  # trim이 스큐를 악화시킴
+                                    _trim_ok = False
+                                    print(f"[TRIM_BLOCKED] {symbol} T{dca_level} blocked trim 거부: "
+                                          f"post_skew={_post_skew:.1%} > cur={_skew['skew']:.1%}×1.1")
+                                else:
+                                    print(f"[TRIM_BYPASS] {symbol} T{dca_level} blocked trim 허용: "
+                                          f"post_skew={_post_skew:.1%} ≤ cur={_skew['skew']:.1%}×1.1, "
+                                          f"roi={roi_gross:+.1f}%")
                         if _trim_ok:
+                            _trim_tag = "BLK_" if _is_blocked else ""
                             intents.append(Intent(
                                 trace_id=_tid(),
                                 intent_type=IntentType.TP1,
@@ -1515,7 +1528,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                                 side="sell" if is_long else "buy",
                                 qty=trim_qty,
                                 price=curr_p,
-                                reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
+                                reason=f"{_trim_tag}DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
                                 metadata={"roi_gross": roi_gross, "is_trim": True,
                                           "target_tier": dca_level - 1,
                                           "skew": _skew["skew"]},
@@ -2256,6 +2269,16 @@ def generate_all_intents(
     import time as _time
     _snap_ts = _time.time()
     intents: List[Intent] = []
+
+    # ★ V10.27f: urgency 점수 로그 (5+ 시에만, 스팸 방지)
+    _urg_log = _calc_urgency(st, snapshot)
+    if _urg_log["urgency"] >= 5:
+        _prev_urg = getattr(generate_all_intents, "_last_urg", 0)
+        if abs(_urg_log["urgency"] - _prev_urg) >= 2 or _urg_log["urgency"] >= 10:
+            print(f"[URGENCY] score={_urg_log['urgency']:.1f} "
+                  f"(skew={_urg_log['skew']:.1%}, heavy_roi={_urg_log['heavy_avg_roi']:+.1f}%) "
+                  f"heavy={_urg_log['heavy_side']}")
+            generate_all_intents._last_urg = _urg_log["urgency"]
 
     _fc_intents = plan_force_close(snapshot, st, system_state)
     intents += _fc_intents

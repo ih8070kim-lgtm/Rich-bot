@@ -591,6 +591,9 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
             "slot_mr_long": 0,
             "slot_mr_short": 0,
             "slot_total": 0,
+            # ★ V10.27f: urgency 점수
+            "urgency": float(system_state.get("_urgency_score", 0)),
+            "heavy_avg_roi": float(system_state.get("_heavy_avg_roi", 0)),
         }
 
         # ★ v10.24: 슬롯 상세 정보 채우기
@@ -1884,6 +1887,37 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ── system_state.json 갱신 (텔레그램 봇 호환) ────────
             _write_system_state_compat(snapshot, system_state, st)
+
+            # ★ V10.27f: log_skew CSV 기록 (30초 주기)
+            if now - system_state.get("_last_skew_log_ts", 0) >= 30:
+                try:
+                    from v9.strategy.planners import _calc_urgency
+                    from v9.engines.hedge_core import calc_skew, _skew_stage2_enter_ts
+                    from v9.logging.logger_csv import log_skew
+                    _total_cap_log = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                    if _total_cap_log > 0:
+                        _sk, _lm, _sm = calc_skew(st, _total_cap_log)
+                        _urg_log = _calc_urgency(st, snapshot)
+                        _heavy = "buy" if _lm > _sm else "sell"
+                        _mr_log = float(getattr(snapshot, "margin_ratio", 0) or 0)
+                        _s2_min = (now - _skew_stage2_enter_ts) / 60 if _skew_stage2_enter_ts > 0 else 0
+                        _lock_cnt = sum(1 for _s in st if isinstance(st.get(_s), dict)
+                                        for _sd in ("buy", "sell")
+                                        if isinstance(get_p(st[_s], _sd), dict)
+                                        and get_p(st[_s], _sd).get("role") == "CORE_HEDGE")
+                        log_skew(
+                            skew=_sk, long_mr=_lm, short_mr=_sm,
+                            heavy_side=_heavy, lock_count=_lock_cnt,
+                            hedge_active=_lock_cnt > 0, hedge_required=_sk >= 0.15,
+                            stage2_min=_s2_min, mr=_mr_log,
+                            urgency=_urg_log["urgency"],
+                            heavy_avg_roi=_urg_log["heavy_avg_roi"],
+                        )
+                        system_state["_urgency_score"] = _urg_log["urgency"]
+                        system_state["_heavy_avg_roi"] = _urg_log["heavy_avg_roi"]
+                except Exception as _skew_log_e:
+                    print(f"[log_skew] 실패(무시): {_skew_log_e}")
+                system_state["_last_skew_log_ts"] = now
 
         except Exception as e:
             consecutive_errors = system_state.get('_consecutive_errors', 0) + 1

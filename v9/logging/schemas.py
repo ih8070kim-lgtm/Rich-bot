@@ -73,6 +73,8 @@ SKEW_COLUMNS = [
     "lock_count", "hedge_active", "hedge_required",
     "stage2_min",   # stage2 진입 후 경과 분 (0=비활성)
     "mr",           # 전체 margin_ratio
+    "urgency",      # ★ V10.27f: urgency 점수
+    "heavy_avg_roi",  # ★ V10.27f: heavy side 평균 ROI
 ]
 
 # ── log_universe ────────────────────────────────────────────────

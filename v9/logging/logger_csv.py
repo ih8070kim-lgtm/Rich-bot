@@ -266,6 +266,8 @@ def log_skew(
     hedge_required: bool,
     stage2_min: float,
     mr: float,
+    urgency: float = 0.0,
+    heavy_avg_roi: float = 0.0,
 ):
     """스큐 상태 기록 — 30초마다 호출 (log_skew.csv)."""
     from v9.config import LOG_SKEW_FILE
@@ -283,6 +285,8 @@ def log_skew(
             "hedge_required": int(hedge_required),
             "stage2_min":     round(stage2_min, 1),
             "mr":             round(mr, 4),
+            "urgency":        round(urgency, 1),
+            "heavy_avg_roi":  round(heavy_avg_roi, 2),
         },
     )
 
