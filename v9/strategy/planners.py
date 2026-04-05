@@ -1074,21 +1074,11 @@ def plan_dca(
             if _dca_side == "sell" and _dca_longs == 0 and _dca_shorts >= 3:
                 continue
 
-        # ★ V10.27f Rule B: urgency 기반 heavy side DCA 제한
-        # urgency >= 20 → heavy DCA 완전 차단
-        # urgency >= 15 → heavy T2 상한 (T3 예산 → light URGENCY_DCA로 전환)
-        # urgency >= 10 → heavy T3 상한
-        if _urg_dca["urgency"] >= 10 and _dca_heavy_side:
-            if _dca_side == _dca_heavy_side and p.get("role", "") not in _HEDGE_ROLES_SLOT:
-                _cur_dca_lv = int(p.get("dca_level", 1) or 1)
-                if _urg_dca["urgency"] >= 20:
-                    continue
-                elif _urg_dca["urgency"] >= 15:
-                    if _cur_dca_lv >= 2:
-                        continue
-                else:
-                    if _cur_dca_lv >= 3:
-                        continue
+        # ★ V10.28: heavy side DCA 차단 제거 — MR 핵심 기능(평단 압축) 보존
+        # 차단 시 T1 고립 → HARD_SL 확률↑ → 작은 돈으로 자주 짐
+        # DCA 허용 + 독립 Trim(tier별 +2% 익절)이 중간 손절 역할
+        # 스큐 완화는 진입 ATR 패널티 + TP 할인 + light block으로 충분
+        # (기존 urgency ≥10/15/20 단계별 heavy DCA 차단 삭제)
 
         # ★ V10.27: ATR LOW DCA 게이트 제거 (MR 전략은 횡보장에서 유리, DCA 제한 역효과)
 
@@ -1495,20 +1485,23 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
 
         # ★ V10.27f: DCA Trim — blocked 시에도 trim-sized 스큐 시뮬로 허용 판단
+        # ★ V10.28: 독립 DCA Trim — 각 tier가 자체 +2% 게임
+        # gate 조건(blocked/roi<tp1) 제거 → tier entry ROI만으로 판단
+        # Trim이 TP1보다 우선: T2분만 정확히 매도 → T1 독립 게임 복귀
         _DCA_TRIM_ROI = 2.0
         if (dca_level >= 2 and not _skew["full_close"]):
             _trim_ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
             _trim_ep = float(p.get(_trim_ep_keys.get(dca_level, ""), 0.0) or 0.0)
             if _trim_ep > 0:
                 _trim_roi = calc_roi_pct(_trim_ep, curr_p, p.get("side", ""), LEVERAGE)
-                if _trim_roi >= _DCA_TRIM_ROI and (_is_blocked or roi_gross < tp1_thresh):
+                if _trim_roi >= _DCA_TRIM_ROI:
                     _cum_w = sum(DCA_WEIGHTS[:dca_level])
                     _tier_w = DCA_WEIGHTS[dca_level - 1]
                     total_qty = float(p.get("amt", 0.0))
                     trim_qty = total_qty * (_tier_w / _cum_w)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
-                        # ★ blocked 상태면 trim 후 스큐 시뮬
+                        # ★ light side blocked 상태면 trim 후 스큐 시뮬 (스큐 악화 방지)
                         _trim_ok = True
                         if _is_blocked:
                             _trim_margin_delta = (trim_qty * curr_p) / LEVERAGE

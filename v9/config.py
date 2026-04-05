@@ -1,17 +1,13 @@
 """
-V9 Trinity Config  (v10.27 — 2026-04-03 수익률 개선 패치)
+V9 Trinity Config  (v10.28 — 2026-04-05 MR 전략 복원 패치)
 ===============================================
-v10.26 → v10.27 변경:
-  TP1_FIXED             고정값 {1:2.0, 2:1.5, 3:1.2, 4:0.8} (worst_roi/ATR 스케일링 제거)
-  DCA_WEIGHTS           [15,20,30,35] → [20,25,30,25] (T1↑ T4↓)
-  HARD_SL_BY_TIER       {1:-4, 2:-6, 3:-8, 4:-2} (T4 체결가 기준 빠른 SL)
-  TRAIL_GAP             0.3 → 0.5
-  INSURANCE_SH          BTC 급변 직접 감지 기반 재설계
-  _skew_tp_adjustment   heavy floor 0.5 + light 무한블록 + 매도후 스큐 시뮬
-  E30                   2슬롯 한정 A/B 테스트 (15mE30 태그)
+v10.27f → v10.28 변경:
+  Heavy DCA 차단      urgency 기반 heavy side DCA 차단 전면 제거
+  독립 DCA Trim       gate 조건 제거 → tier entry +2% ROI 달성 시 무조건 trim
+  (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.27f"  # ★ 서버 확인용: grep VERSION v9/config.py
+VERSION = "10.28"  # ★ V10.28: heavy DCA 차단 제거 + 독립 DCA Trim
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
@@ -79,7 +75,7 @@ DCA_DISTANCES = {
 #   T1=scout(15%) → T2=확인(20%) → T3=본격물타기(30%) → T4=최종구제(35%)
 #   누적: 15/35/65/100  |  T3에서 이미 65% → 강한 단가 압축 + T4 탄약 유지
 # ═══════════════════════════════════════════════════════════════════
-DCA_WEIGHTS = [20, 25, 30, 25]  # ★ V10.27: T1↑(수익원 강화), T4↓(0%WR 비중 축소)
+DCA_WEIGHTS = [25, 25, 25, 25]  # ★ V10.28: 균등 — 각 tier 독립 trim 시 정확히 50% 매도
 
 DCA_LIMIT_TIMEOUT_SEC = 60
 DCA_MIN_CORR          = 0.5
