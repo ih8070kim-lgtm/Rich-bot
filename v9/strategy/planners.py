@@ -1073,17 +1073,20 @@ def plan_dca(
             if _dca_side == "sell" and _dca_longs == 0 and _dca_shorts >= 3:
                 continue
 
-        # ★ V10.27d Rule B: 스큐 비례 heavy side DCA 단계적 제한
-        if _dca_skew >= 0.10 and _dca_heavy_side:
+        # ★ V10.27f Rule B: urgency 기반 heavy side DCA 제한
+        # urgency >= 20 → heavy DCA 완전 차단
+        # urgency >= 15 → heavy T2 상한 (T3 예산 → light URGENCY_DCA로 전환)
+        # urgency >= 10 → heavy T3 상한
+        if _urg_dca["urgency"] >= 10 and _dca_heavy_side:
             if _dca_side == _dca_heavy_side and p.get("role", "") not in _HEDGE_ROLES_SLOT:
                 _cur_dca_lv = int(p.get("dca_level", 1) or 1)
-                if _dca_skew >= 0.20:
-                    continue  # 20%+ → heavy DCA 완전 차단
-                elif _dca_skew >= SKEW_STAGE2_TRIGGER:
-                    if _cur_dca_lv >= 2:  # 15%+ → T2 상한
+                if _urg_dca["urgency"] >= 20:
+                    continue
+                elif _urg_dca["urgency"] >= 15:
+                    if _cur_dca_lv >= 2:
                         continue
                 else:
-                    if _cur_dca_lv >= 3:  # 10~15% → T3 상한
+                    if _cur_dca_lv >= 3:
                         continue
 
         # ★ V10.27: ATR LOW DCA 게이트 제거 (MR 전략은 횡보장에서 유리, DCA 제한 역효과)
