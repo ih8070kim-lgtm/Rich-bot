@@ -1260,20 +1260,58 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
         else:
-            # 부분 체결 → step=1 + trailing 전환
-            p["step"] = 1
-            p["tp1_done"] = True
-            p["tp1_price"] = avg_price
-            p["trailing_on_time"] = now
+            # ★ V10.28: DCA Trim 체결 → tier 복귀 + 새 게임
+            if info.get("is_trim"):
+                _target_tier = info.get("target_tier", max(1, int(p.get("dca_level", 2)) - 1))
+                _old_tier = int(p.get("dca_level", 1))
+                p["dca_level"] = _target_tier
+                p["worst_roi"] = 0.0
+                p["max_roi_seen"] = 0.0
+                p["pending_dca"] = None
+                p["step"] = 0
+                p["tp1_done"] = False
+                p["trailing_on_time"] = None
+                p["tp1_preorder_id"] = None
+                p["tp1_preorder_price"] = None
+                # trim된 tier들의 entry_price 클리어
+                _ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
+                for _t in range(_target_tier + 1, _old_tier + 1):
+                    if _t in _ep_keys:
+                        p[_ep_keys[_t]] = 0.0
+                # DCA targets 재생성
+                try:
+                    from v9.strategy.planners import _build_dca_targets
+                    from v9.config import DCA_WEIGHTS as _TW, GRID_DIVISOR as _TG, LEVERAGE as _TL
+                    _trim_ep = float(p.get("ep", 0) or 0)
+                    _trim_amt = float(p.get("amt", 0) or 0)
+                    _cum_w = sum(_TW[:_target_tier])
+                    _total_w = sum(_TW)
+                    _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
+                    p["dca_targets"] = [
+                        t for t in _build_dca_targets(_trim_ep, pos_side, _grid_est, p.get("locked_regime", "LOW"))
+                        if t.get("tier", 0) > _target_tier
+                    ]
+                except Exception as _te:
+                    p["dca_targets"] = []
+                    print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
+                print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
+                      f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
+            else:
+                # 부분 체결 → step=1 + trailing 전환
+                p["step"] = 1
+                p["tp1_done"] = True
+                p["tp1_price"] = avg_price
+                p["trailing_on_time"] = now
             dca = int(p.get("dca_level", 1) or 1)
             if pos_side == "buy":
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
-            print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
-                  f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
-                  f"→ trailing(잔량={p['amt']:.1f})")
+            if not info.get("is_trim"):
+                print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
+                      f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
+                      f"→ trailing(잔량={p['amt']:.1f})")
 
 
 async def _main_loop(ex_init, dry_run: bool):
