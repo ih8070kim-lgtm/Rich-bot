@@ -42,7 +42,7 @@ def apply_order_results(
     """주문 결과를 포지션 북에 반영."""
     now = time.time()
 
-    # ★ CORE 포지션을 HEDGE보다 먼저 처리 — source_sl_orphan 플래그 정합성 보장
+    # ★ CORE 포지션을 HEDGE보다 먼저 처리
     def _apply_order_key(r):
         _i = intents_map.get(r.trace_id)
         if _i and (_i.metadata or {}).get("role") == "HEDGE":
@@ -121,27 +121,20 @@ def apply_order_results(
                 "dca_level":        meta.get("dca_level", 1),
                 "dca_targets":      meta.get("dca_targets", []),
                 "max_roi_seen":     0.0,
-                "worst_roi":        0.0,  # ★ v10.14c: min_roi 반등 TP1용
+                "worst_roi":        0.0,
                 "pending_dca":      None,
                 "trailing_on_time": None,
                 "hedge_mode":       False,
-                "open_cooldown_until": now + 15,
                 "tp1_done":         False,
                 "tp2_done":         False,
                 "entry_type":       meta.get("entry_type", "MR"),
                 "role":             meta.get("role", "CORE_MR"),
                 "source_sym":       meta.get("source_sym", ""),
                 "asym_forced":      meta.get("asym_forced", False),
-                "last_hedge_exit_p":    0.0,
-                "last_hedge_exit_side": "",
-                "hedge_rolling_count":  0,
-                "source_sl_orphan":     False,
-                "locked_regime":        meta.get("locked_regime", "LOW"),
-                "hedge_entry_price":    meta.get("hedge_entry_price", 0.0),
-                "t5_entry_price":       0.0,
-                "sh_trigger":           False,
-                # ★ v10.10: INSURANCE_SH 타임컷
-                "insurance_timecut":    meta.get("insurance_timecut", 0),
+                "locked_regime":    meta.get("locked_regime", "LOW"),
+                "hedge_entry_price": meta.get("hedge_entry_price", 0.0),
+                "t5_entry_price":   0.0,
+                "insurance_timecut": meta.get("insurance_timecut", 0),
             })
             _log_pos(result.trace_id, sym, get_p(sym_st, intent.side), snapshot)
 
@@ -208,8 +201,6 @@ def apply_order_results(
                     p["t3_entry_price"] = avg_px
                 if tier == 4:
                     p["t4_entry_price"] = avg_px
-                if tier >= 5:
-                    p.setdefault("hedge_rolling_count", 0)
                 p["pending_dca"] = None
                 # ★ v10.15: DCA 체결 → insurance trigger 클리어 (정상 경로 도달)
                 p["insurance_sh_trigger"] = None
@@ -379,12 +370,6 @@ def apply_order_results(
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
             # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE/CORE_HEDGE에 orphan 플래그 세팅
-            if p and _closing_role != "HEDGE":
-                _opp_side_orphan = "sell" if pos_side == "buy" else "buy"
-                _opp_p_orphan = get_p(st.get(sym, {}), _opp_side_orphan)
-                if isinstance(_opp_p_orphan, dict) and _opp_p_orphan.get("role") in ("HEDGE", "CORE_HEDGE"):
-                    _opp_p_orphan["source_sl_orphan"] = True
-                    print(f"[strategy_core] {sym} CORE 청산 → {_opp_p_orphan.get('role')} source_sl_orphan 세팅")
             # ★ V10.28b: 포지션 청산 전 trim 선주문 취소 큐
             if p and p.get("trim_preorders"):
                 for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():

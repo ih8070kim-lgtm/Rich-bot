@@ -78,7 +78,6 @@ def plan_hedge_exit(
                     p["step"] = 1
                     p["tp1_done"] = True
                     p["trailing_on_time"] = time.time()
-                    p["source_sl_orphan"] = True
                     print(f"[HEDGE] {symbol} SRC_GONE 수익({hedge_roi:+.1f}%) → trailing")
             else:
                 force = True
@@ -134,7 +133,4 @@ def apply_hedge_close(p: dict, sym: str, avg_px: float, st: dict, snapshot, now:
                 print(f"[HH_GUARD] {sym} 소스 side 불일치 — 스킵")
                 return
 
-            _src_p["hedge_rolling_count"] = _src_p.get("hedge_rolling_count", 0) + 1
             _exit_px = float(avg_px if avg_px > 0 else (snapshot.all_prices or {}).get(sym, 0.0))
-            _src_p["last_hedge_exit_p"]    = _exit_px
-            _src_p["last_hedge_exit_side"] = p.get("side", "")

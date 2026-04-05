@@ -434,10 +434,6 @@ def _calc_urgency(st: Dict, snapshot) -> dict:
     }
 
 
-# ★ V10.22: plan_heavy_rebalance 삭제 — _skew_tp_adjustment()의 full_close로 대체
-_heavy_rebalance_deleted = True  # 참조 방지용 마커
-
-
 # ═════════════════════════════════════════════════════════════════
 # 1h 추세 필터  (EMA20 vs EMA50)
 # ═════════════════════════════════════════════════════════════════
