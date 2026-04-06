@@ -697,6 +697,27 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             dca_level = int(p.get("dca_level", 1) or 1)
             is_long = (pos_side == "buy")
 
+            # ★ V10.29: 최소 슬롯 유지 — 방향별 1개 이하면 선주문 차단
+            _ms_longs = _ms_shorts = 0
+            for _ms_s, _ms_ss in st.items():
+                if not isinstance(_ms_ss, dict): continue
+                for _ms_side, _ms_p in iter_positions(_ms_ss):
+                    if isinstance(_ms_p, dict) and _ms_p.get("role", "") not in (
+                        "INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
+                        if _ms_side == "buy": _ms_longs += 1
+                        else: _ms_shorts += 1
+            if is_long and _ms_longs <= 1:
+                p["min_slot_hold"] = True
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+            if not is_long and _ms_shorts <= 1:
+                p["min_slot_hold"] = True
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
+            p.pop("min_slot_hold", None)
+
             # skew 블록 체크
             _skew = _skew_tp_adjustment(pos_side, st, snapshot)
             if _skew["blocked"]:
@@ -1192,6 +1213,14 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         from v9.execution.position_book import set_pending_entry
         set_pending_entry(sym_st, side, None)
+        # ★ V10.29: 새 진입 → 같은 방향 min_slot_hold 해제
+        for _ms_sym, _ms_ss in st.items():
+            if not isinstance(_ms_ss, dict) or _ms_sym == sym:
+                continue
+            _ms_p = get_p(_ms_ss, side)
+            if isinstance(_ms_p, dict) and _ms_p.get("min_slot_hold"):
+                _ms_p["min_slot_hold"] = False
+                print(f"[MIN_SLOT] {_ms_sym} {side} 교체 해제 ← 새 진입 {sym}")
 
     elif itype == "DCA":
         p = get_p(sym_st, side)
@@ -1462,9 +1491,16 @@ async def _place_trim_preorders(ex, st, snapshot):
             ps = "LONG" if pos_side == "buy" else "SHORT"
 
             try:
+                # ★ V10.28b FIX: 정밀도 라운딩 (Binance LOT_SIZE/PRICE_FILTER 통과)
+                safe_trim_qty = float(ex.amount_to_precision(sym, trim_qty))
+                safe_trim_price = float(ex.price_to_precision(sym, trim_price))
+                if safe_trim_qty <= 0 or safe_trim_price <= 0:
+                    print(f"[TRIM_SKIP] {sym} T{tier} precision → 0")
+                    p.pop("trim_to_place", None)
+                    continue
                 order = await asyncio.to_thread(
                     ex.create_order,
-                    sym, "limit", order_side, trim_qty, trim_price,
+                    sym, "limit", order_side, safe_trim_qty, safe_trim_price,
                     params={"positionSide": ps, "reduceOnly": True}
                 )
                 oid = str(order.get("id", ""))
@@ -1488,11 +1524,11 @@ async def _place_trim_preorders(ex, st, snapshot):
                     }
                     # position에 trim 주문 기록
                     p.setdefault("trim_preorders", {})[tier] = {
-                        "oid": oid, "price": trim_price, "qty": trim_qty,
+                        "oid": oid, "price": safe_trim_price, "qty": safe_trim_qty,
                     }
                     # ★ 선주문 시 텔레그램 알림 없음 (체결 시만)
                     print(f"[TRIM_PLACED] {sym} {pos_side} T{tier}: "
-                          f"{order_side} {trim_qty:.4f}@${trim_price:.4f} oid={oid}")
+                          f"{order_side} {safe_trim_qty}@${safe_trim_price:.4f} oid={oid}")
                 else:
                     print(f"[TRIM_FAIL] {sym} T{tier}: 주문 ID 없음")
             except Exception as e:

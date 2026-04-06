@@ -149,6 +149,14 @@ def apply_order_results(
                 "insurance_timecut": meta.get("insurance_timecut", 0),
             })
             _log_pos(result.trace_id, sym, get_p(sym_st, intent.side), snapshot)
+            # ★ V10.29: 새 진입 → 같은 방향 min_slot_hold 해제 (교체 완료)
+            for _ms_sym, _ms_ss in st.items():
+                if not isinstance(_ms_ss, dict) or _ms_sym == sym:
+                    continue
+                _ms_p = get_p(_ms_ss, intent.side)
+                if isinstance(_ms_p, dict) and _ms_p.get("min_slot_hold"):
+                    _ms_p["min_slot_hold"] = False
+                    print(f"[MIN_SLOT] {_ms_sym} {intent.side} 교체 해제 ← 새 진입 {sym}")
 
         # ── DCA ─────────────────────────────────────────────────
         elif itype == IntentType.DCA:

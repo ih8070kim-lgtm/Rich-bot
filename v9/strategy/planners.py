@@ -677,9 +677,18 @@ def plan_open(
         adj_rsi5_os = max(20, rsi5_os - shift)
         adj_rsi5_ob = min(80, rsi5_ob + shift)
 
-        # ★ V10.27f: urgency 높을 때 숏 RSI 문턱 완화
+        # ★ V10.29 FIX (B1): urgency 높을 때 heavy side 진입 강화, light side 완화
+        # 기존: 무조건 숏 완화 → 숏이 heavy일 때 스큐 악화 악순환
+        # 수정: heavy side 진입을 어렵게, light side 진입을 쉽게
         if _urg_open["urgency"] >= 10:
-            adj_rsi5_ob = max(55, adj_rsi5_ob - 5)  # 65→60 (urg≥10)
+            if _urg_open["heavy_side"] == "sell":
+                # 숏 과다 → 숏 진입 어렵게(OB↑), 롱 진입 쉽게(OS↑)
+                adj_rsi5_ob = min(80, adj_rsi5_ob + 5)  # 65→70
+                adj_rsi5_os = min(50, adj_rsi5_os + 5)  # 35→40
+            elif _urg_open["heavy_side"] == "buy":
+                # 롱 과다 → 롱 진입 어렵게(OS↓), 숏 진입 쉽게(OB↓)
+                adj_rsi5_os = max(20, adj_rsi5_os - 5)  # 35→30
+                adj_rsi5_ob = max(55, adj_rsi5_ob - 5)  # 65→60
 
         # ── (2-b) BTC 변동성 레짐 보정 — ATR 배수 레짐별 조정 (루프 밖에서 계산됨)
 
@@ -1472,6 +1481,18 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             p["trailing_on_time"] = time.time()
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
+
+        # ★ V10.29: 최소 슬롯 유지 — 방향별 1개 이하면 TP1 차단 (교체 대기)
+        # TP1 안 함 → step=0 유지 → trailing 안 됨 → DCA는 정상 → 새 진입 오면 해제
+        _tp1_longs, _tp1_shorts = _count_active_by_side(st)
+        if is_long and _tp1_longs <= 1:
+            p["min_slot_hold"] = True
+            continue
+        if not is_long and _tp1_shorts <= 1:
+            p["min_slot_hold"] = True
+            continue
+        # 슬롯 2개 이상 → hold 해제
+        p.pop("min_slot_hold", None)
 
         # ★ V10.27: Skew — full_close/blocked 판단
         _skew = _skew_tp_adjustment(p.get("side", ""), st, snapshot)

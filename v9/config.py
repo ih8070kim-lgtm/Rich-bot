@@ -134,7 +134,7 @@ SYM_MIN_QTY_DEFAULT = 1.0
 # ═══════════════════════════════════════════════════════════════════
 # OPEN / CORR
 # ═══════════════════════════════════════════════════════════════════
-HEDGE_OPEN_CORR_MIN     = 0.6
+HEDGE_OPEN_CORR_MIN     = 0.40   # ★ V10.29: 0.6→0.40 (진입과 동일 — FET 헷지 15회 REJECT 방지)
 OPEN_CORR_MIN           = 0.40   # ★ V10.27f: 0.50→0.40 (숏 진입 확대)
 HEDGE_STAGE1_MULTIPLIER = 1.4
 HEDGE_STAGE2_MULTIPLIER = 2.4
