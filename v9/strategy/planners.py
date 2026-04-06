@@ -1075,13 +1075,9 @@ def plan_dca(
         if is_hedge_dca_blocked(p, snapshot, symbol):
             continue
 
-        # ★ V10.18 Rule A: 반대=0 AND 이쪽≥3 → DCA도 차단 (skew 악화 방지)
-        _dca_side = p.get("side", "")
-        if p.get("role", "") not in _HEDGE_ROLES_SLOT:
-            if _dca_side == "buy" and _dca_shorts == 0 and _dca_longs >= 3:
-                continue
-            if _dca_side == "sell" and _dca_longs == 0 and _dca_shorts >= 3:
-                continue
+        # ★ V10.29b: DCA 슬롯 밸런스 게이트 제거
+        # DCA는 기존 포지션 평단 개선이므로 슬롯 균형과 무관하게 허용
+        # 스큐 완화는 진입 차단 + TP 할인으로 충분
 
         # ★ V10.28: heavy side DCA 차단 제거 — MR 핵심 기능(평단 압축) 보존
         # 차단 시 T1 고립 → HARD_SL 확률↑ → 작은 돈으로 자주 짐

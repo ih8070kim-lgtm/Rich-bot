@@ -1006,7 +1006,8 @@ async def _manage_pending_limits(ex, st, snapshot):
 
         if status.startswith("_"):
             # 타임아웃 체크 — 등록 후 5분 경과
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC:
+            # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim"):
                 cancel_list.append((oid, info))
             continue
 
@@ -1061,11 +1062,19 @@ async def _manage_pending_limits(ex, st, snapshot):
                         _cx_p["tp1_preorder_price"] = None
                         _cx_p["tp1_preorder_ts"] = None
                         print(f"[TP1_PRE] {sym} 외부취소 → tp1_preorder_id 클리어")
+                    # ★ V10.29b FIX: trim 선주문 외부 취소 → trim_preorders 정리
+                    if info.get("is_trim"):
+                        _cx_tier = info.get("tier", 0)
+                        _trp = _cx_p.get("trim_preorders", {})
+                        if _cx_tier in _trp:
+                            _trp.pop(_cx_tier, None)
+                            print(f"[TRIM_CLEANUP] {sym} T{_cx_tier} 외부취소 → trim_preorders 정리")
             print(f"[PENDING_LIMIT] {sym} 외부 취소")
 
         elif status == "open":
             # 타임아웃 체크
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC:
+            # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim"):
                 cancel_list.append((oid, info))
 
     # ── Phase 3: 타임아웃 취소 (병렬) ──
@@ -1132,6 +1141,13 @@ async def _manage_pending_limits(ex, st, snapshot):
                         _cancel_p["tp1_preorder_price"] = None
                         _cancel_p["tp1_preorder_ts"] = None
                         print(f"[TP1_PRE] {info['sym']} 타임아웃/취소 → tp1_preorder_id 클리어")
+                    # ★ V10.29b FIX: trim 선주문 타임아웃 → trim_preorders 정리
+                    if info.get("is_trim"):
+                        _cancel_tier = info.get("tier", 0)
+                        _cancel_trp = _cancel_p.get("trim_preorders", {})
+                        if _cancel_tier in _cancel_trp:
+                            _cancel_trp.pop(_cancel_tier, None)
+                            print(f"[TRIM_CLEANUP] {info['sym']} T{_cancel_tier} 타임아웃 → trim_preorders 정리 (plan_tp1 DCA_TRIM 복귀)")
 
 
 def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
