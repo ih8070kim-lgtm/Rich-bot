@@ -2401,15 +2401,33 @@ def plan_counter(
             if prev_pos is None:
                 continue
 
-            # 롱: 구름 위로 돌파 + 전환선 > 기준선
-            # 숏: 구름 아래로 돌파 + 전환선 < 기준선
+            # ── 15m 2봉 가속도 확인 ──
+            def _accel_15m(bars, direction):
+                """직전 2봉 연속 방향 확인. direction='up'/'down'."""
+                if len(bars) < 4:
+                    return False
+                b1 = bars[-3]  # 2봉 전 (완성)
+                b2 = bars[-2]  # 직전 봉 (완성)
+                if direction == "up":
+                    return float(b1[4]) > float(b1[1]) and float(b2[4]) > float(b2[1])
+                return float(b1[4]) < float(b1[1]) and float(b2[4]) < float(b2[1])
+
+            # ── 진입 조건: (A) 구름 돌파 전환 OR (B) 이미 구름 밖 + 가속도 ──
             breakout = False
-            if opp_side == "buy" and cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
-                if ich["tenkan"] > ich["kijun"]:
-                    breakout = True
-            elif opp_side == "sell" and cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
-                if ich["tenkan"] < ich["kijun"]:
-                    breakout = True
+            _accel_tag = ""
+
+            if opp_side == "buy" and ich["tenkan"] > ich["kijun"]:
+                if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
+                    breakout = True  # (A) 전환 돌파
+                elif cur_pos == "ABOVE" and _accel_15m(ohlcv_15m, "up"):
+                    breakout = True  # (B) 이미 구름 위 + 상승 가속
+                    _accel_tag = "+ACC"
+            elif opp_side == "sell" and ich["tenkan"] < ich["kijun"]:
+                if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
+                    breakout = True  # (A) 전환 돌파
+                elif cur_pos == "BELOW" and _accel_15m(ohlcv_15m, "down"):
+                    breakout = True  # (B) 이미 구름 아래 + 하락 가속
+                    _accel_tag = "+ACC"
 
             if not breakout:
                 continue
@@ -2447,7 +2465,7 @@ def plan_counter(
                 qty=qty,
                 price=curr_p,
                 reason=f"COUNTER_ICH(src={sym}_{pos_side},roi={roi:+.1f}%,"
-                       f"cloud={prev_pos}→{cur_pos})",
+                       f"cloud={prev_pos}→{cur_pos}{_accel_tag})",
                 metadata={
                     "atr": 0.0,
                     "dca_targets": _dca_targets,
@@ -2464,7 +2482,7 @@ def plan_counter(
             cnt_syms.add(sym)
 
             print(f"[COUNTER_ICH] {sym} {opp_side} ← MR {pos_side} ROI={roi:+.1f}% "
-                  f"cloud={prev_pos}→{cur_pos} TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
+                  f"cloud={prev_pos}→{cur_pos}{_accel_tag} TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
                   f"size=${cnt_size:.1f}")
 
     return intents
