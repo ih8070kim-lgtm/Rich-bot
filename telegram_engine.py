@@ -293,6 +293,8 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
                 _badge = "🛡"
             elif _role == "INSURANCE_SH":
                 _badge = "🩹"
+            elif _meta.get("entry_type") == "COUNTER":
+                _badge = "⚡"
             else:
                 _badge = "🔁"
             await send_telegram_message(
