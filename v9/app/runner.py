@@ -1296,10 +1296,11 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         # ★ V10.28b: Trim 선주문 플래그
         if tier >= 2 and tier <= 4:
-            from v9.config import TRIM_PREORDER_ROI
+            from v9.config import TRIM_PREORDER_ROI, TRIM_PREORDER_ROI_BY_TIER
             _pos_side = side  # DCA side = position side
-            _trim_price = avg_price * (1 + TRIM_PREORDER_ROI / LEVERAGE / 100) if _pos_side == "buy" \
-                else avg_price * (1 - TRIM_PREORDER_ROI / LEVERAGE / 100)
+            _trim_roi = TRIM_PREORDER_ROI_BY_TIER.get(tier, TRIM_PREORDER_ROI)
+            _trim_price = avg_price * (1 + _trim_roi / LEVERAGE / 100) if _pos_side == "buy" \
+                else avg_price * (1 - _trim_roi / LEVERAGE / 100)
             _cum_w = sum(DCA_WEIGHTS[:tier])
             _tier_w = DCA_WEIGHTS[tier - 1]
             _trim_qty = float(p["amt"]) * (_tier_w / _cum_w)

@@ -245,6 +245,7 @@ from v9.config import (
     SKEW_STAGE2_TRIGGER,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
     DCA_ENTRY_BASED, DCA_ENTRY_ROI, TRIM_PREORDER_ROI,
+    DCA_ENTRY_ROI_BY_TIER,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1206,7 +1207,9 @@ def plan_dca(
                 if _prev_ep <= 0:
                     continue
                 _entry_roi = calc_roi_pct(_prev_ep, curr_p, p.get("side", ""), LEVERAGE)
-                is_hit = _entry_roi <= DCA_ENTRY_ROI
+                # ★ V10.29: 티어별 DCA 거리 (T3/T4 두배)
+                _dca_roi_thresh = DCA_ENTRY_ROI_BY_TIER.get(tier_now, DCA_ENTRY_ROI)
+                is_hit = _entry_roi <= _dca_roi_thresh
             else:
                 roi_trig = DCA_ROI_TRIGGERS.get(tier_now, -8.0)
                 is_hit = roi_now <= roi_trig
@@ -1504,15 +1507,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
-        # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
+        # ★ V10.29: T1~T2 고정값, T3~T4 worst_roi 탈출 (T3/T4 두배)
         from v9.config import TP1_FIXED
         if dca_level <= 2:
             tp1_base = TP1_FIXED.get(dca_level, 2.0)
         else:
-            # T3/T4: worst_roi + 2.0 반등, tier별 floor
+            # T3/T4: worst_roi + TP1_FIXED 반등, floor = TP1_FIXED
             _worst = float(p.get("worst_roi", 0.0) or 0.0)
-            _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
-            tp1_base = max(_worst + 2.0, _floor)
+            _rebound = TP1_FIXED.get(dca_level, 2.0)
+            tp1_base = max(_worst + _rebound, _rebound)
 
         # ★ V10.27f: Urgency-Aware TP1 — heavy 할인 + light ceiling (점수 연동)
         _is_heavy_tp = (_urg["heavy_side"] == p.get("side", ""))

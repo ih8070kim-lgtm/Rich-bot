@@ -83,10 +83,14 @@ DCA_MIN_CORR          = 0.5
 # ★ V10.28b: Entry 기준 DCA — 이전 tier 체결가에서 X% 하락 시 트리거
 # EP 기준이 아닌 실제 가격 간격 유지 (EP 압축 방지)
 DCA_ENTRY_BASED   = True
-DCA_ENTRY_ROI     = -1.8   # 이전 tier entry에서 -1.8% ROI (= -0.6% raw)
+DCA_ENTRY_ROI     = -1.8   # 레거시 호환 (T2 기본값)
+# ★ V10.29: T3/T4 DCA 거리 두배 — 노이즈 DCA 방지
+DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6, 4: -3.6}
 
 # ★ V10.28b: Trim 선주문 — DCA 체결 즉시 tier entry + X% 에 매도 선주문
-TRIM_PREORDER_ROI = 2.0    # tier entry에서 +2.0% ROI (= +0.67% raw)
+TRIM_PREORDER_ROI = 2.0    # 레거시 호환 (T2 기본값)
+# ★ V10.29: T3/T4 익절 두배
+TRIM_PREORDER_ROI_BY_TIER = {1: 2.0, 2: 2.0, 3: 4.0, 4: 4.0}
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 600, 3: 300, 4: 120}
@@ -99,10 +103,12 @@ TP1_PCT = 1.8   # ★ v10.8: 방어형 — 빠른 확정 (레거시, 미사용)
 
 # ★ V10.27: TP1 고정 threshold (ROI%) — worst_roi/ATR 스케일링 전부 제거
 # T1~T3: 고정값. T4만 worst_roi+2.0 (plan_tp1에서 처리)
-TP1_FIXED = {1: 2.0, 2: 1.5, 3: 1.2, 4: 0.8}
+# ★ V10.29: T3/T4 TP 두배
+TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}
 
 # ★ V10.27c: HARD_SL = DCA 트리거 -1% / T4는 체결가 -2%
-HARD_SL_BY_TIER = {1: -4.0, 2: -6.0, 3: -8.0, 4: -2.0}
+# ★ V10.29: SL = 다음 DCA 트리거 - 2%
+HARD_SL_BY_TIER = {1: -3.8, 2: -5.6, 3: -5.6, 4: -2.0}
 # T1~T3: 평균 EP 기준 / T4: T4 체결가 기준 (planners에서 분기)
 
 # ★ V10.26b 레거시 (plan_tp1에서 미사용, _manage_tp1_preorders 호환용)
