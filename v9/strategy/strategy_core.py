@@ -240,13 +240,9 @@ def apply_order_results(
                 p["max_roi_seen"] = 0.0
                 # ★ V10.28b: Trim 선주문 플래그 — runner가 실제 주문
                 if tier >= 2 and tier <= 4:
-                    from v9.config import TRIM_PREORDER_ROI, TRIM_PREORDER_ROI_BY_TIER, LEVERAGE as _TRIM_LEV, DCA_WEIGHTS as _DW_TRIM
-                    _trim_roi_pct = TRIM_PREORDER_ROI_BY_TIER.get(tier, TRIM_PREORDER_ROI)
-                    _trim_price = avg_px * (1 + _trim_roi_pct / _TRIM_LEV / 100) if pos_side == "buy" \
-                        else avg_px * (1 - _trim_roi_pct / _TRIM_LEV / 100)
-                    _cum_w = sum(_DW_TRIM[:tier])
-                    _tier_w = _DW_TRIM[tier - 1]
-                    _trim_qty = float(p["amt"]) * (_tier_w / _cum_w)
+                    from v9.config import calc_trim_price, calc_trim_qty
+                    _trim_price = calc_trim_price(avg_px, pos_side, tier)
+                    _trim_qty = calc_trim_qty(float(p["amt"]), tier)
                     p.setdefault("trim_preorders", {})
                     p["trim_to_place"] = {
                         "tier": tier,

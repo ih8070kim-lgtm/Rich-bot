@@ -246,6 +246,7 @@ from v9.config import (
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
     DCA_ENTRY_BASED, DCA_ENTRY_ROI, TRIM_PREORDER_ROI, TRIM_PREORDER_ROI_BY_TIER,
     DCA_ENTRY_ROI_BY_TIER,
+    calc_trim_qty, calc_tp1_thresh, get_sl_entry,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1496,23 +1497,10 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
         # ★ V10.29: T1~T2 고정값, T3~T4 worst_roi 탈출 (T3/T4 두배)
-        from v9.config import TP1_FIXED
-        if dca_level <= 2:
-            tp1_base = TP1_FIXED.get(dca_level, 2.0)
-        else:
-            # T3/T4: worst_roi + TP1_FIXED 반등, floor = TP1_FIXED
-            _worst = float(p.get("worst_roi", 0.0) or 0.0)
-            _rebound = TP1_FIXED.get(dca_level, 2.0)
-            tp1_base = max(_worst + _rebound, _rebound)
-
-        # ★ V10.27f: Urgency-Aware TP1 — heavy 할인 + light ceiling (점수 연동)
+        # ★ V10.29: TP1 threshold — 공유 함수 사용
+        _worst = float(p.get("worst_roi", 0.0) or 0.0)
         _is_heavy_tp = (_urg["heavy_side"] == p.get("side", ""))
-        if _urg["urgency"] < 3:
-            tp1_thresh = tp1_base
-        elif _is_heavy_tp:
-            tp1_thresh = tp1_base * max(0.5, 1.0 - _urg["urgency"] * 0.03)
-        else:
-            tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
+        tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp)
 
         # ★ V10.27f: DCA Trim — blocked 시에도 trim-sized 스큐 시뮬로 허용 판단
         # ★ V10.28: 독립 DCA Trim — 각 tier가 자체 +X% 게임
@@ -1526,10 +1514,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 # ★ V10.29: tier별 trim ROI config 반영
                 _DCA_TRIM_ROI = TRIM_PREORDER_ROI_BY_TIER.get(dca_level, TRIM_PREORDER_ROI)
                 if _trim_roi >= _DCA_TRIM_ROI:
-                    _cum_w = sum(DCA_WEIGHTS[:dca_level])
-                    _tier_w = DCA_WEIGHTS[dca_level - 1]
                     total_qty = float(p.get("amt", 0.0))
-                    trim_qty = total_qty * (_tier_w / _cum_w)
+                    trim_qty = calc_trim_qty(total_qty, dca_level)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
                         # ★ light side blocked 상태면 trim 후 스큐 시뮬 (스큐 악화 방지)
@@ -1878,20 +1864,8 @@ def plan_force_close(
             from v9.config import HARD_SL_BY_TIER
             _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
 
-            # ★ V10.29: DCA와 동일 기준점 — 다음 DCA 트리거와 같은 base에서 SL
-            #   T1: original_ep (T2 DCA도 original_ep 기준)
-            #   T2: t2_entry   (T3 DCA가 t2_entry 기준)
-            #   T3: t3_entry   (T4 DCA가 t3_entry 기준)
-            #   T4: t4_entry   (마지막 tier — 자기 entry 기준)
-            _sl_entry_map = {
-                1: float(p.get("original_ep", p.get("ep", 0)) or 0),
-                2: float(p.get("t2_entry_price", 0) or 0),
-                3: float(p.get("t3_entry_price", 0) or 0),
-                4: float(p.get("t4_entry_price", 0) or 0),
-            }
-            _sl_ep = _sl_entry_map.get(_dca_lv_sl, 0)
-            if _sl_ep <= 0:
-                _sl_ep = float(p.get("ep", 0.0) or 0.0)
+            # ★ V10.29: 공유 함수 — DCA와 동일 기준점
+            _sl_ep = get_sl_entry(p, _dca_lv_sl)
 
             if _sl_ep > 0:
                 _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
@@ -2354,7 +2328,7 @@ def plan_counter(
 
     intents: List[Intent] = []
     now = time.time()
-    prices = snapshot.prices if hasattr(snapshot, 'prices') else {}
+    prices = snapshot.all_prices or {}
 
     # 현재 COUNTER entry_type 포지션 수
     cnt_active = 0

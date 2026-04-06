@@ -324,3 +324,56 @@ PULLBACK_ATR_MAX_MULT = 1.6  # 최대 배수 — 추세 시 상한 (얕은 눌�
 TREND_FILTER_ENABLED  = False   # ★ v9.9: 1h 추세 차단 필터 제거
 TREND_FILTER_DEADZONE = 0.005
 TREND_FILTER_MIN_BARS = 50
+
+
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.29: 공유 계산 함수 — strategy_core / runner / planners 통합
+#   중복 구현으로 인한 불일치 방지
+# ═════════════════════════════════════════════════════════════════
+
+def calc_trim_price(entry_px: float, side: str, tier: int) -> float:
+    """Trim 선주문 목표 가격."""
+    roi_pct = TRIM_PREORDER_ROI_BY_TIER.get(tier, TRIM_PREORDER_ROI)
+    if side == "buy":
+        return entry_px * (1 + roi_pct / LEVERAGE / 100)
+    return entry_px * (1 - roi_pct / LEVERAGE / 100)
+
+
+def calc_trim_qty(total_amt: float, tier: int) -> float:
+    """Trim 매도 수량 — 현재 tier weight 비중분."""
+    cum_w = sum(DCA_WEIGHTS[:tier])
+    tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
+    if cum_w <= 0:
+        return 0.0
+    return total_amt * (tier_w / cum_w)
+
+
+def calc_tp1_thresh(dca_level: int, worst_roi: float,
+                    urgency: float, is_heavy: bool) -> float:
+    """TP1 임계값 (ROI %) — urgency 보정 포함."""
+    if dca_level <= 2:
+        tp1_base = TP1_FIXED.get(dca_level, 2.0)
+    else:
+        _rebound = TP1_FIXED.get(dca_level, 2.0)
+        tp1_base = max(worst_roi + _rebound, _rebound)
+
+    if urgency < 3:
+        return tp1_base
+    elif is_heavy:
+        return tp1_base * max(0.5, 1.0 - urgency * 0.03)
+    else:
+        return tp1_base * min(1.5, 1.0 + urgency * 0.025)
+
+
+def get_sl_entry(p: dict, tier: int) -> float:
+    """HARD_SL 기준 entry price — DCA 트리거와 동일 참조점."""
+    _sl_entry_map = {
+        1: float(p.get("original_ep", p.get("ep", 0)) or 0),
+        2: float(p.get("t2_entry_price", 0) or 0),
+        3: float(p.get("t3_entry_price", 0) or 0),
+        4: float(p.get("t4_entry_price", 0) or 0),
+    }
+    result = _sl_entry_map.get(tier, 0)
+    if result <= 0:
+        result = float(p.get("ep", 0.0) or 0.0)
+    return result

@@ -727,20 +727,11 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             # TP1 target 계산
             # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
             _worst = 0.0
-            if dca_level <= 2:
-                tp1_base = TP1_FIXED.get(dca_level, 2.0)
-            else:
-                _worst = float(p.get("worst_roi", 0.0) or 0.0)
-                _floor = 0.3 if dca_level == 3 else TP1_FIXED.get(4, 0.8)
-                tp1_base = max(_worst + 2.0, _floor)
-            # ★ V10.27f: Urgency-Aware TP1
+            # ★ V10.29: TP1 threshold — 공유 함수 사용
+            from v9.config import calc_tp1_thresh
+            _worst = float(p.get("worst_roi", 0.0) or 0.0)
             _is_heavy_tp = (_urg["heavy_side"] == pos_side)
-            if _urg["urgency"] < 3:
-                tp1_thresh = tp1_base
-            elif _is_heavy_tp:
-                tp1_thresh = tp1_base * max(0.5, 1.0 - _urg["urgency"] * 0.03)
-            else:
-                tp1_thresh = tp1_base * min(1.5, 1.0 + _urg["urgency"] * 0.025)
+            tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp)
 
             # ROI → price 변환
             if is_long:
@@ -1295,14 +1286,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         # ★ V10.28b: Trim 선주문 플래그
         if tier >= 2 and tier <= 4:
-            from v9.config import TRIM_PREORDER_ROI, TRIM_PREORDER_ROI_BY_TIER
+            from v9.config import calc_trim_price, calc_trim_qty
             _pos_side = side  # DCA side = position side
-            _trim_roi = TRIM_PREORDER_ROI_BY_TIER.get(tier, TRIM_PREORDER_ROI)
-            _trim_price = avg_price * (1 + _trim_roi / LEVERAGE / 100) if _pos_side == "buy" \
-                else avg_price * (1 - _trim_roi / LEVERAGE / 100)
-            _cum_w = sum(DCA_WEIGHTS[:tier])
-            _tier_w = DCA_WEIGHTS[tier - 1]
-            _trim_qty = float(p["amt"]) * (_tier_w / _cum_w)
+            _trim_price = calc_trim_price(avg_price, _pos_side, tier)
+            _trim_qty = calc_trim_qty(float(p["amt"]), tier)
             p.setdefault("trim_preorders", {})
             p["trim_to_place"] = {
                 "tier": tier,
