@@ -117,7 +117,7 @@ HARD_SL_BY_TIER = {1: -3.8, 2: -5.6, 3: -5.6, 4: -2.0}
 COUNTER_ENABLED       = True
 COUNTER_ROI_THRESH    = -1.0    # MR ROI%가 이 이하이면 트리거
 COUNTER_SIZE_RATIO    = 1.0     # MR T1과 동일 사이즈
-COUNTER_COOLDOWN_SEC  = 0       # 쿨다운 없음
+COUNTER_COOLDOWN_SEC  = 600     # ★ V10.29: 10분 쿨다운 (중복 진입 방지)
 COUNTER_MAX           = 2       # 동시 counter 포지션 최대
 # T1~T3: 평균 EP 기준 / T4: T4 체결가 기준 (planners에서 분기)
 

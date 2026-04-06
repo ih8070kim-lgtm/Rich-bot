@@ -2412,34 +2412,18 @@ def plan_counter(
         if prev_pos is None:
             continue
 
-        # 15m 2봉 가속도
-        def _accel_15m(bars, direction):
-            if len(bars) < 4:
-                return False
-            b1, b2 = bars[-3], bars[-2]
-            if direction == "up":
-                return float(b1[4]) > float(b1[1]) and float(b2[4]) > float(b2[1])
-            return float(b1[4]) < float(b1[1]) and float(b2[4]) < float(b2[1])
-
-        # ── 롱/숏 양방향 스캔 ──
+        # ── 롱/숏 양방향 스캔 (구름 전환 돌파만) ──
         entry_side = None
-        _accel_tag = ""
 
-        # 롱 조건: 구름 위 + TK>KJ
+        # 롱: 구름 위로 전환 + TK>KJ
         if ich["tenkan"] > ich["kijun"]:
             if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
                 entry_side = "buy"
-            elif cur_pos == "ABOVE" and _accel_15m(ohlcv_15m, "up"):
-                entry_side = "buy"
-                _accel_tag = "+ACC"
 
-        # 숏 조건: 구름 아래 + TK<KJ
+        # 숏: 구름 아래로 전환 + TK<KJ
         if entry_side is None and ich["tenkan"] < ich["kijun"]:
             if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
                 entry_side = "sell"
-            elif cur_pos == "BELOW" and _accel_15m(ohlcv_15m, "down"):
-                entry_side = "sell"
-                _accel_tag = "+ACC"
 
         if entry_side is None:
             continue
@@ -2480,7 +2464,7 @@ def plan_counter(
             side=entry_side,
             qty=qty,
             price=curr_p,
-            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos}{_accel_tag})",
+            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos})",
             metadata={
                 "atr": 0.0,
                 "dca_targets": _dca_targets,
@@ -2495,7 +2479,7 @@ def plan_counter(
         cnt_syms.add(sym)
 
         _dbg = (f"[COUNTER_ICH] ⚡ {sym} {entry_side} "
-                f"cloud={prev_pos}→{cur_pos}{_accel_tag} "
+                f"cloud={prev_pos}→{cur_pos} "
                 f"TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
                 f"size=${cnt_size:.1f}")
         print(_dbg)
