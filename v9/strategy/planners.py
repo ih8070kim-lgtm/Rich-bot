@@ -2262,6 +2262,7 @@ def plan_pair_cut(
 # ═════════════════════════════════════════════════════════════════
 _counter_cooldowns: Dict[str, float] = {}  # "SYM_side" → next allowed timestamp
 _counter_prev_cloud: Dict[str, str] = {}   # "SYM" → "ABOVE"/"BELOW"/"INSIDE"
+_counter_dbg_ts: Dict[str, float] = {}     # debug print 쿨다운 (5분)
 
 def _ichimoku_cloud_15m(ohlcv_15m):
     """15m OHLCV 리스트에서 일목구름 계산 (직전 완성 봉 기준).
@@ -2376,6 +2377,9 @@ def plan_counter(
             ohlcv_15m = pool.get("15m", [])
             ich = _ichimoku_cloud_15m(ohlcv_15m)
             if ich is None:
+                if now - _counter_dbg_ts.get(sym, 0) > 300:
+                    print(f"[COUNTER_DBG] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)")
+                    _counter_dbg_ts[sym] = now
                 continue
 
             # 현재 구름 위치
@@ -2421,6 +2425,11 @@ def plan_counter(
                     _accel_tag = "+ACC"
 
             if not breakout:
+                if now - _counter_dbg_ts.get(sym, 0) > 300:
+                    _tk_kj = "TK>KJ" if ich["tenkan"] > ich["kijun"] else "TK<KJ"
+                    print(f"[COUNTER_DBG] {sym} {opp_side} cloud={cur_pos} prev={prev_pos} "
+                          f"{_tk_kj} roi={roi:+.1f}% → 미충족")
+                    _counter_dbg_ts[sym] = now
                 continue
 
             # ── 진입 ──
