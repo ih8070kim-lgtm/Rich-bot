@@ -109,6 +109,16 @@ TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}
 # ★ V10.27c: HARD_SL = DCA 트리거 -1% / T4는 체결가 -2%
 # ★ V10.29: SL = 다음 DCA 트리거 - 2%
 HARD_SL_BY_TIER = {1: -3.8, 2: -5.6, 3: -5.6, 4: -2.0}
+
+# ═══════════════════════════════════════════════════════════════════
+# ★ V10.29: Counter Signal — MR ROI- + 일목구름 돌파 → 반대 사이드 MR 진입
+#   진입만 다르고 DCA/TP/SL/Trail은 기존 MR과 동일 (role=CORE_MR)
+# ═══════════════════════════════════════════════════════════════════
+COUNTER_ENABLED       = True
+COUNTER_ROI_THRESH    = -1.0    # MR ROI%가 이 이하이면 트리거
+COUNTER_SIZE_RATIO    = 1.0     # MR T1과 동일 사이즈
+COUNTER_COOLDOWN_SEC  = 0       # 쿨다운 없음
+COUNTER_MAX           = 2       # 동시 counter 포지션 최대
 # T1~T3: 평균 EP 기준 / T4: T4 체결가 기준 (planners에서 분기)
 
 # ★ V10.26b 레거시 (plan_tp1에서 미사용, _manage_tp1_preorders 호환용)
