@@ -2347,7 +2347,7 @@ def plan_counter(
     from v9.config import (
         COUNTER_ENABLED, COUNTER_ROI_THRESH,
         COUNTER_SIZE_RATIO, COUNTER_COOLDOWN_SEC, COUNTER_MAX,
-        DCA_WEIGHTS, LEVERAGE, GRID_DIV,
+        DCA_WEIGHTS, LEVERAGE, GRID_DIVISOR,
     )
     if not COUNTER_ENABLED:
         return []
@@ -2444,7 +2444,7 @@ def plan_counter(
             total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
             if total_cap <= 0:
                 continue
-            grid = (total_cap / GRID_DIV) * LEVERAGE
+            grid = (total_cap / GRID_DIVISOR) * LEVERAGE
             tw = sum(DCA_WEIGHTS)
             base_size = grid * DCA_WEIGHTS[0] / tw
             cnt_size = base_size * COUNTER_SIZE_RATIO
