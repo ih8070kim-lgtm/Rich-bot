@@ -88,7 +88,7 @@ async def fetch_market_snapshot(
                     o_1m, o_5m, o_15m, o_1h = await asyncio.gather(
                         asyncio.to_thread(ex.fetch_ohlcv, sym, '1m',  limit=70),
                         asyncio.to_thread(ex.fetch_ohlcv, sym, '5m',  limit=50),
-                        asyncio.to_thread(ex.fetch_ohlcv, sym, '15m', limit=60),
+                        asyncio.to_thread(ex.fetch_ohlcv, sym, '15m', limit=85),
                         asyncio.to_thread(ex.fetch_ohlcv, sym, '1h',  limit=55),
                     )
                     return sym, {'1m': o_1m, '5m': o_5m, '15m': o_15m, '1h': o_1h}

@@ -2308,7 +2308,8 @@ def plan_counter(
     st: Dict,
     system_state: Dict,
 ) -> List[Intent]:
-    """MR ROI < threshold + 일목구름 돌파 → 같은 심볼 반대 방향 MR 진입.
+    """★ V10.29: MR 물림 확인 → 유니버스 전체에서 일목구름 돌파 심볼 진입.
+    MR 손실 = 추세 존재 확인 필터. 진입은 구름 돌파 심볼 (다른 심볼).
     role=CORE_MR → DCA/TP/SL 전부 기존 MR과 동일."""
     from v9.config import (
         COUNTER_ENABLED, COUNTER_ROI_THRESH,
@@ -2322,7 +2323,7 @@ def plan_counter(
     now = time.time()
     prices = snapshot.all_prices or {}
 
-    # 현재 COUNTER entry_type 포지션 수
+    # 현재 COUNTER 포지션 수
     cnt_active = 0
     cnt_syms = set()
     for _s, _ss in st.items():
@@ -2336,7 +2337,9 @@ def plan_counter(
     if cnt_active >= COUNTER_MAX:
         return []
 
-    # MR 포지션 중 ROI < threshold 찾기
+    # ── Step 1: MR 물림 확인 (추세 필터) ──
+    # 어느 방향이든 MR이 물려있으면 추세 존재
+    mr_losing = False
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
             continue
@@ -2345,148 +2348,158 @@ def plan_counter(
                 continue
             if p.get("role", "") != "CORE_MR":
                 continue
-            if p.get("step", 0) >= 1:  # trailing 중이면 스킵
+            if p.get("step", 0) >= 1:
                 continue
-
             ep = float(p.get("ep", 0) or 0)
-            curr_p = float(prices.get(sym, 0) or 0)
-            if ep <= 0 or curr_p <= 0:
+            cp = float(prices.get(sym, 0) or 0)
+            if ep <= 0 or cp <= 0:
                 continue
-
-            roi = calc_roi_pct(ep, curr_p, pos_side, LEVERAGE)
-            if roi > COUNTER_ROI_THRESH:
-                continue
-
-            # 반대 방향
-            opp_side = "sell" if pos_side == "buy" else "buy"
-            cd_key = f"{sym}_{opp_side}_counter"
-
-            # 쿨다운
-            if _counter_cooldowns.get(cd_key, 0) > now:
-                continue
-
-            # 이미 같은 심볼에 counter 있으면 스킵
-            if sym in cnt_syms:
-                continue
-
-            if cnt_active >= COUNTER_MAX:
+            roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE)
+            if roi <= COUNTER_ROI_THRESH:
+                mr_losing = True
                 break
+        if mr_losing:
+            break
 
-            # ── 일목구름 돌파 확인 (15m) ──
-            pool = (snapshot.ohlcv_pool or {}).get(sym, {})
-            ohlcv_15m = pool.get("15m", [])
-            ich = _ichimoku_cloud_15m(ohlcv_15m)
-            if ich is None:
-                if now - _counter_dbg_ts.get(sym, 0) > 300:
-                    _dbg = f"[COUNTER] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)"
-                    print(_dbg)
-                    system_state.setdefault("_counter_tg", []).append(_dbg)
-                    _counter_dbg_ts[sym] = now
-                continue
+    if not mr_losing:
+        return []
 
-            # 현재 구름 위치
-            if curr_p > ich["cloud_top"]:
-                cur_pos = "ABOVE"
-            elif curr_p < ich["cloud_bot"]:
-                cur_pos = "BELOW"
+    # ── Step 2: 유니버스 전체에서 구름 돌파 스캔 ──
+    _ohlcv_pool = snapshot.ohlcv_pool or {}
+    for sym in _ohlcv_pool:
+        if cnt_active >= COUNTER_MAX:
+            break
+
+        curr_p = float(prices.get(sym, 0) or 0)
+        if curr_p <= 0:
+            continue
+
+        # 이미 포지션 있는 심볼 스킵 (MR/counter 무관)
+        _has_pos = False
+        _sym_st = st.get(sym, {})
+        if isinstance(_sym_st, dict):
+            for _side, _p in iter_positions(_sym_st):
+                if isinstance(_p, dict) and float(_p.get("amt", 0) or 0) > 0:
+                    _has_pos = True
+                    break
+        if _has_pos:
+            continue
+        if sym in cnt_syms:
+            continue
+
+        pool = _ohlcv_pool.get(sym, {})
+        ohlcv_15m = pool.get("15m", [])
+        ich = _ichimoku_cloud_15m(ohlcv_15m)
+        if ich is None:
+            if now - _counter_dbg_ts.get(sym, 0) > 300:
+                _dbg = f"[COUNTER] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)"
+                print(_dbg)
+                system_state.setdefault("_counter_tg", []).append(_dbg)
+                _counter_dbg_ts[sym] = now
+            continue
+
+        # 구름 위치
+        if curr_p > ich["cloud_top"]:
+            cur_pos = "ABOVE"
+        elif curr_p < ich["cloud_bot"]:
+            cur_pos = "BELOW"
+        else:
+            cur_pos = "INSIDE"
+
+        prev_pos = _counter_prev_cloud.get(sym)
+        _counter_prev_cloud[sym] = cur_pos
+
+        if prev_pos is None:
+            continue
+
+        # 15m 2봉 가속도
+        def _accel_15m(bars, direction):
+            if len(bars) < 4:
+                return False
+            b1, b2 = bars[-3], bars[-2]
+            if direction == "up":
+                return float(b1[4]) > float(b1[1]) and float(b2[4]) > float(b2[1])
+            return float(b1[4]) < float(b1[1]) and float(b2[4]) < float(b2[1])
+
+        # ── 롱/숏 양방향 스캔 ──
+        entry_side = None
+        _accel_tag = ""
+
+        # 롱 조건: 구름 위 + TK>KJ
+        if ich["tenkan"] > ich["kijun"]:
+            if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
+                entry_side = "buy"
+            elif cur_pos == "ABOVE" and _accel_15m(ohlcv_15m, "up"):
+                entry_side = "buy"
+                _accel_tag = "+ACC"
+
+        # 숏 조건: 구름 아래 + TK<KJ
+        if entry_side is None and ich["tenkan"] < ich["kijun"]:
+            if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
+                entry_side = "sell"
+            elif cur_pos == "BELOW" and _accel_15m(ohlcv_15m, "down"):
+                entry_side = "sell"
+                _accel_tag = "+ACC"
+
+        if entry_side is None:
+            continue
+
+        # 쿨다운
+        cd_key = f"{sym}_{entry_side}_counter"
+        if _counter_cooldowns.get(cd_key, 0) > now:
+            continue
+
+        # ── 진입 ──
+        total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+        if total_cap <= 0:
+            continue
+        grid = (total_cap / GRID_DIVISOR) * LEVERAGE
+        tw = sum(DCA_WEIGHTS)
+        base_size = grid * DCA_WEIGHTS[0] / tw
+        cnt_size = base_size * COUNTER_SIZE_RATIO
+        qty = cnt_size / curr_p if curr_p > 0 else 0
+        if qty <= 0:
+            continue
+
+        from v9.config import DCA_ENTRY_ROI_BY_TIER
+        _dca_targets = []
+        for _dt_tier in range(2, 5):
+            _dt_roi = DCA_ENTRY_ROI_BY_TIER.get(_dt_tier, -1.8)
+            _dt_dist = abs(_dt_roi) / 100 / LEVERAGE
+            if entry_side == "buy":
+                _dt_p = curr_p * (1.0 - _dt_dist)
             else:
-                cur_pos = "INSIDE"
+                _dt_p = curr_p * (1.0 + _dt_dist)
+            _dca_targets.append({"tier": _dt_tier, "target_p": _dt_p,
+                                  "weight": DCA_WEIGHTS[_dt_tier-1]})
 
-            prev_pos = _counter_prev_cloud.get(sym)
-            _counter_prev_cloud[sym] = cur_pos
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=IntentType.OPEN,
+            symbol=sym,
+            side=entry_side,
+            qty=qty,
+            price=curr_p,
+            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos}{_accel_tag})",
+            metadata={
+                "atr": 0.0,
+                "dca_targets": _dca_targets,
+                "role": "CORE_MR",
+                "entry_type": "COUNTER",
+                "positionSide": "LONG" if entry_side == "buy" else "SHORT",
+                "locked_regime": "NORMAL",
+            },
+        ))
+        _counter_cooldowns[cd_key] = now + COUNTER_COOLDOWN_SEC
+        cnt_active += 1
+        cnt_syms.add(sym)
 
-            if prev_pos is None:
-                continue
-
-            # ── 15m 2봉 가속도 확인 ──
-            def _accel_15m(bars, direction):
-                """직전 2봉 연속 방향 확인. direction='up'/'down'."""
-                if len(bars) < 4:
-                    return False
-                b1 = bars[-3]  # 2봉 전 (완성)
-                b2 = bars[-2]  # 직전 봉 (완성)
-                if direction == "up":
-                    return float(b1[4]) > float(b1[1]) and float(b2[4]) > float(b2[1])
-                return float(b1[4]) < float(b1[1]) and float(b2[4]) < float(b2[1])
-
-            # ── 진입 조건: (A) 구름 돌파 전환 OR (B) 이미 구름 밖 + 가속도 ──
-            breakout = False
-            _accel_tag = ""
-
-            if opp_side == "buy" and ich["tenkan"] > ich["kijun"]:
-                if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
-                    breakout = True  # (A) 전환 돌파
-                elif cur_pos == "ABOVE" and _accel_15m(ohlcv_15m, "up"):
-                    breakout = True  # (B) 이미 구름 위 + 상승 가속
-                    _accel_tag = "+ACC"
-            elif opp_side == "sell" and ich["tenkan"] < ich["kijun"]:
-                if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
-                    breakout = True  # (A) 전환 돌파
-                elif cur_pos == "BELOW" and _accel_15m(ohlcv_15m, "down"):
-                    breakout = True  # (B) 이미 구름 아래 + 하락 가속
-                    _accel_tag = "+ACC"
-
-            if not breakout:
-                if now - _counter_dbg_ts.get(sym, 0) > 300:
-                    _tk_kj = "TK>KJ" if ich["tenkan"] > ich["kijun"] else "TK<KJ"
-                    _dbg = f"[COUNTER] {sym} {opp_side} cloud={cur_pos} {_tk_kj} roi={roi:+.1f}%"
-                    print(_dbg)
-                    system_state.setdefault("_counter_tg", []).append(_dbg)
-                    _counter_dbg_ts[sym] = now
-                continue
-
-            # ── 진입 ──
-            total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-            if total_cap <= 0:
-                continue
-            grid = (total_cap / GRID_DIVISOR) * LEVERAGE
-            tw = sum(DCA_WEIGHTS)
-            base_size = grid * DCA_WEIGHTS[0] / tw
-            cnt_size = base_size * COUNTER_SIZE_RATIO
-            qty = cnt_size / curr_p if curr_p > 0 else 0
-            if qty <= 0:
-                continue
-
-            # DCA targets 생성 (MR과 동일)
-            from v9.config import DCA_ENTRY_ROI_BY_TIER
-            _dca_targets = []
-            for _dt_tier in range(2, 5):
-                _dt_roi = DCA_ENTRY_ROI_BY_TIER.get(_dt_tier, -1.8)
-                _dt_dist = abs(_dt_roi) / 100 / LEVERAGE
-                if opp_side == "buy":
-                    _dt_p = curr_p * (1.0 - _dt_dist)
-                else:
-                    _dt_p = curr_p * (1.0 + _dt_dist)
-                _dca_targets.append({"tier": _dt_tier, "target_p": _dt_p,
-                                      "weight": DCA_WEIGHTS[_dt_tier-1]})
-
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.OPEN,
-                symbol=sym,
-                side=opp_side,
-                qty=qty,
-                price=curr_p,
-                reason=f"COUNTER_ICH(src={sym}_{pos_side},roi={roi:+.1f}%,"
-                       f"cloud={prev_pos}→{cur_pos}{_accel_tag})",
-                metadata={
-                    "atr": 0.0,
-                    "dca_targets": _dca_targets,
-                    "role": "CORE_MR",
-                    "entry_type": "COUNTER",
-                    "source_sym": sym,
-                    "source_side": pos_side,
-                    "positionSide": "LONG" if opp_side == "buy" else "SHORT",
-                    "locked_regime": "NORMAL",
-                },
-            ))
-            _counter_cooldowns[cd_key] = now + COUNTER_COOLDOWN_SEC
-            cnt_active += 1
-            cnt_syms.add(sym)
-
-            print(f"[COUNTER_ICH] {sym} {opp_side} ← MR {pos_side} ROI={roi:+.1f}% "
-                  f"cloud={prev_pos}→{cur_pos}{_accel_tag} TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
-                  f"size=${cnt_size:.1f}")
+        _dbg = (f"[COUNTER_ICH] ⚡ {sym} {entry_side} "
+                f"cloud={prev_pos}→{cur_pos}{_accel_tag} "
+                f"TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
+                f"size=${cnt_size:.1f}")
+        print(_dbg)
+        system_state.setdefault("_counter_tg", []).append(_dbg)
 
     return intents
 

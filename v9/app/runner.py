@@ -871,7 +871,7 @@ def _trim_ohlcv_pool(snapshot) -> None:
         return
     MAX_1M  = 200   # ★ V10.16: 300→200 (planners 최대 65봉 × 3배 여유)
     MAX_5M  = 80    # 5m 40봉 × 2배 여유
-    MAX_15M = 100   # 15m 50봉 × 2배 여유
+    MAX_15M = 150   # ★ V10.29: 일목구름 80봉 필요 → 150 유지
     MAX_1H  = 40    # 1h 20봉 × 2배 여유
     for sym in pool:
         tf_map = pool[sym]
@@ -1488,7 +1488,7 @@ async def _place_trim_preorders(ex, st, snapshot):
                 order = await asyncio.to_thread(
                     ex.create_order,
                     sym, "limit", order_side, safe_trim_qty, safe_trim_price,
-                    params={"positionSide": ps, "reduceOnly": True}
+                    params={"positionSide": ps}
                 )
                 oid = str(order.get("id", ""))
                 if oid:
