@@ -1728,6 +1728,7 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 ZOMBIE_ROI_THRESH  = -5.0
 ZOMBIE_COOLDOWN_SEC = 8 * 3600
 ZOMBIE_BATCH_TP_ROI = {1: 4.0, 2: 2.0}
+ZOMBIE_TIME_CUT_SEC = 8 * 3600   # ★ V10.29: T2+ 8시간 보유 타임컷
 _zombie_cooldown = {"buy": 0.0, "sell": 0.0}
 
 
@@ -1888,6 +1889,17 @@ def plan_force_close(
                         reason = _zr
                         _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
 
+            # ★ V10.29: T2+ 8시간 타임컷 — 장기 보유 손실 포지션 정리
+            if not force:
+                _tc_dca = int(p.get("dca_level", 1) or 1)
+                _tc_hold = now - float(p.get("time", now) or now)
+                if (_tc_dca >= 2
+                        and _tc_hold >= ZOMBIE_TIME_CUT_SEC
+                        and roi_pct < 0
+                        and p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE")):
+                    force = True
+                    reason = f"ZOMBIE_TIMECUT_{_tc_hold/3600:.1f}h_T{_tc_dca}(roi={roi_pct:.1f}%)"
+
         if force:
             intents.append(Intent(
                 trace_id=_tid(),
@@ -1900,7 +1912,7 @@ def plan_force_close(
                 metadata={"roi_pct": roi_pct, "_expected_role": p.get("role", "")},
             ))
             # ★ V10.17: 배치 익절 — 좀비킬 시 같은 방향 수익 동반 청산
-            if "ZOMBIE" in reason:
+            if "ZOMBIE" in reason and "TIMECUT" not in reason:
                 _batch_side = p.get("side", "buy")
                 _batch_best = None
                 _batch_best_roi = -999.0
