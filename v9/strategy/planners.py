@@ -2378,7 +2378,9 @@ def plan_counter(
             ich = _ichimoku_cloud_15m(ohlcv_15m)
             if ich is None:
                 if now - _counter_dbg_ts.get(sym, 0) > 300:
-                    print(f"[COUNTER_DBG] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)")
+                    _dbg = f"[COUNTER] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)"
+                    print(_dbg)
+                    system_state.setdefault("_counter_tg", []).append(_dbg)
                     _counter_dbg_ts[sym] = now
                 continue
 
@@ -2427,8 +2429,9 @@ def plan_counter(
             if not breakout:
                 if now - _counter_dbg_ts.get(sym, 0) > 300:
                     _tk_kj = "TK>KJ" if ich["tenkan"] > ich["kijun"] else "TK<KJ"
-                    print(f"[COUNTER_DBG] {sym} {opp_side} cloud={cur_pos} prev={prev_pos} "
-                          f"{_tk_kj} roi={roi:+.1f}% → 미충족")
+                    _dbg = f"[COUNTER] {sym} {opp_side} cloud={cur_pos} {_tk_kj} roi={roi:+.1f}%"
+                    print(_dbg)
+                    system_state.setdefault("_counter_tg", []).append(_dbg)
                     _counter_dbg_ts[sym] = now
                 continue
 

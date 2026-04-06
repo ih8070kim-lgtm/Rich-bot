@@ -1513,15 +1513,33 @@ async def _place_trim_preorders(ex, st, snapshot):
                     p.setdefault("trim_preorders", {})[tier] = {
                         "oid": oid, "price": safe_trim_price, "qty": safe_trim_qty,
                     }
-                    # ★ 선주문 시 텔레그램 알림 없음 (체결 시만)
                     print(f"[TRIM_PLACED] {sym} {pos_side} T{tier}: "
                           f"{order_side} {safe_trim_qty}@${safe_trim_price:.4f} oid={oid}")
+                    try:
+                        from telegram_engine import send_telegram_message
+                        asyncio.ensure_future(send_telegram_message(
+                            f"📋 TRIM T{tier} {sym.replace('/USDT','')}\n"
+                            f"{order_side} {safe_trim_qty}@${safe_trim_price:.4f}"))
+                    except Exception:
+                        pass
                 else:
                     print(f"[TRIM_FAIL] {sym} T{tier}: 주문 ID 없음")
+                p.pop("trim_to_place", None)
             except Exception as e:
-                print(f"[TRIM_ERR] {sym} T{tier}: {e}")
-
-            p.pop("trim_to_place", None)
+                # ★ V10.29: 실패 시 trim_to_place 유지 → 다음 틱 재시도
+                _retry = int(ttp.get("_retry", 0))
+                if _retry >= 3:
+                    p.pop("trim_to_place", None)
+                    print(f"[TRIM_ERR] {sym} T{tier}: 3회 실패 포기 — {e}")
+                    try:
+                        from telegram_engine import send_telegram_message
+                        asyncio.ensure_future(send_telegram_message(
+                            f"⚠️ TRIM 실패 {sym.replace('/USDT','')} T{tier}\n{str(e)[:80]}"))
+                    except Exception:
+                        pass
+                else:
+                    ttp["_retry"] = _retry + 1
+                    print(f"[TRIM_ERR] {sym} T{tier}: 재시도 {_retry+1}/3 — {e}")
 
 
 async def _cancel_trim_preorders(ex, st, sym, pos_side):
@@ -1988,6 +2006,16 @@ async def _main_loop(ex_init, dry_run: bool):
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
             # ★ v10.14d: plan_dca는 generate_all_intents 안에서 실행 (보험 타이밍 수정)
             intents += generate_corrguard_intents(snapshot, st, system_state)
+
+            # ★ V10.29: Counter 디버그 → 텔레그램 전송
+            _ctr_msgs = system_state.pop("_counter_tg", [])
+            if _ctr_msgs and _TELEGRAM_OK:
+                try:
+                    from telegram_engine import send_telegram_message
+                    asyncio.ensure_future(send_telegram_message(
+                        "\n".join(_ctr_msgs[-5:])))  # 최대 5개
+                except Exception:
+                    pass
 
             # ── 리스크 평가 ──────────────────────────────────────
             evaluated = []
