@@ -678,10 +678,9 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             _role = p.get("role", "")
             if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
                 continue
-            # ★ V10.28b FIX: trim 선주문 활성 + DCA T2+ → TP1 선주문 스킵 (trim이 exit 담당)
-            # trim_to_place도 체크: 같은 틱에서 _place_trim_preorders보다 먼저 실행되므로
+            # ★ V10.29: T2+ → TP1 선주문 전면 차단 (trim이 exit 담당)
             _dca_lv = int(p.get("dca_level", 1) or 1)
-            if _dca_lv >= 2 and (p.get("trim_preorders") or p.get("trim_to_place")):
+            if _dca_lv >= 2:
                 if p.get("tp1_preorder_id"):
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue

@@ -1485,18 +1485,6 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
 
-        # ★ V10.29: 최소 슬롯 유지 — 방향별 1개 이하면 TP1 차단 (교체 대기)
-        # TP1 안 함 → step=0 유지 → trailing 안 됨 → DCA는 정상 → 새 진입 오면 해제
-        _tp1_longs, _tp1_shorts = _count_active_by_side(st)
-        if is_long and _tp1_longs <= 1:
-            p["min_slot_hold"] = True
-            continue
-        if not is_long and _tp1_shorts <= 1:
-            p["min_slot_hold"] = True
-            continue
-        # 슬롯 2개 이상 → hold 해제
-        p.pop("min_slot_hold", None)
-
         # ★ V10.27: Skew — full_close/blocked 판단
         _skew = _skew_tp_adjustment(p.get("side", ""), st, snapshot)
         _is_blocked = _skew["blocked"]
@@ -1582,6 +1570,21 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ blocked → 정규 TP1 차단 (trim만 허용)
         if _is_blocked:
             continue
+
+        # ★ V10.29: T2+ 정규 TP1 제거 — trim이 exit 담당
+        #   full_close(스큐 긴급)만 예외 허용
+        if dca_level >= 2 and not _skew["full_close"]:
+            continue
+
+        # ★ V10.29: 최소 슬롯 유지 — T1 TP1/trailing 진입 차단 (교체 대기)
+        _tp1_longs, _tp1_shorts = _count_active_by_side(st)
+        if is_long and _tp1_longs <= 1:
+            p["min_slot_hold"] = True
+            continue
+        if not is_long and _tp1_shorts <= 1:
+            p["min_slot_hold"] = True
+            continue
+        p.pop("min_slot_hold", None)
 
         if roi_gross >= tp1_thresh:
             total_qty  = float(p.get("amt", 0.0))
