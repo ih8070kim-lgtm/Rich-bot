@@ -333,6 +333,11 @@ def apply_order_results(
                     p["tp1_done"]         = True
                     p["tp1_price"]        = avg_px if avg_px > 0 else snapshot.all_prices.get(sym, 0.0)
                     p["trailing_on_time"] = now
+                    # ★ V10.29: TP1 후 trail 기준점을 현재 ROI로 리셋 (stale max_roi 즉사 방지)
+                    _tp1_roi = calc_roi_pct(p.get("ep", 0.0),
+                                            snapshot.all_prices.get(sym, 0.0),
+                                            p.get("side", ""), LEVERAGE)
+                    p["max_roi_seen"] = _tp1_roi
                     _log_pos(result.trace_id, sym, p, snapshot)
 
         # ── TRAIL_ON / FORCE_CLOSE / CLOSE ──────────────────────
