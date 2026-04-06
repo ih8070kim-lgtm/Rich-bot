@@ -1518,40 +1518,19 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                     trim_qty = calc_trim_qty(total_qty, dca_level)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
-                        # ★ light side blocked 상태면 trim 후 스큐 시뮬 (스큐 악화 방지)
-                        _trim_ok = True
-                        if _is_blocked:
-                            _trim_margin_delta = (trim_qty * curr_p) / LEVERAGE
-                            _tc = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                            if _tc > 0:
-                                _, _tl, _ts = calc_skew(st, _tc)
-                                if p.get("side") == "buy":
-                                    _post_skew = abs((_tl - _trim_margin_delta / _tc) - _ts)
-                                else:
-                                    _post_skew = abs(_tl - (_ts - _trim_margin_delta / _tc))
-                                if _post_skew >= _skew["skew"] * 1.1:
-                                    _trim_ok = False
-                                    print(f"[TRIM_BLOCKED] {symbol} T{dca_level} blocked trim 거부: "
-                                          f"post_skew={_post_skew:.1%} > cur={_skew['skew']:.1%}×1.1")
-                                else:
-                                    print(f"[TRIM_BYPASS] {symbol} T{dca_level} blocked trim 허용: "
-                                          f"post_skew={_post_skew:.1%} ≤ cur={_skew['skew']:.1%}×1.1, "
-                                          f"roi={roi_gross:+.1f}%")
-                        if _trim_ok:
-                            _trim_tag = "BLK_" if _is_blocked else ""
-                            intents.append(Intent(
-                                trace_id=_tid(),
-                                intent_type=IntentType.TP1,
-                                symbol=symbol,
-                                side="sell" if is_long else "buy",
-                                qty=trim_qty,
-                                price=curr_p,
-                                reason=f"{_trim_tag}DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
-                                metadata={"roi_gross": roi_gross, "is_trim": True,
-                                          "target_tier": dca_level - 1,
-                                          "skew": _skew["skew"]},
-                            ))
-                            continue
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.TP1,
+                            symbol=symbol,
+                            side="sell" if is_long else "buy",
+                            qty=trim_qty,
+                            price=curr_p,
+                            reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
+                            metadata={"roi_gross": roi_gross, "is_trim": True,
+                                      "target_tier": dca_level - 1,
+                                      "skew": _skew["skew"]},
+                        ))
+                        continue
 
         # ★ blocked → 정규 TP1 차단 (trim만 허용)
         if _is_blocked:
