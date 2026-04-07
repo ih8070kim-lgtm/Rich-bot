@@ -148,8 +148,7 @@ def bc_on_daily_close(snapshot, st: Dict, system_state: Dict) -> List[Intent]:
             qty = notional / price
 
             # 최소 수량 체크
-            min_qty = CFG.SYM_MIN_QTY.get(sym.replace("/USDT", "USDT"),
-                       CFG.SYM_MIN_QTY_DEFAULT)
+            min_qty = CFG.SYM_MIN_QTY.get(sym, CFG.SYM_MIN_QTY_DEFAULT)
             if qty < min_qty:
                 continue
             if notional < 10:

@@ -351,7 +351,7 @@ def apply_order_results(
                     continue
 
             _closing_role = (p.get("role", "") if p else "")
-            if _closing_role not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
+            if _closing_role not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "BC"):
                 cooldowns[sym] = now + (1800 if itype == IntentType.FORCE_CLOSE else 900)
             # ★ v10.8: HEDGE/SOFT_HEDGE 청산 → hedge_engine 위임
             if _closing_role in ("SOFT_HEDGE", "HEDGE") and p:

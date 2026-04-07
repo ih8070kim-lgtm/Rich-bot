@@ -2062,7 +2062,9 @@ async def _main_loop(ex_init, dry_run: bool):
                 if _bc_hour == 0 and _main_loop._bc_last_daily != _bc_today:
                     _main_loop._bc_last_daily = _bc_today
                     try:
-                        _bc_daily_intents = bc_on_daily_close(snapshot, st, system_state)
+                        # ★ V10.29b-BC FIX: 동기 fetch → 별도 스레드 (MR 메인루프 블로킹 방지)
+                        _bc_daily_intents = await asyncio.to_thread(
+                            bc_on_daily_close, snapshot, st, system_state)
                         intents += _bc_daily_intents
                         if _bc_daily_intents:
                             print(f"[BC] 일봉 시그널: {len(_bc_daily_intents)}건 진입 intent")

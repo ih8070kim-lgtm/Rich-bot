@@ -1836,6 +1836,10 @@ def plan_force_close(
                 force = True
                 reason = f"INSURANCE_SH_MAXTIME(20m,roi={roi_pct:+.1f}%)"
 
+        # ★ V10.29b-BC: BC 포지션은 자체 SL/TP 사용 → MR HARD_SL 제외
+        elif p.get("role") == "BC":
+            pass
+
         else:
             # ── HARD_SL (CORE 포지션 전용) ────────────────────────
             # ★ V10.27c: DCA 트리거 -1% 뒤 SL / T4는 체결가 -2%
