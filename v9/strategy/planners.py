@@ -2337,8 +2337,8 @@ def plan_counter(
         return []
 
     # ── Step 1: MR 물림 확인 (추세 필터) ──
-    # 어느 방향이든 MR이 물려있으면 추세 존재
-    mr_losing = False
+    # 어느 방향이 물려있는지 추적 → 반대 방향만 진입
+    mr_losing_side = None  # "buy" or "sell"
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
             continue
@@ -2355,13 +2355,16 @@ def plan_counter(
                 continue
             roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE)
             if roi <= COUNTER_ROI_THRESH:
-                mr_losing = True
+                mr_losing_side = pos_side
                 break
-        if mr_losing:
+        if mr_losing_side:
             break
 
-    if not mr_losing:
+    if not mr_losing_side:
         return []
+
+    # ★ V10.29b: MR 물림 반대 방향만 진입
+    counter_side = "sell" if mr_losing_side == "buy" else "buy"
 
     # ── Step 2: 유니버스 전체에서 구름 돌파 스캔 ──
     _ohlcv_pool = snapshot.ohlcv_pool or {}
@@ -2411,16 +2414,14 @@ def plan_counter(
         if prev_pos is None:
             continue
 
-        # ── 롱/숏 양방향 스캔 (구름 전환 돌파만) ──
+        # ── MR 물림 반대 방향만 스캔 (구름 전환 돌파 확인) ──
         entry_side = None
 
-        # 롱: 구름 위로 전환 + TK>KJ
-        if ich["tenkan"] > ich["kijun"]:
+        if counter_side == "buy" and ich["tenkan"] > ich["kijun"]:
             if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
                 entry_side = "buy"
 
-        # 숏: 구름 아래로 전환 + TK<KJ
-        if entry_side is None and ich["tenkan"] < ich["kijun"]:
+        if counter_side == "sell" and ich["tenkan"] < ich["kijun"]:
             if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
                 entry_side = "sell"
 
@@ -2466,8 +2467,8 @@ def plan_counter(
             symbol=sym,
             side=entry_side,
             qty=qty,
-            price=curr_p,
-            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos})",
+            price=None,  # ★ V10.29b: 시장가 (추세 시그널 즉시 체결)
+            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos},vs_{mr_losing_side})",
             metadata={
                 "atr": 0.0,
                 "dca_targets": _dca_targets,
