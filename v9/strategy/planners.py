@@ -305,87 +305,74 @@ def _count_active_by_side(st: Dict) -> tuple:
 #   5개 레거시(TP_LOCK, HEAVY_REBALANCE, Bilateral TP, Rule B, Heavy 조기 TP)를
 #   단일 함수로 교체. 모든 TP 판단에 skew_mult × slot_mult 적용.
 # ═════════════════════════════════════════════════════════════════
-# ★ V10.25: 스큐 15%+ 지속 시간 추적 (light side 탈출구용)
+# ★ V10.29b: T3 ROI 기반 반대편 방어 — 스큐 로직 전면 교체
+# ═════════════════════════════════════════════════════════════════
+# 내 사이드에 T3(-3% 이하)가 있으면 반대편 출구를 제한.
+#   T1: TP ×1.5/2.0 또는 블록(-7%)
+#   T2: 블록 (URGENCY_DCA 빌드업 보호)
+#   T3: 트림 가격 ×1.5/2.0 (절대 블록 안함)
+# T3 SL/청산 시 방어 자동 해제.
+# ═════════════════════════════════════════════════════════════════
 
-def _skew_tp_adjustment(pos_side: str, st: Dict, snapshot) -> dict:
-    """★ V10.27: Skew-Aware TP — heavy floor + light 무한블록 + 매도후 스큐 시뮬.
+def _t3_defense(pos_side: str, dca_level: int, st: Dict, snapshot) -> dict:
+    """★ V10.29b: 반대편 T3 ROI가 깊을수록 이쪽 출구 제한.
 
-    heavy side: 스큐 비례 할인 (floor 0.5) + 10%+ full_close
-    light side: 스큐 ≥ 15% → 무한 블록 (세미헷지, 탈출구 없음)
-    매도후 스큐 시뮬: light 매도 시 스큐 12%+ 복귀 → 차단
-    스큐 정상화 시 블록 해제 → 정상 TP1 복귀
+    Returns:
+        tp_mult:    T1 TP / T3 트림 배수 (1.0 = 정상)
+        blocked:    True → T1 TP/T2 트림·TP/트레일링 전면 차단
+        opp_t3_roi: 반대편 최악 T3 ROI (방어 판단 소스)
     """
-    total_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-    if total_cap <= 0:
-        return {"skew_mult": 1.0, "slot_mult": 1.0, "full_close": False,
-                "blocked": False, "skew": 0.0, "heavy_side": ""}
+    _default = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
 
-    skew, long_m, short_m = calc_skew(st, total_cap)
-    heavy_side = "buy" if long_m > short_m else "sell"
-    is_heavy = (pos_side == heavy_side)
+    opp_side = "sell" if pos_side == "buy" else "buy"
 
-    if skew < 0.03:
-        skew_mult = 1.0
-        full_close = False
-        blocked = False
-    elif is_heavy:
-        # Heavy side: 스큐 비례 할인 (5%→0.85, 10%→0.70, 15%→0.55)
-        skew_mult = max(0.40, 1.0 - skew * 3.0)
-        full_close = (skew >= 0.10)
-        blocked = False
-    else:
-        # Light side: 무한 블록 (세미헷지)
-        if skew >= 0.15:
-            blocked = True
-        else:
-            blocked = False
-        skew_mult = 1.0
-        full_close = False
+    # 반대편 T3 중 최악 ROI 탐색
+    worst_t3_roi = 0.0
+    prices = snapshot.all_prices or {}
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        p = get_p(sym_st, opp_side)
+        if not isinstance(p, dict):
+            continue
+        if p.get("role", "") in _HEDGE_ROLES_SLOT:
+            continue
+        if int(p.get("dca_level", 1) or 1) < 3:
+            continue
+        cp = float(prices.get(sym, 0))
+        ep = float(p.get("ep", 0))
+        if cp <= 0 or ep <= 0:
+            continue
+        roi = calc_roi_pct(ep, cp, opp_side, LEVERAGE)
+        if roi < worst_t3_roi:
+            worst_t3_roi = roi
 
-    # ── Light side 마지막 슬롯 보호 ──
-    if not blocked and not is_heavy:
-        longs, shorts = _count_active_by_side(st)
-        if pos_side == "buy" and longs <= 1 and shorts >= 2:
-            blocked = True
-        elif pos_side == "sell" and shorts <= 1 and longs >= 2:
-            blocked = True
+    # 반대편에 T3 없거나 ROI > -3% → 방어 불필요
+    if worst_t3_roi > -3.0:
+        return _default
 
-    # ═══════════════════════════════════════════════════════════
-    # ★ V10.27: 매도 후 스큐 시뮬레이션
-    # light 매도 시 스큐가 12%+로 복귀하면 차단
-    # (DCA로 마진 올려서 스큐 해소 → 바로 익절 → 원복 무한루프 방지)
-    # ═══════════════════════════════════════════════════════════
-    if not blocked and not is_heavy and skew >= 0.05:
-        if pos_side == "buy":
-            my_margin = long_m
-            opp_margin = short_m
-        else:
-            my_margin = short_m
-            opp_margin = long_m
+    # 구간 판정
+    if worst_t3_roi <= -7.0:
+        mult = 2.0
+        deep = True
+    elif worst_t3_roi <= -5.0:
+        mult = 2.0
+        deep = False
+    else:  # -5.0 < roi <= -3.0
+        mult = 1.5
+        deep = False
 
-        my_count = sum(
-            1 for s in st
-            if isinstance(get_p(st.get(s, {}), pos_side), dict)
-            and get_p(st.get(s, {}), pos_side).get("role", "") not in _HEDGE_ROLES_SLOT
-        )
-        if my_count > 0:
-            avg_margin_per_slot = my_margin / my_count
-            post_my_margin = my_margin - avg_margin_per_slot
-            post_skew = abs(opp_margin - post_my_margin)
-            if post_skew >= 0.12:
-                blocked = True
+    # ── 내가 T3: 트림 배수만 적용, 절대 블록 안함 ──
+    if dca_level >= 3:
+        return {"tp_mult": mult, "blocked": False, "opp_t3_roi": worst_t3_roi}
 
-    # ── Floor 보장 ──
-    skew_mult = max(0.5, skew_mult)
+    # ── 내가 T2: 항상 블록 ──
+    if dca_level == 2:
+        return {"tp_mult": mult, "blocked": True, "opp_t3_roi": worst_t3_roi}
 
-    return {
-        "skew_mult": skew_mult,
-        "slot_mult": 1.0,     # ★ V10.27: slot_mult 제거 (과잉 곱셈 방지)
-        "full_close": full_close,
-        "blocked": blocked,
-        "skew": skew,
-        "heavy_side": heavy_side,
-    }
+    # ── 내가 T1: 배수 적용, -7% 이하만 블록 ──
+    return {"tp_mult": mult, "blocked": deep, "opp_t3_roi": worst_t3_roi}
+
 
 
 
@@ -797,8 +784,9 @@ def plan_open(
             final_short_trig = False
 
         # ★ V10.27f: SKEW_E30 — urgency 10+ 시 light side 5m EMA30+ATR1.8 진입
+        # ★ V10.29b: SKEW_E30 비활성화 — 스윙 구조에서 light side 포지션 누적 방지
         _SKEW_E30_ATR = 1.8
-        _skew_e30_ok = _urg_open["urgency"] >= 10
+        _skew_e30_ok = False  # _urg_open["urgency"] >= 10
         if _skew_e30_ok:
             _light_side = _urg_open["light_side"]
             if _light_side == "buy" and not final_long_trig:
@@ -1350,7 +1338,7 @@ def plan_dca(
 
     if _urg_dca["urgency"] >= _URG_DCA_MED and _dca_heavy_side:
         _urg_light_side = _urg_dca["light_side"]
-        _urg_max_tier = 3 if _urg_dca["urgency"] >= _URG_DCA_HIGH else 2
+        _urg_max_tier = 2  # ★ V10.29b: T2 cap — T3 스윙 보호
         _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
 
         # light side 후보: ROI 높은 순 정렬
@@ -1433,10 +1421,11 @@ def plan_dca(
 # ═════════════════════════════════════════════════════════════════
 def plan_tp1(snapshot: MarketSnapshot, st: Dict,
              exclude_syms: set = None) -> List[Intent]:
-    """★ V10.27: 고정값 TP1 + skew full_close/block 판단.
+    """★ V10.29b: TP1 + T3 방어 연동.
 
-    T1~T3: TP1_FIXED 고정값 × skew_mult(heavy 할인)
-    T4: max(worst_roi + 2.0, 0.8) × skew_mult
+    T1: TP1_FIXED × _t3_defense tp_mult
+    T2: trim only (방어 시 blocked)
+    T3: trim × tp_mult (절대 블록 안함)
     """
     intents: List[Intent] = []
     _tp1_excl = exclude_syms or set()
@@ -1487,13 +1476,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
 
-        # ★ V10.27: Skew — full_close/blocked 판단
-        _skew = _skew_tp_adjustment(p.get("side", ""), st, snapshot)
-        _is_blocked = _skew["blocked"]
-
-        # blocked + T1 → trim 불가 + TP1 불가 → 스킵
-        if _is_blocked and dca_level < 2:
-            continue
+        # ★ V10.29b: T3 ROI 기반 반대편 방어
+        _def = _t3_defense(p.get("side", ""), dca_level, st, snapshot)
 
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
@@ -1503,38 +1487,40 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         _is_heavy_tp = (_urg["heavy_side"] == p.get("side", ""))
         tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp)
 
-        # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
-        # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
-        if (dca_level >= 2 and not _skew["full_close"]):
-            from v9.config import TRIM_BLENDED_ROI_BY_TIER
-            _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0)
-            if roi_gross >= _DCA_TRIM_ROI:
-                total_qty = float(p.get("amt", 0.0))
-                trim_qty = calc_trim_qty(total_qty, dca_level)
-                _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-                if trim_qty >= _sym_min_qty:
-                    intents.append(Intent(
-                        trace_id=_tid(),
-                        intent_type=IntentType.TP1,
-                        symbol=symbol,
-                        side="sell" if is_long else "buy",
-                        qty=trim_qty,
-                        price=curr_p,
-                        reason=f"DCA_TRIM(roi={roi_gross:.1f}%≥{_DCA_TRIM_ROI}→T{dca_level-1})_T{dca_level}",
-                        metadata={"roi_gross": roi_gross, "is_trim": True,
-                                  "target_tier": dca_level - 1,
-                                  "skew": _skew["skew"]},
-                    ))
-                    continue
-
-        # ★ blocked → 정규 TP1 차단 (trim만 허용)
-        if _is_blocked:
+        # ★ V10.29b: Trim — T3 항상 허용(배수 적용), T2 방어 시 블록
+        if dca_level >= 2:
+            # T2: blocked=True when defense active → trim 차단
+            # T3: blocked=False always → trim 허용, 배수로 임계값 상향
+            if not _def["blocked"]:
+                from v9.config import TRIM_BLENDED_ROI_BY_TIER
+                _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0) * _def["tp_mult"]
+                if roi_gross >= _DCA_TRIM_ROI:
+                    total_qty = float(p.get("amt", 0.0))
+                    trim_qty = calc_trim_qty(total_qty, dca_level)
+                    _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+                    if trim_qty >= _sym_min_qty:
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.TP1,
+                            symbol=symbol,
+                            side="sell" if is_long else "buy",
+                            qty=trim_qty,
+                            price=curr_p,
+                            reason=f"DCA_TRIM(roi={roi_gross:.1f}%≥{_DCA_TRIM_ROI:.1f}→T{dca_level-1},def={_def['tp_mult']:.1f}x)_T{dca_level}",
+                            metadata={"roi_gross": roi_gross, "is_trim": True,
+                                      "target_tier": dca_level - 1,
+                                      "opp_t3_roi": _def["opp_t3_roi"]},
+                        ))
+                        continue
+            # T2+: 정규 TP1 없음, 트림이 exit 담당
             continue
 
-        # ★ V10.29: T2+ 정규 TP1 제거 — trim이 exit 담당
-        #   full_close(스큐 긴급)만 예외 허용
-        if dca_level >= 2 and not _skew["full_close"]:
+        # ★ V10.29b: T1 — 방어 블록 시 스킵
+        if _def["blocked"]:
             continue
+
+        # ★ V10.29b: T1 TP — 방어 배수 적용
+        _effective_tp1 = tp1_thresh * _def["tp_mult"]
 
         # ★ V10.29: 최소 슬롯 유지 — T1 TP1/trailing 진입 차단 (교체 대기)
         _tp1_longs, _tp1_shorts = _count_active_by_side(st)
@@ -1546,12 +1532,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             continue
         p.pop("min_slot_hold", None)
 
-        if roi_gross >= tp1_thresh:
+        if roi_gross >= _effective_tp1:
             total_qty  = float(p.get("amt", 0.0))
-            if _skew["full_close"]:
-                close_qty = total_qty
-            else:
-                close_qty = total_qty * TP1_PARTIAL_RATIO
+            close_qty = total_qty * TP1_PARTIAL_RATIO
             _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
             if close_qty < _sym_min_qty:
                 close_qty = total_qty
@@ -1561,7 +1544,6 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 close_qty = total_qty
             if close_qty <= 0:
                 continue
-            _fc = "FC" if _skew["full_close"] else "P"
             intents.append(Intent(
                 trace_id=_tid(),
                 intent_type=IntentType.TP1,
@@ -1569,10 +1551,10 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 side="sell" if is_long else "buy",
                 qty=close_qty,
                 price=curr_p,
-                reason=(f"TP1_F({tp1_thresh:.1f},roi={roi_gross:.1f},"
-                        f"sk={_skew['skew']:.2f},urg={_urg['urgency']:.0f},{_fc})_T{dca_level}"),
-                metadata={"roi_gross": roi_gross, "tp1_thresh": tp1_thresh,
-                           "skew": _skew["skew"], "full_close": _skew["full_close"]},
+                reason=(f"TP1({_effective_tp1:.1f},roi={roi_gross:.1f},"
+                        f"def={_def['tp_mult']:.1f}x,urg={_urg['urgency']:.0f})_T{dca_level}"),
+                metadata={"roi_gross": roi_gross, "tp1_thresh": _effective_tp1,
+                           "opp_t3_roi": _def["opp_t3_roi"]},
             ))
     return intents
 
@@ -1614,8 +1596,9 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 
             # ★ V10.22: Skew-Aware light-side 보호 (trailing에도 적용)
             if p.get("role", "") not in _HEDGE_ROLES_SLOT:
-                _tr_skew = _skew_tp_adjustment(_iter_side, st, snapshot)
-                if _tr_skew["blocked"]:
+                _tr_dca = int(p.get("dca_level", 1) or 1)
+                _tr_def = _t3_defense(_iter_side, _tr_dca, st, snapshot)
+                if _tr_def["blocked"]:
                     continue
 
             roi_pct = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
@@ -1702,7 +1685,7 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 ZOMBIE_ROI_THRESH  = -5.0
 ZOMBIE_COOLDOWN_SEC = 8 * 3600
 ZOMBIE_BATCH_TP_ROI = {1: 4.0, 2: 2.0}
-ZOMBIE_TIME_CUT_SEC = 8 * 3600   # ★ V10.29: T2+ 8시간 보유 타임컷
+ZOMBIE_TIME_CUT_SEC = 12 * 3600  # ★ V10.29b: T2+ 12시간 보유 타임컷 (스윙 여유)
 _zombie_cooldown = {"buy": 0.0, "sell": 0.0}
 
 
@@ -1856,22 +1839,24 @@ def plan_force_close(
                     _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
 
             # ★ V10.17: ZOMBIE — BAD + 슬롯풀 + T2+ + ROI≤-5%
+            # ★ V10.29b: T3 제외 — 스윙은 SL -10% 단독 관리
             if not force:
                 _z_side = p.get("side", "buy")
+                _z_dca = int(p.get("dca_level", 1) or 1)
                 _z_slots = count_slots(st)
                 _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
-                if _z_full:
+                if _z_full and _z_dca < 3:
                     _zf, _zr = _zombie_exit(p, roi_pct, now, snapshot=snapshot)
                     if _zf:
                         force  = True
                         reason = _zr
                         _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
 
-            # ★ V10.29: T2+ 8시간 타임컷 — 장기 보유 손실 포지션 정리
+            # ★ V10.29b: T2 only 타임컷 — T3 스윙은 SL 단독 관리
             if not force:
                 _tc_dca = int(p.get("dca_level", 1) or 1)
                 _tc_hold = now - float(p.get("time", now) or now)
-                if (_tc_dca >= 2
+                if (_tc_dca == 2
                         and _tc_hold >= ZOMBIE_TIME_CUT_SEC
                         and roi_pct < 0
                         and p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE")):
@@ -2527,9 +2512,11 @@ def generate_all_intents(
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
     # ★ V10.26: 페어 컷 (force_close 직후, tp1 전)
-    _pc_intents = plan_pair_cut(snapshot, st, system_state)
-    intents += _pc_intents
-    _fc_syms.update(i.symbol for i in _pc_intents)
+    # ★ V10.29b: PAIR_CUT 비활성화 — 스윙 DCA 구조와 충돌
+    # _pc_intents = plan_pair_cut(snapshot, st, system_state)
+    # intents += _pc_intents
+    # _fc_syms.update(i.symbol for i in _pc_intents)
+    _pc_intents = []
 
     # ★ V10.29b: CORE_HEDGE 제거 — plan_hedge_core_manage 비활성화
     # intents += plan_hedge_core_manage(snapshot, st)
