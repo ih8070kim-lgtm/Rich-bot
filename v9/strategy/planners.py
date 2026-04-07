@@ -463,15 +463,16 @@ def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
 ) -> list:
-    """★ V10.22: DCA 4단 타겟 — T2/T3/T4."""
+    """★ V10.29b: DCA 3단 타겟 — T2/T3."""
     dca_w   = DCA_WEIGHTS
     total_w = sum(dca_w)
     targets = []
-    for i, tier in enumerate([2, 3, 4]):
+    for i, tier in enumerate([2, 3]):
         roi_trig = DCA_ROI_TRIGGERS.get(tier, -8.0)
         dist = abs(roi_trig) / 100 / LEVERAGE
         target_p = entry_p * (1.0 - dist) if side == "buy" else entry_p * (1.0 + dist)
-        notional = grid_notional * (dca_w[i + 1] / total_w)
+        w_idx = min(i + 1, len(dca_w) - 1)
+        notional = grid_notional * (dca_w[w_idx] / total_w)
         targets.append({"tier": tier, "target_p": target_p,
                         "notional": notional, "roi_trigger": roi_trig})
     return targets
@@ -2451,7 +2452,7 @@ def plan_counter(
 
         from v9.config import DCA_ENTRY_ROI_BY_TIER
         _dca_targets = []
-        for _dt_tier in range(2, 5):
+        for _dt_tier in range(2, len(DCA_WEIGHTS) + 1):  # ★ V10.29b: DCA_WEIGHTS 길이 기반
             _dt_roi = DCA_ENTRY_ROI_BY_TIER.get(_dt_tier, -1.8)
             _dt_dist = abs(_dt_roi) / 100 / LEVERAGE
             if entry_side == "buy":
