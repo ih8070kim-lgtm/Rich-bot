@@ -2445,8 +2445,12 @@ def plan_counter(
                 _dt_p = curr_p * (1.0 - _dt_dist)
             else:
                 _dt_p = curr_p * (1.0 + _dt_dist)
+            # ★ V10.29b FIX: notional 누락 → plan_dca KeyError 수정
+            _dt_notional = grid * DCA_WEIGHTS[_dt_tier-1] / tw
             _dca_targets.append({"tier": _dt_tier, "target_p": _dt_p,
-                                  "weight": DCA_WEIGHTS[_dt_tier-1]})
+                                  "weight": DCA_WEIGHTS[_dt_tier-1],
+                                  "notional": _dt_notional,
+                                  "roi_trigger": _dt_roi})
 
         intents.append(Intent(
             trace_id=_tid(),
