@@ -90,7 +90,7 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
 # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
 TRIM_PREORDER_ROI = 1.0    # 레거시 호환
-TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.0}  # 블렌디드 EP 기준 trim 임계값
+TRIM_BLENDED_ROI_BY_TIER = {3: 1.0, 2: 1.5}  # ★ V10.29b: 왕복 수익 확보 (0.5/1.0 → 1.0/1.5)
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 600, 3: 300, 4: 120}
@@ -104,7 +104,7 @@ TP1_PCT = 1.8   # ★ v10.8: 방어형 — 빠른 확정 (레거시, 미사용)
 # ★ V10.27: TP1 고정 threshold (ROI%) — worst_roi/ATR 스케일링 전부 제거
 # T1~T3: 고정값. T4만 worst_roi+2.0 (plan_tp1에서 처리)
 # ★ V10.29: T3/T4 TP 두배
-TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}
+TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}  # T1 스캘핑 2.0% 유지
 
 # ★ V10.27c: HARD_SL = DCA 트리거 -1% / T4는 체결가 -2%
 # ★ V10.29: SL = 다음 DCA 트리거 - 2%
