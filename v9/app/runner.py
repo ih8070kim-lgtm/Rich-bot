@@ -668,7 +668,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
     """
     from v9.config import LEVERAGE, TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
     from v9.utils.utils_math import calc_roi_pct
-    from v9.strategy.planners import _skew_tp_adjustment, _calc_urgency
+    from v9.strategy.planners import _t3_defense, _calc_urgency
 
     prices = snapshot.all_prices or {}
     _urg = _calc_urgency(st, snapshot)  # ★ V10.27f
@@ -728,9 +728,9 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 continue
             p.pop("min_slot_hold", None)
 
-            # skew 블록 체크
-            _skew = _skew_tp_adjustment(pos_side, st, snapshot)
-            if _skew["blocked"]:
+            # ★ V10.29b: T3 방어 블록 체크
+            _def = _t3_defense(pos_side, dca_level, st, snapshot)
+            if _def["blocked"]:
                 if p.get("tp1_preorder_id"):
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue
@@ -742,7 +742,8 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             from v9.config import calc_tp1_thresh
             _worst = float(p.get("worst_roi", 0.0) or 0.0)
             _is_heavy_tp = (_urg["heavy_side"] == pos_side)
-            tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp)
+            # ★ V10.29b: T3 방어 배수 적용
+            tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp) * _def["tp_mult"]
 
             # ROI → price 변환
             if is_long:
@@ -763,7 +764,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
 
             # 수량 계산
             total_qty = float(p.get("amt", 0) or 0)
-            close_qty = total_qty if _skew.get("full_close") else total_qty * TP1_PARTIAL_RATIO
+            close_qty = total_qty * TP1_PARTIAL_RATIO
             _min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
             if close_qty < _min_qty:
                 close_qty = total_qty
