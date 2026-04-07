@@ -339,13 +339,36 @@ def calc_trim_price(blended_ep: float, side: str, tier: int) -> float:
     return blended_ep * (1 - roi_pct / LEVERAGE / 100)
 
 
-def calc_trim_qty(total_amt: float, tier: int) -> float:
-    """Trim 매도 수량 — 현재 tier weight 비중분."""
-    cum_w = sum(DCA_WEIGHTS[:tier])
-    tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
-    if cum_w <= 0:
+def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0) -> float:
+    """★ V10.29b: Trim 매도 수량 — 목표 티어 노셔널 기준.
+
+    URGENCY_DCA 등으로 비대해진 포지션을 정상 크기로 복원.
+    ep/bal 없으면 레거시 비율 방식 fallback.
+    """
+    if tier < 1 or total_amt <= 0:
         return 0.0
-    return total_amt * (tier_w / cum_w)
+
+    # 목표: trim 후 target_tier의 정상 노셔널로 복원
+    target_tier = tier - 1
+    cum_w_target = sum(DCA_WEIGHTS[:target_tier]) if target_tier > 0 else 0
+    cum_w_current = sum(DCA_WEIGHTS[:tier])
+    total_w = sum(DCA_WEIGHTS)
+
+    # ep/bal 있으면 그리드 기준 절대값
+    if ep > 0 and bal > 0:
+        grid_notional = bal / GRID_DIVISOR * LEVERAGE
+        target_notional = grid_notional * cum_w_target / total_w if total_w > 0 else 0
+        current_notional = total_amt * ep
+        trim_notional = current_notional - target_notional
+        if trim_notional <= 0:
+            return 0.0
+        return trim_notional / ep
+
+    # fallback: 비율 방식
+    if cum_w_current <= 0:
+        return 0.0
+    tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
+    return total_amt * (tier_w / cum_w_current)
 
 
 def calc_tp1_thresh(dca_level: int, worst_roi: float,

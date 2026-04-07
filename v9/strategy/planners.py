@@ -1496,7 +1496,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0) * _def["tp_mult"]
                 if roi_gross >= _DCA_TRIM_ROI:
                     total_qty = float(p.get("amt", 0.0))
-                    trim_qty = calc_trim_qty(total_qty, dca_level)
+                    _trim_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                    _trim_ep = float(p.get("ep", 0) or 0)
+                    trim_qty = calc_trim_qty(total_qty, dca_level, ep=_trim_ep, bal=_trim_bal)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
                         intents.append(Intent(
