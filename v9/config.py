@@ -117,7 +117,7 @@ HARD_SL_BY_TIER = {1: -3.8, 2: -5.6, 3: -5.6, 4: -2.0}
 COUNTER_ENABLED       = True
 COUNTER_ROI_THRESH    = -1.0    # MR ROI%가 이 이하이면 트리거
 COUNTER_SIZE_RATIO    = 1.0     # MR T1과 동일 사이즈
-COUNTER_COOLDOWN_SEC  = 600     # ★ V10.29: 10분 쿨다운 (중복 진입 방지)
+COUNTER_COOLDOWN_SEC  = 600     # 10분 쿨다운 (중복 진입 방지)
 COUNTER_MAX           = 2       # 동시 counter 포지션 최대
 # T1~T3: 평균 EP 기준 / T4: T4 체결가 기준 (planners에서 분기)
 
@@ -206,9 +206,9 @@ SKEW_STAGE2_TIMEOUT_SEC = 900   # 15분: stage2 지속 → 헷지 필요조건
 SKEW_HEDGE_STRESS_ROI   = -3.0  # heavy side ROI 이하 → 헷지 조건 완화
 
 # ★ V10.27: INSURANCE_SH — BTC 급변 직접 감지 기반 (DCA 차단 연동 제거)
-INSURANCE_BTC_1M_THRESH = 0.005   # 1분 ±0.5%
-INSURANCE_BTC_3M_THRESH = 0.008   # 3분 ±0.8%
-INSURANCE_BTC_5M_THRESH = 0.012   # 5분 ±1.2%
+INSURANCE_BTC_1M_THRESH = 0.020   # ★ V10.29b: 1분 ±2.0% — 극단적 급락/급등만
+INSURANCE_BTC_3M_THRESH = 9.999   # 비활성화 (도달 불가)
+INSURANCE_BTC_5M_THRESH = 9.999   # 비활성화 (도달 불가)
 INSURANCE_SIZE_RATIO    = 0.5     # 소스 50%
 INSURANCE_COOLDOWN_SEC  = 600     # 10분 글로벌 쿨다운
 INSURANCE_MIN_AFFECTED  = 2       # affected side 최소 포지션 수

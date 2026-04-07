@@ -547,7 +547,8 @@ def plan_open(
     _long_atr_base = _ATR_BASE   # ★ V10.27: 통합 2.4
     _short_atr_base = _ATR_BASE
 
-    # ── SOURCE_LINKED_HEDGE_CORE (v10.11: hedge_core 모듈) ───
+    # ── ★ V10.29b: CORE_HEDGE 제거 — MR 전략에서 역효과 (net -16 USDT)
+    # 소스 회복 시 헷지가 손실, 스큐 관리는 진입차단+TP할인으로 충분
     _skew, _long_margin, _short_margin = calc_skew(st, total_cap)
     _urg_open = _calc_urgency(st, snapshot)  # ★ V10.27f
 
@@ -561,13 +562,7 @@ def plan_open(
             if _fb_side=="buy": _core_long+=1
             else: _core_short+=1
 
-    from v9.config import SKEW_HEDGE_TRIGGER
-    _hc_intents = plan_hedge_core_entry(
-        snapshot, st, _skew, _long_margin, _short_margin,
-        total_cap, _btc_regime, _asym_syms, skew_thresh=SKEW_HEDGE_TRIGGER,
-    )
-    intents += _hc_intents
-    _slhc_count = len(_hc_intents)
+    _slhc_count = 0
 
     # ════════════════════════════════════════════════════════════
     # [2순위] FORCE_BALANCE — ★ v10.12: 비활성화
@@ -2408,17 +2403,19 @@ def plan_counter(
         if prev_pos is None:
             continue
 
-        # ── 롱/숏 양방향 스캔 (구름 전환 돌파만) ──
+        # ── 롱/숏 양방향 스캔 ──
+        # ★ V10.29b: 구름 전환 순간뿐 아니라 유지 상태에서도 진입 허용
+        # (쿨다운 + MAX + 포지션 중복 체크로 스팸 방지)
         entry_side = None
 
-        # 롱: 구름 위로 전환 + TK>KJ
+        # 롱: 구름 위 + TK>KJ
         if ich["tenkan"] > ich["kijun"]:
-            if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
+            if cur_pos == "ABOVE":
                 entry_side = "buy"
 
-        # 숏: 구름 아래로 전환 + TK<KJ
+        # 숏: 구름 아래 + TK<KJ
         if entry_side is None and ich["tenkan"] < ich["kijun"]:
-            if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
+            if cur_pos == "BELOW":
                 entry_side = "sell"
 
         if entry_side is None:
@@ -2523,7 +2520,8 @@ def generate_all_intents(
     intents += _pc_intents
     _fc_syms.update(i.symbol for i in _pc_intents)
 
-    intents += plan_hedge_core_manage(snapshot, st)
+    # ★ V10.29b: CORE_HEDGE 제거 — plan_hedge_core_manage 비활성화
+    # intents += plan_hedge_core_manage(snapshot, st)
     intents += plan_tp1(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_trail_on(snapshot, st)
     intents += plan_dca(snapshot, st, cooldowns, system_state)
