@@ -1500,7 +1500,29 @@ async def _place_trim_preorders(ex, st, snapshot):
 
             ttp = p.get("trim_to_place")
             if not ttp:
-                continue
+                # ★ V10.29b: trim 재생성 — stale 정리 후 trim 없는 T2/T3 복구
+                _regen_dca = int(p.get("dca_level", 1) or 1)
+                _regen_trp = p.get("trim_preorders", {})
+                if _regen_dca >= 2 and not _regen_trp and p.get("ep") and p.get("amt"):
+                    from v9.config import calc_trim_price, calc_trim_qty
+                    _regen_ep = float(p.get("ep", 0))
+                    _regen_qty = calc_trim_qty(float(p["amt"]), _regen_dca)
+                    _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca)
+                    if _regen_qty > 0 and _regen_price > 0:
+                        p["trim_to_place"] = {
+                            "tier": _regen_dca,
+                            "price": round(_regen_price, 8),
+                            "qty": _regen_qty,
+                            "side": "sell" if pos_side == "buy" else "buy",
+                            "entry_price": _regen_ep,
+                        }
+                        ttp = p["trim_to_place"]
+                        print(f"[TRIM_REGEN] {sym} {pos_side} T{_regen_dca}: "
+                              f"trim 재생성 {_regen_qty:.4f}@${_regen_price:.4f}")
+                    else:
+                        continue
+                else:
+                    continue
 
             tier = ttp["tier"]
             trim_price = ttp["price"]
