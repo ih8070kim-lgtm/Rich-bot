@@ -1473,6 +1473,19 @@ async def _place_trim_preorders(ex, st, snapshot):
         for pos_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
                 continue
+
+            # ★ V10.29b: stale trim_preorders 정리 — 거래소에 없는 주문 참조 제거
+            _trp = p.get("trim_preorders")
+            if _trp and isinstance(_trp, dict):
+                _stale_tiers = [
+                    t for t, info in _trp.items()
+                    if info.get("oid") and str(info["oid"]) not in _PENDING_LIMITS
+                ]
+                for _st in _stale_tiers:
+                    _trp.pop(_st, None)
+                    print(f"[TRIM_STALE] {sym} {pos_side} T{_st} trim_preorders 정리 "
+                          f"(oid not in pending_limits → plan_tp1 DCA_TRIM 복귀)")
+
             ttp = p.get("trim_to_place")
             if not ttp:
                 continue
