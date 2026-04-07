@@ -1072,19 +1072,13 @@ def plan_dca(
         # ★ V10.27: ATR LOW DCA 게이트 제거 (MR 전략은 횡보장에서 유리, DCA 제한 역효과)
 
         # ★ V10.22: DCA 하드가드 (4단)
-        # 1) dca_level >= 4이면 스킵
-        if int(p.get("dca_level", 1) or 1) >= 4:
+        # 1) dca_level >= 3 이면 스킵 (3단 DCA 구조)
+        if int(p.get("dca_level", 1) or 1) >= 3:
             continue
         # 2) max_dca_reached 플래그 (dca_level 리셋 버그 방어)
         if p.get("max_dca_reached"):
             continue
-        # 3) 노셔널이 grid의 95% 이상이면 스킵
-        _total_cap_dca = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-        if _total_cap_dca > 0:
-            _grid_max = (_total_cap_dca / GRID_DIVISOR) * LEVERAGE
-            _cur_notional = float(p.get("amt", 0)) * float(p.get("ep", 0))
-            if _cur_notional >= _grid_max * 0.95:
-                continue
+        # ★ V10.29b: 노셔널 95% 캡 제거 — DCA 무조건 허용
 
         # pending_dca 타임아웃: 3분 초과 시 자동 해제
         # ★ v10.14: pending limit가 아직 활성이면 해제하지 않음 (중복 DCA 방지)
@@ -1208,44 +1202,19 @@ def plan_dca(
                 tier_cooldown = int(tier_cooldown * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
                 _dca_accel = True
 
-            # ★ v10.13: DCA 조건 도달 — 차단 여부 확인 → 보험 시그널
+            # ★ V10.29b: DCA 차단 로직 전면 제거 — 스윙 T3 진입 보장
+            # killswitch만 유지 (수동 비상 정지)
             _block = None
-            # ★ v10.21: 동적 DCA 레벨 제한 — 방향별 적용
-            if is_long and tier_now > _dyn_max_long:
-                _block = f"DCA_LIMIT_L_T{_dyn_max_long}"
-            elif not is_long and tier_now > _dyn_max_short:
-                _block = f"DCA_LIMIT_S_T{_dyn_max_short}"
-            elif _btc_crash_dca and is_long:
-                _block = "BTC_CRASH"
-            elif _killswitch_dca:
+            if _killswitch_dca:
                 _block = "KILLSWITCH"
-            elif time_since_last < tier_cooldown:
-                # ★ V10.26: COOLDOWN 보험 제거 — 쿨다운은 기다리면 정상 DCA 진행
-                # 실전 8건 W2/L6 PnL=-$10 → 노이즈 트레이딩
-                continue  # 쿨다운 미만 → 이번 틱 skip
             if _block:
                 print(f"[DCA_BLOCKED] {symbol} DCA T{tier_now} ROI hit "
                       f"(ep={_ref_ep:.4f} roi={roi_now:.2f}%) "
                       f"but blocked ({_block})")
                 break  # 차단 → 다음 심볼
 
-            # ── 차단 아님 → 품질 필터 + DCA 진입 ──
-            # ★ V10.26: CORR_LOW 보험 제거 — corr 부족 시 DCA 자체를 스킵
-            if corr < DCA_MIN_CORR:
-                continue  # corr 부족 → DCA 스킵 (보험 대신 대기)
-            if _has_hedge and tier_now >= 3:
-                continue
-            # ★ v10.8: SH 소스는 DCA 허용 — DCA 체결 시 SH trailing 전환
-            # BALANCE는 CORE와 동일하게 T1~T4 전체 DCA 허용
-            # T2/T3: RSI 느슨한 필터 (≤45 or hook≤45) / T4: 무조건 통과
-            if tier_now >= 4:
-                rsi_ok = True
-            elif is_long:
-                rsi_ok = (rsi_now <= 45) or (rsi_now > rsi_prev and rsi_prev <= 45)
-            else:
-                rsi_ok = (rsi_now >= 55) or (rsi_now < rsi_prev and rsi_prev >= 55)
-            if not rsi_ok:
-                continue
+            # ── 차단 아님 → DCA 진입 ──
+            # ★ V10.29b: corr/hedge/RSI 필터 전면 제거 — ROI 트리거만으로 DCA
 
             # ★ V10.29b FIX: notional 누락 방어 (COUNTER 레거시 dca_targets 호환)
             _notional = target.get("notional", 0)
