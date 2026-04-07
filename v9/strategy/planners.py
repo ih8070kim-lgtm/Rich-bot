@@ -2403,19 +2403,17 @@ def plan_counter(
         if prev_pos is None:
             continue
 
-        # ── 롱/숏 양방향 스캔 ──
-        # ★ V10.29b: 구름 전환 순간뿐 아니라 유지 상태에서도 진입 허용
-        # (쿨다운 + MAX + 포지션 중복 체크로 스팸 방지)
+        # ── 롱/숏 양방향 스캔 (구름 전환 돌파만) ──
         entry_side = None
 
-        # 롱: 구름 위 + TK>KJ
+        # 롱: 구름 위로 전환 + TK>KJ
         if ich["tenkan"] > ich["kijun"]:
-            if cur_pos == "ABOVE":
+            if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
                 entry_side = "buy"
 
-        # 숏: 구름 아래 + TK<KJ
+        # 숏: 구름 아래로 전환 + TK<KJ
         if entry_side is None and ich["tenkan"] < ich["kijun"]:
-            if cur_pos == "BELOW":
+            if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
                 entry_side = "sell"
 
         if entry_side is None:
