@@ -115,7 +115,7 @@ HARD_SL_BY_TIER = {1: -3.8, 2: -5.6, 3: -5.6, 4: -2.0}
 #   진입만 다르고 DCA/TP/SL/Trail은 기존 MR과 동일 (role=CORE_MR)
 # ═══════════════════════════════════════════════════════════════════
 COUNTER_ENABLED       = True
-COUNTER_ROI_THRESH    = -1.0    # MR ROI%가 이 이하이면 트리거
+COUNTER_ROI_THRESH    = -1.0    # ★ V10.29b: 백테스트 검증 — -1.0이 최적 (Δ+103 vs MR_ONLY)
 COUNTER_SIZE_RATIO    = 1.0     # MR T1과 동일 사이즈
 COUNTER_COOLDOWN_SEC  = 600     # 10분 쿨다운 (중복 진입 방지)
 COUNTER_MAX           = 2       # 동시 counter 포지션 최대

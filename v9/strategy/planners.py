@@ -1258,7 +1258,16 @@ def plan_dca(
             if not rsi_ok:
                 continue
 
-            qty = target["notional"] / curr_p if curr_p > 0 else 0.0
+            # ★ V10.29b FIX: notional 누락 방어 (COUNTER 레거시 dca_targets 호환)
+            _notional = target.get("notional", 0)
+            if not _notional:
+                _fb_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                if _fb_cap > 0:
+                    _fb_grid = (_fb_cap / GRID_DIVISOR) * LEVERAGE
+                    _fb_tw = sum(DCA_WEIGHTS)
+                    _fb_w = target.get("weight", DCA_WEIGHTS[min(tier_now-1, len(DCA_WEIGHTS)-1)])
+                    _notional = _fb_grid * _fb_w / _fb_tw
+            qty = _notional / curr_p if curr_p > 0 and _notional > 0 else 0.0
             if qty <= 0:
                 continue
 
