@@ -93,8 +93,8 @@ TRIM_PREORDER_ROI = 1.0    # 레거시 호환
 TRIM_BLENDED_ROI_BY_TIER = {3: 1.0, 2: 1.5}  # ★ V10.29b: 왕복 수익 확보 (0.5/1.0 → 1.0/1.5)
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
-DCA_COOLDOWN_BY_TIER = {2: 600, 3: 300, 4: 120}
-DCA_COOLDOWN_SEC     = 300   # 레거시 호환용 (dca_engine 등 참조 시 사용)
+DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거
+DCA_COOLDOWN_SEC     = 0     # 레거시 호환용
 
 # ═══════════════════════════════════════════════════════════════════
 # TP / Trailing
