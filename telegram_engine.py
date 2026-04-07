@@ -469,6 +469,8 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
 
     # ── 청산 유형 ──
     reason_counts = {}
+    trim_pnl = 0.0
+    trim_count = 0
     for t in trades:
         r = t["reason"]
         if "TRAIL" in r:
@@ -477,6 +479,8 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
             key = "TP1"
         elif "TRIM" in r:
             key = "Trim"
+            trim_pnl += t["pnl"]
+            trim_count += 1
         elif "HARD_SL" in r:
             key = "SL"
         elif "FORCE" in r or "PAIR_CUT" in r:
@@ -549,6 +553,7 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
         f"🏷 <b>Tier</b>\n"
         f"{tier_str}\n"
         f"🔚 {exit_str}\n"
+        f"✂️ Trim: {trim_count}건 ${trim_pnl:+.2f}\n"
         f"🎭 {role_str}"
         f"{pos_line}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"

@@ -1409,6 +1409,42 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                     print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
                 print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
                       f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
+                # ★ V10.29b: Trim PnL 계산 + 텔레그램 + log_trade
+                if old_ep > 0:
+                    if pos_side == "buy":
+                        _trim_pnl = filled_qty * (avg_price - old_ep) * LEVERAGE
+                    else:
+                        _trim_pnl = filled_qty * (old_ep - avg_price) * LEVERAGE
+                    _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE)
+                    _trim_icon = "✅" if _trim_pnl >= 0 else "🔴"
+                    print(f"[TRIM_FILL] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
+                          f"pnl=${_trim_pnl:+.2f} roi={_trim_roi:+.1f}%")
+                    try:
+                        from telegram_engine import send_telegram_message
+                        asyncio.ensure_future(send_telegram_message(
+                            f"✂️ TRIM {sym.replace('/USDT','')} T{_old_tier}→T{_target_tier}\n"
+                            f"{_trim_icon} ${_trim_pnl:+.2f} (roi={_trim_roi:+.1f}%)"))
+                    except Exception:
+                        pass
+                    try:
+                        from v9.logging.logger_csv import log_trade as _lt_trim
+                        _hold = now - float(p.get("time", now) or now)
+                        _lt_trim(
+                            trace_id=f"trim_T{_old_tier}_{sym.replace('/','_')}",
+                            symbol=sym, side=pos_side,
+                            ep=old_ep, exit_price=avg_price, amt=filled_qty,
+                            pnl_usdt=_trim_pnl, roi_pct=_trim_roi,
+                            dca_level=_old_tier,
+                            hold_sec=_hold if _hold > 0 else 0.0,
+                            reason=f"TRIM_T{_old_tier}",
+                            hedge_mode=False, was_hedge=False,
+                            max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
+                            entry_type=str(p.get("entry_type", "MR") or "MR"),
+                            role=str(p.get("role", "") or ""),
+                            source_sym="",
+                        )
+                    except Exception as _lt_e:
+                        print(f"[TRIM_FILL] log_trade 실패(무시): {_lt_e}")
                 # ★ V10.28b: 체결된 tier의 trim_preorders 제거
                 _trp = p.get("trim_preorders", {})
                 _trp.pop(_old_tier, None)
