@@ -239,9 +239,10 @@ def apply_order_results(
                 p["worst_roi"] = 0.0
                 p["max_roi_seen"] = 0.0
                 # ★ V10.28b: Trim 선주문 플래그 — runner가 실제 주문
-                if tier >= 2 and tier <= 4:
+                if tier >= 2 and tier <= 3:
                     from v9.config import calc_trim_price, calc_trim_qty
-                    _trim_price = calc_trim_price(avg_px, pos_side, tier)
+                    # ★ V10.29b: 블렌디드 EP 기준 trim 가격
+                    _trim_price = calc_trim_price(float(p["ep"]), pos_side, tier)
                     _trim_qty = calc_trim_qty(float(p["amt"]), tier)
                     p.setdefault("trim_preorders", {})
                     p["trim_to_place"] = {
@@ -249,7 +250,7 @@ def apply_order_results(
                         "price": round(_trim_price, 8),
                         "qty": _trim_qty,
                         "side": "sell" if pos_side == "buy" else "buy",
-                        "entry_price": avg_px,
+                        "entry_price": float(p["ep"]),  # 블렌디드 EP
                     }
                     print(f"[TRIM_PREP] {sym} {pos_side} T{tier}: "
                           f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f}")

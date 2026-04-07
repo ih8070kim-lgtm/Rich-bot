@@ -82,15 +82,15 @@ DCA_MIN_CORR          = 0.5
 
 # ★ V10.28b: Entry 기준 DCA — 이전 tier 체결가에서 X% 하락 시 트리거
 # EP 기준이 아닌 실제 가격 간격 유지 (EP 압축 방지)
-DCA_ENTRY_BASED   = True
+DCA_ENTRY_BASED   = False  # ★ V10.29b: 블렌디드 EP 기준 통일 (바이낸스 ROI = 봇 ROI)
 DCA_ENTRY_ROI     = -1.8   # 레거시 호환 (T2 기본값)
 # ★ V10.29: T3/T4 DCA 거리 두배 — 노이즈 DCA 방지
 DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 
-# ★ V10.28b: Trim 선주문 — DCA 체결 즉시 tier entry + X% 에 매도 선주문
-TRIM_PREORDER_ROI = 2.0    # 레거시 호환 (T2 기본값)
-# ★ V10.29: T3/T4 익절 두배
-TRIM_PREORDER_ROI_BY_TIER = {1: 2.0, 2: 2.0, 3: 4.0, 4: 4.0}
+# ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
+# T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
+TRIM_PREORDER_ROI = 1.0    # 레거시 호환
+TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.0}  # 블렌디드 EP 기준 trim 임계값
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 600, 3: 300, 4: 120}
@@ -331,12 +331,12 @@ TREND_FILTER_MIN_BARS = 50
 #   중복 구현으로 인한 불일치 방지
 # ═════════════════════════════════════════════════════════════════
 
-def calc_trim_price(entry_px: float, side: str, tier: int) -> float:
-    """Trim 선주문 목표 가격."""
-    roi_pct = TRIM_PREORDER_ROI_BY_TIER.get(tier, TRIM_PREORDER_ROI)
+def calc_trim_price(blended_ep: float, side: str, tier: int) -> float:
+    """★ V10.29b: Trim 선주문 목표 가격 — 블렌디드 EP 기준."""
+    roi_pct = TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
     if side == "buy":
-        return entry_px * (1 + roi_pct / LEVERAGE / 100)
-    return entry_px * (1 - roi_pct / LEVERAGE / 100)
+        return blended_ep * (1 + roi_pct / LEVERAGE / 100)
+    return blended_ep * (1 - roi_pct / LEVERAGE / 100)
 
 
 def calc_trim_qty(total_amt: float, tier: int) -> float:
@@ -366,17 +366,8 @@ def calc_tp1_thresh(dca_level: int, worst_roi: float,
 
 
 def get_sl_entry(p: dict, tier: int) -> float:
-    """HARD_SL 기준 entry price — DCA 트리거와 동일 참조점."""
-    _sl_entry_map = {
-        1: float(p.get("original_ep", p.get("ep", 0)) or 0),
-        2: float(p.get("t2_entry_price", 0) or 0),
-        3: float(p.get("t3_entry_price", 0) or 0),
-        4: float(p.get("t4_entry_price", 0) or 0),
-    }
-    result = _sl_entry_map.get(tier, 0)
-    if result <= 0:
-        result = float(p.get("ep", 0.0) or 0.0)
-    return result
+    """★ V10.29b: HARD_SL 기준 = 블렌디드 EP (바이낸스 ROI와 동일)."""
+    return float(p.get("ep", 0.0) or 0.0)
 
 
 # ═══════════════════════════════════════════════════════════════

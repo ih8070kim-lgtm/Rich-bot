@@ -244,7 +244,7 @@ from v9.config import (
     OPEN_CORR_MIN,
     SKEW_STAGE2_TRIGGER,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
-    DCA_ENTRY_BASED, DCA_ENTRY_ROI, TRIM_PREORDER_ROI, TRIM_PREORDER_ROI_BY_TIER,
+    DCA_ENTRY_BASED, DCA_ENTRY_ROI, TRIM_PREORDER_ROI,
     DCA_ENTRY_ROI_BY_TIER,
     calc_trim_qty, calc_tp1_thresh, get_sl_entry,
 )
@@ -451,7 +451,7 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # DCA ROI 트리거
 # ★ V10.28b: Entry 기준 -1.8% 균일 (config.DCA_ENTRY_ROI 사용)
 # 레거시 호환: _build_dca_targets 사이징용으로만 사용
-DCA_ROI_TRIGGERS = {2: -1.8, 3: -1.8, 4: -1.8}
+DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ V10.29b: 블렌디드 EP 기준 (바이낸스 ROI 그대로)
 
 REGIME_HARD_SL       = {"BAD": -5.0, "LOW": -6.5, "NORMAL": -8.0, "HIGH": -10.0}
 _REGIME_WIDTH = {"HIGH": 4, "NORMAL": 3, "LOW": 2, "BAD": 1}
@@ -1503,35 +1503,29 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         _is_heavy_tp = (_urg["heavy_side"] == p.get("side", ""))
         tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp)
 
-        # ★ V10.27f: DCA Trim — blocked 시에도 trim-sized 스큐 시뮬로 허용 판단
-        # ★ V10.28: 독립 DCA Trim — 각 tier가 자체 +X% 게임
-        # gate 조건(blocked/roi<tp1) 제거 → tier entry ROI만으로 판단
-        # Trim이 TP1보다 우선: 해당 tier분만 정확히 매도 → 하위 tier 독립 게임 복귀
+        # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
+        # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
         if (dca_level >= 2 and not _skew["full_close"]):
-            _trim_ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
-            _trim_ep = float(p.get(_trim_ep_keys.get(dca_level, ""), 0.0) or 0.0)
-            if _trim_ep > 0:
-                _trim_roi = calc_roi_pct(_trim_ep, curr_p, p.get("side", ""), LEVERAGE)
-                # ★ V10.29: tier별 trim ROI config 반영
-                _DCA_TRIM_ROI = TRIM_PREORDER_ROI_BY_TIER.get(dca_level, TRIM_PREORDER_ROI)
-                if _trim_roi >= _DCA_TRIM_ROI:
-                    total_qty = float(p.get("amt", 0.0))
-                    trim_qty = calc_trim_qty(total_qty, dca_level)
-                    _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-                    if trim_qty >= _sym_min_qty:
-                        intents.append(Intent(
-                            trace_id=_tid(),
-                            intent_type=IntentType.TP1,
-                            symbol=symbol,
-                            side="sell" if is_long else "buy",
-                            qty=trim_qty,
-                            price=curr_p,
-                            reason=f"DCA_TRIM(ep={_trim_ep:.4f},roi={_trim_roi:.1f}→T{dca_level-1})_T{dca_level}",
-                            metadata={"roi_gross": roi_gross, "is_trim": True,
-                                      "target_tier": dca_level - 1,
-                                      "skew": _skew["skew"]},
-                        ))
-                        continue
+            from v9.config import TRIM_BLENDED_ROI_BY_TIER
+            _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0)
+            if roi_gross >= _DCA_TRIM_ROI:
+                total_qty = float(p.get("amt", 0.0))
+                trim_qty = calc_trim_qty(total_qty, dca_level)
+                _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+                if trim_qty >= _sym_min_qty:
+                    intents.append(Intent(
+                        trace_id=_tid(),
+                        intent_type=IntentType.TP1,
+                        symbol=symbol,
+                        side="sell" if is_long else "buy",
+                        qty=trim_qty,
+                        price=curr_p,
+                        reason=f"DCA_TRIM(roi={roi_gross:.1f}%≥{_DCA_TRIM_ROI}→T{dca_level-1})_T{dca_level}",
+                        metadata={"roi_gross": roi_gross, "is_trim": True,
+                                  "target_tier": dca_level - 1,
+                                  "skew": _skew["skew"]},
+                    ))
+                    continue
 
         # ★ blocked → 정규 TP1 차단 (trim만 허용)
         if _is_blocked:
