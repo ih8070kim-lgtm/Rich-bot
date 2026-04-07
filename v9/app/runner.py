@@ -47,6 +47,17 @@ except Exception as _tg_err:
     _TELEGRAM_OK = False
 from v9.risk.risk_manager import generate_corrguard_intents
 
+# ★ Beta Cycle 엔진
+try:
+    from v9.config import BC_ENABLED as _BC_ENABLED
+    if _BC_ENABLED:
+        from v9.engines.beta_cycle import bc_init, bc_on_daily_close, bc_on_tick
+    else:
+        _BC_ENABLED = False
+except Exception as _bc_err:
+    print(f"[V9 Runner] Beta Cycle import 실패(비활성): {_bc_err}")
+    _BC_ENABLED = False
+
 
 # ═══════════════════════════════════════════════════════════════
 # v10.11b: 바이낸스 ↔ 포지션북 동기화
@@ -1607,6 +1618,11 @@ async def _main_loop(ex_init, dry_run: bool):
     print(f"[V9 Runner] 시작 (dry_run={dry_run})")
     ex = ex_init  # 재연결 시 교체 가능
 
+    # ★ Beta Cycle 초기화
+    if _BC_ENABLED:
+        bc_init(ex)
+        print("[V9 Runner] Beta Cycle 엔진 활성화")
+
     # ── 상태 로드 ────────────────────────────────────────────────
     book = load_position_book()
     st           = book['st']
@@ -2035,6 +2051,30 @@ async def _main_loop(ex_init, dry_run: bool):
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
             # ★ v10.14d: plan_dca는 generate_all_intents 안에서 실행 (보험 타이밍 수정)
             intents += generate_corrguard_intents(snapshot, st, system_state)
+
+            # ★ Beta Cycle 통합
+            if _BC_ENABLED:
+                # 일봉 마감 감지 (UTC 00:00 직후, 1일 1회)
+                _bc_hour = int(time.strftime("%H", time.gmtime()))
+                _bc_today = time.strftime("%Y-%m-%d", time.gmtime())
+                if not hasattr(_main_loop, '_bc_last_daily'):
+                    _main_loop._bc_last_daily = ""
+                if _bc_hour == 0 and _main_loop._bc_last_daily != _bc_today:
+                    _main_loop._bc_last_daily = _bc_today
+                    try:
+                        _bc_daily_intents = bc_on_daily_close(snapshot, st, system_state)
+                        intents += _bc_daily_intents
+                        if _bc_daily_intents:
+                            print(f"[BC] 일봉 시그널: {len(_bc_daily_intents)}건 진입 intent")
+                    except Exception as _bc_e:
+                        print(f"[BC] on_daily_close 오류(무시): {_bc_e}")
+
+                # 매 틱 포지션 관리
+                try:
+                    _bc_tick_intents = bc_on_tick(snapshot, st)
+                    intents += _bc_tick_intents
+                except Exception as _bc_e2:
+                    print(f"[BC] on_tick 오류(무시): {_bc_e2}")
 
             # ★ V10.29: Counter 디버그 → 텔레그램 전송
             _ctr_msgs = system_state.pop("_counter_tg", [])

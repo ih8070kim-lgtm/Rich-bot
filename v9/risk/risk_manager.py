@@ -151,28 +151,41 @@ def evaluate_intent(
 
     # ── R4: 슬롯 ────────────────────────────────────────────────
     if itype == IntentType.OPEN:
-        # ★ v10.15: 전체 하드캡 5 먼저 체크
-        if slots.risk_total >= TOTAL_MAX_SLOTS:
-            return _reject(RejectCode.REJECT_SLOT_LIMIT, "SLOTS:TOTAL_CAP")
         _intent_role = meta.get("role", "CORE_MR")
-        if _intent_role == "CORE_HEDGE":
-            # HEDGE: CORE_HEDGE 카운트 ≤ MAX_HEDGE_SLOTS(3)
-            from v9.config import MAX_HEDGE_SLOTS
-            _h_slots = count_slots(st, role_filter="CORE_HEDGE")
-            if _h_slots.risk_total >= MAX_HEDGE_SLOTS:
-                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:HEDGE_CAP({_h_slots.risk_total}/{MAX_HEDGE_SLOTS})")
-        elif is_asym:
-            ok, reason = can_open_hard(slots, side)
-            if not ok:
-                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:{reason}")
+
+        # ★ Beta Cycle: MR 슬롯과 독립 — BC 자체 상한만 체크
+        if _intent_role == "BC":
+            from v9.config import BC_MAX_POS
+            _bc_count = 0
+            for _bc_sym, _bc_sd in st.items():
+                if isinstance(_bc_sd, dict):
+                    _bc_p = _bc_sd.get("p_short")
+                    if isinstance(_bc_p, dict) and _bc_p.get("role") == "BC":
+                        _bc_count += 1
+            if _bc_count >= BC_MAX_POS:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:BC_CAP({_bc_count}/{BC_MAX_POS})")
         else:
-            # MR: CORE_MR만 카운트, 방향당 MAX_MR_PER_SIDE(4)
-            from v9.config import MAX_MR_PER_SIDE
-            _mr_slots = count_slots(st, role_filter="CORE_MR")
-            if side == "buy" and _mr_slots.risk_long >= MAX_MR_PER_SIDE:
-                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_LONG({_mr_slots.risk_long}/{MAX_MR_PER_SIDE})")
-            if side == "sell" and _mr_slots.risk_short >= MAX_MR_PER_SIDE:
-                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_SHORT({_mr_slots.risk_short}/{MAX_MR_PER_SIDE})")
+            # ★ v10.15: 전체 하드캡 (BC 제외) 먼저 체크
+            if slots.risk_total >= TOTAL_MAX_SLOTS:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, "SLOTS:TOTAL_CAP")
+            if _intent_role == "CORE_HEDGE":
+                # HEDGE: CORE_HEDGE 카운트 ≤ MAX_HEDGE_SLOTS(3)
+                from v9.config import MAX_HEDGE_SLOTS
+                _h_slots = count_slots(st, role_filter="CORE_HEDGE")
+                if _h_slots.risk_total >= MAX_HEDGE_SLOTS:
+                    return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:HEDGE_CAP({_h_slots.risk_total}/{MAX_HEDGE_SLOTS})")
+            elif is_asym:
+                ok, reason = can_open_hard(slots, side)
+                if not ok:
+                    return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:{reason}")
+            else:
+                # MR: CORE_MR만 카운트, 방향당 MAX_MR_PER_SIDE(4)
+                from v9.config import MAX_MR_PER_SIDE
+                _mr_slots = count_slots(st, role_filter="CORE_MR")
+                if side == "buy" and _mr_slots.risk_long >= MAX_MR_PER_SIDE:
+                    return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_LONG({_mr_slots.risk_long}/{MAX_MR_PER_SIDE})")
+                if side == "sell" and _mr_slots.risk_short >= MAX_MR_PER_SIDE:
+                    return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:MR_SHORT({_mr_slots.risk_short}/{MAX_MR_PER_SIDE})")
 
     # ── R5: T4 최대 손실 ────────────────────────────────────────
     if itype == IntentType.DCA and dca_level >= 4:
@@ -185,7 +198,8 @@ def evaluate_intent(
                 return _reject(RejectCode.FORCE_T4_MAXLOSS_BREACH, f"roi={roi_r5:.2f}%")
 
     # ── R6: 쿨다운 / Corr ────────────────────────────────────────
-    if itype in (IntentType.OPEN, IntentType.DCA) and not is_asym:
+    # ★ BC는 자체 쿨다운 + excess return 사용 → MR 쿨다운/Corr 스킵
+    if itype in (IntentType.OPEN, IntentType.DCA) and not is_asym and meta.get("role") != "BC":
         now      = time.time()
         cd_until = cooldowns.get(sym, 0.0)
         if now < cd_until:

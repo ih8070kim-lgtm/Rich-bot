@@ -377,3 +377,28 @@ def get_sl_entry(p: dict, tier: int) -> float:
     if result <= 0:
         result = float(p.get("ep", 0.0) or 0.0)
     return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# Beta Cycle (v3 Final — Short-Only)
+# ═══════════════════════════════════════════════════════════════
+BC_ENABLED          = True
+BC_ARM_THRESH       = 0.05      # excess return ≥ 5% → ARMED
+BC_NORM_THRESH      = 0.04      # excess ≤ 4% → 정상화 진입
+BC_SHORT_SL         = 8.0       # SL 8%
+BC_SHORT_TP         = 6.0       # TP 6%
+BC_TRAIL_ACTIVATION = 0.03      # 3% 수익 시 트레일 시작
+BC_TRAIL_FLOOR      = 0.015     # 트레일 최소 1.5%
+BC_TRAIL_ATR_MULT   = 1.5       # ATR × 1.5
+BC_COOLDOWN_DAYS    = 3         # 동일 심볼 재진입 쿨다운
+BC_ENTRY_PER_DAY    = 3         # 하루 최대 진입
+BC_MAX_POS          = 5         # BC 최대 동시 포지션
+BC_SIZE_DIVISOR     = 4         # equity / 4 ≈ 25%
+BC_MAX_HOLD_HOURS   = 336       # 14일
+BC_ARMED_EXPIRY_D   = 30        # ARMED 만료
+BC_PULLBACK_MAX     = 0.08      # 고점 대비 8% 이상 빠지면 스킵
+BC_PULLBACK_MIN     = 0.005     # 0.5% 미만이면 대기
+BC_UNI_TOP_N        = 20        # 일일 유니버스 상위 20개
+BC_BETA_SHORT_D     = 7
+BC_BETA_LONG_D      = 30
+BC_RETURN_WINDOW     = 7
