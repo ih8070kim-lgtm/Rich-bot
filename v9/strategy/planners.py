@@ -532,8 +532,7 @@ def plan_open(
     # ★ v10.9: BTC Crash Filter — 급락 시 롱만 차단 (숏 MR은 허용)
     _btc_crash_active = _check_btc_crash(snapshot, system_state)
 
-    _long_atr_base = _ATR_BASE   # ★ V10.27: 통합 2.4
-    _short_atr_base = _ATR_BASE
+    # ★ V10.29c: ATR 3.0 고정 (슬롯 패널티 제거)
 
     # ── ★ V10.29b: CORE_HEDGE 제거 — MR 전략에서 역효과 (net -16 USDT)
     # 소스 회복 시 헷지가 손실, 스큐 관리는 진입차단+TP할인으로 충분
@@ -572,26 +571,10 @@ def plan_open(
     if not long_targets and not short_targets:
         return intents
 
-    # ★ V10.27: 슬롯 불균형 ±패널티 — heavy +0.2 / light -0.2 per slot diff
-    # L3 S1 → diff=2 → 롱 ATR=2.8(진입↓) 숏 ATR=2.0(진입↑)
-    _slot_diff = _core_long - _core_short  # 양수면 롱이 heavy
-    _penalty = abs(_slot_diff) * _ATR_SLOT_STEP
-    if _slot_diff > 0:
-        _mr_atr_mult_long  = _long_atr_base + _penalty   # heavy: 어렵게
-        _mr_atr_mult_short = max(1.6, _short_atr_base - _penalty)  # light: 쉽게 (floor 1.6)
-    elif _slot_diff < 0:
-        _mr_atr_mult_long  = max(1.6, _long_atr_base - _penalty)
-        _mr_atr_mult_short = _short_atr_base + _penalty
-    else:
-        _mr_atr_mult_long  = _long_atr_base
-        _mr_atr_mult_short = _short_atr_base
-    _dyn_atr_key = (round(_mr_atr_mult_long, 2), round(_mr_atr_mult_short, 2))
-    if _slot_diff != 0:
-        _prev = getattr(plan_open, '_last_dyn_atr', None)
-        if _prev != _dyn_atr_key:
-            print(f"[SLOT_ATR] L={_core_long} S={_core_short} diff={_slot_diff} → "
-                  f"atrL={_mr_atr_mult_long:.1f} atrS={_mr_atr_mult_short:.1f}")
-            plan_open._last_dyn_atr = _dyn_atr_key
+    # ★ V10.29c: 슬롯 불균형 패널티 제거 — ATR 3.0 고정
+    # 기존 버그: mr_short_ok가 _mr_atr_mult_long 사용 → 숏 패널티 미적용
+    # 한쪽만 작동하는 패널티는 품질 악화만 초래 → 깔끔하게 제거
+    _mr_atr_mult = _ATR_BASE  # 3.0 고정
 
     # ★ V10.18: Slot Balance 루프 밖 1회 캐싱
     _open_longs, _open_shorts = _count_active_by_side(st)
@@ -726,9 +709,9 @@ def plan_open(
         # ★ v10.7: Skew 완화는 plan_soft_hedge에서 미러링으로 처리 (진입조건 왜곡 제거)
 
         # ★ v10.12: 롱 EMA10, 숏 EMA5
-        mr_long_ok  = can_long  and ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult_long)
-        # ★ V10.29b: 숏 EMA5 제거 — EMA10만 사용 (숏 WR 69%→품질 개선)
-        mr_short_ok = can_short and ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult_long)
+        mr_long_ok  = can_long  and ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult)
+        # ★ V10.29c FIX: 기존 버그 — _mr_atr_mult_long 사용 → _mr_atr_mult 통일
+        mr_short_ok = can_short and ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult)
 
         # ★ V10.29b: E30 전면 제거 — 7건 중 6건 손실, 건당 -$10
         mr_e30_long_ok  = False
@@ -1349,6 +1332,9 @@ def plan_dca(
             if _u_dca_lv >= _urg_max_tier:
                 continue
             if _up.get("max_dca_reached"):
+                continue
+            # ★ V10.29c: pending_dca 체크 — 이미 DCA 주문 대기 중이면 스킵 (DEDUP 스팸 방지)
+            if _up.get("pending_dca"):
                 continue
             # 쿨다운 체크
             _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
@@ -2292,6 +2278,7 @@ def plan_pair_cut(
 _bb_cooldowns: Dict[str, float] = {}       # "SYM_side" → next allowed timestamp
 _bb_squeeze_count: Dict[str, int] = {}     # SYM → 연속 스퀴즈 봉 수
 _bb_prev_squeeze_len: Dict[str, int] = {}  # SYM → 직전 스퀴즈 길이
+_bb_last_bar_ts: Dict[str, int] = {}       # ★ V10.29c: SYM → 마지막 처리한 15m 봉 ts (봉 단위 카운팅)
 
 # BB Squeeze 파라미터 (백테스트 최적: BB15 WP10% VS1.5 SQ3)
 _BB_P = 20; _BB_M = 2.0
@@ -2353,7 +2340,7 @@ def plan_counter(
     st: Dict,
     system_state: Dict,
 ) -> List[Intent]:
-    """★ V10.29b: BB Squeeze 브레이크아웃 → MR OR 진입.
+    """★ V10.29c: BB Squeeze 브레이크아웃 → MR OR 진입.
     role=CORE_MR → DCA/TP/SL 전부 기존 MR과 동일."""
     from v9.config import (
         COUNTER_ENABLED, COUNTER_COOLDOWN_SEC, COUNTER_MAX,
@@ -2366,6 +2353,47 @@ def plan_counter(
     intents: List[Intent] = []
     now = time.time()
     prices = snapshot.all_prices or {}
+
+    # ★ V10.29c: Cold-start 백필 — 최초 1회, 히스토리컬 15m 데이터에서 스퀴즈 상태 복구
+    # 재시작 후 restore에서 복원 못한 심볼 또는 최초 배포 시 필요
+    _backfill_done = getattr(plan_counter, "_backfill_done", False)
+    if not _backfill_done:
+        plan_counter._backfill_done = True
+        _ohlcv_bf = snapshot.ohlcv_pool or {}
+        _bf_count = 0
+        for _bf_sym, _bf_pool in _ohlcv_bf.items():
+            if _bf_sym in _bb_squeeze_count or _bf_sym in _bb_prev_squeeze_len:
+                continue  # 이미 restore된 심볼은 스킵
+            _bf_15m = _bf_pool.get("15m", [])
+            if len(_bf_15m) < _KC_P + 30:
+                continue
+            _bf_closes = [float(b[4]) for b in _bf_15m]
+            _bf_highs = [float(b[2]) for b in _bf_15m]
+            _bf_lows = [float(b[3]) for b in _bf_15m]
+            # 최근 60봉(15시간)을 봉 단위로 역산하여 스퀴즈 이력 구축
+            _bf_sq = 0
+            _bf_psq = 0
+            for _bi in range(_KC_P + 1, len(_bf_15m) - max(0, len(_bf_15m) - 60)):
+                _end = _bi + 1
+                _bf_c = _bf_closes[:_end]
+                _bf_h = _bf_highs[:_end]
+                _bf_l = _bf_lows[:_end]
+                _bbb = _calc_bb_15m(_bf_c)
+                _bkc = _calc_kc_15m(_bf_c, _bf_h, _bf_l)
+                if not _bbb or not _bkc:
+                    continue
+                if _bbb[0] < _bkc[0] and _bbb[2] > _bkc[2]:
+                    _bf_sq += 1
+                else:
+                    if _bf_sq > 0:
+                        _bf_psq = _bf_sq
+                    _bf_sq = 0
+            _bb_squeeze_count[_bf_sym] = _bf_sq
+            if _bf_psq > 0:
+                _bb_prev_squeeze_len[_bf_sym] = _bf_psq
+                _bf_count += 1
+        if _bf_count > 0:
+            print(f"[BB_BACKFILL] {_bf_count}개 심볼 스퀴즈 이력 복구")
 
     # 현재 BB 포지션 수
     cnt_active = 0
@@ -2430,6 +2458,14 @@ def plan_counter(
         # 스퀴즈 판정
         squeezing = bb[0] < kc[0] and bb[2] > kc[2]
 
+        # ★ V10.29c: 봉 단위 카운팅 — 같은 15m 봉이면 전체 스킵
+        # 백테스트(봉 루프)와 동일: SQ_MIN=3 = 3봉 = 45분
+        _last_ts = float(ohlcv_15m[-1][0]) if ohlcv_15m else 0
+        _prev_ts = _bb_last_bar_ts.get(sym, 0)
+        if _last_ts == _prev_ts:
+            continue  # 같은 봉이면 스킵 (이미 처리함)
+        _bb_last_bar_ts[sym] = _last_ts
+
         if squeezing:
             _bb_squeeze_count[sym] = _bb_squeeze_count.get(sym, 0) + 1
         else:
@@ -2449,11 +2485,19 @@ def plan_counter(
 
         # Width percentile
         wp = _bb_width_pctile(closes[:-1])
-        if wp > _WP_MAX: continue
+        if wp > _WP_MAX:
+            # ★ V10.29c: WP 필터에서 탈락한 후보 주기적 로그 (5분 간격)
+            _wp_log_key = f"_bb_wp_log_{sym}"
+            if now - system_state.get(_wp_log_key, 0) > 300:
+                system_state[_wp_log_key] = now
+                print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%}(>{_WP_MAX:.0%}) — WP 탈락")
+            continue
 
         # Volume surge
         vs = _vol_surge_15m(volumes)
-        if vs < _VS_GATE: continue
+        if vs < _VS_GATE:
+            print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x(<{_VS_GATE}) — VS 탈락")
+            continue
 
         # 방향 결정 (BB 돌파)
         entry_side = None
@@ -2461,12 +2505,18 @@ def plan_counter(
             entry_side = "buy"
         elif curr_p < bb_prev[2]:
             entry_side = "sell"
-        if not entry_side: continue
+        if not entry_side:
+            print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x — 돌파 미발생(price={curr_p:.4f} BB=[{bb_prev[2]:.4f},{bb_prev[0]:.4f}])")
+            continue
 
         # BTC 필터
         if _BB_BTC_FILTER:
-            if entry_side == "buy" and btc_dir < 0: continue
-            if entry_side == "sell" and btc_dir > 0: continue
+            if entry_side == "buy" and btc_dir < 0:
+                print(f"[BB_FILTER] {sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                continue
+            if entry_side == "sell" and btc_dir > 0:
+                print(f"[BB_FILTER] {sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                continue
 
         # 한 번만 트리거
         _bb_prev_squeeze_len[sym] = 0
@@ -2590,13 +2640,24 @@ def save_strategy_state(system_state: dict):
     system_state["_zombie_cooldown"] = _zombie_cooldown
     system_state["_open_dir_cd"] = _open_dir_cd
     system_state["_bad_regime_active"] = _bad_regime_active
+    # ★ V10.29c: BB Squeeze 상태 영속화 (재시작 시 스퀴즈 관측 이력 보존)
+    system_state["_bb_squeeze_count"] = dict(_bb_squeeze_count)
+    system_state["_bb_prev_squeeze_len"] = dict(_bb_prev_squeeze_len)
+    system_state["_bb_cooldowns"] = dict(_bb_cooldowns)
 
 
 def restore_strategy_state(system_state: dict):
     """system_state → 모듈 글로벌 (부팅 시 호출)."""
     global _zombie_cooldown, _open_dir_cd, _bad_regime_active
+    global _bb_squeeze_count, _bb_prev_squeeze_len, _bb_cooldowns
     _zombie_cooldown = system_state.get("_zombie_cooldown", {"buy": 0.0, "sell": 0.0})
     _open_dir_cd = system_state.get("_open_dir_cd", {"buy": 0.0, "sell": 0.0})
     _bad_regime_active = system_state.get("_bad_regime_active", False)
+    # ★ V10.29c: BB Squeeze 상태 복원
+    _bb_squeeze_count = system_state.get("_bb_squeeze_count", {})
+    _bb_prev_squeeze_len = system_state.get("_bb_prev_squeeze_len", {})
+    _bb_cooldowns = system_state.get("_bb_cooldowns", {})
+    _bb_active = sum(1 for v in _bb_prev_squeeze_len.values() if v >= _SQ_MIN)
     print(f"[RESTORE] strategy state: zombie_cd={_zombie_cooldown}, "
-          f"bad_regime={_bad_regime_active}")
+          f"bad_regime={_bad_regime_active}, "
+          f"bb_squeeze_ready={_bb_active}syms")
