@@ -32,6 +32,21 @@ def _now_str() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+# ★ V10.29c: 시스템 이벤트 로그 (부팅/복원/BB/트림 등 — CSV 추출 가능)
+def log_system(tag: str, msg: str):
+    """log_system.csv에 한 줄 추가. 추출 도구에서 확인 가능."""
+    try:
+        fp = _log_path("log_system.csv")
+        is_new = not os.path.exists(fp)
+        with open(fp, "a", newline="") as f:
+            w = csv.writer(f)
+            if is_new:
+                w.writerow(["timestamp", "tag", "message"])
+            w.writerow([_now_str(), tag, msg])
+    except Exception:
+        pass
+
+
 def _append_csv(filepath: str, columns: list, row: dict):
     """헤더 없으면 자동 생성 후 append"""
     try:

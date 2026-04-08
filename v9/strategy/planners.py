@@ -2346,6 +2346,8 @@ def plan_counter(
                 _bf_count += 1
         if _bf_count > 0:
             print(f"[BB_BACKFILL] {_bf_count}개 심볼 스퀴즈 이력 복구")
+            from v9.logging.logger_csv import log_system
+            log_system("BB_BACKFILL", f"{_bf_count}개 심볼 스퀴즈 이력 복구")
 
     # 현재 BB 포지션 수
     cnt_active = 0
@@ -2613,3 +2615,8 @@ def restore_strategy_state(system_state: dict):
     print(f"[RESTORE] strategy state: zombie_cd={_zombie_cooldown}, "
           f"bad_regime={_bad_regime_active}, "
           f"bb_squeeze_ready={_bb_active}syms")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("RESTORE", f"strategy bb_ready={_bb_active} bad_regime={_bad_regime_active}")
+    except Exception:
+        pass

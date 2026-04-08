@@ -397,3 +397,8 @@ def cb_restore_state(system_state: dict):
         print(f"[CB_RESTORE] crash ACTIVE roc={_crash_roc:+.1%} entries={_crash_entries}")
     else:
         print(f"[CB_RESTORE] idle (last_crash={_last_crash_ts:.0f})")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("CB_RESTORE", f"active={_crash_active} roc={_crash_roc:+.1%}")
+    except Exception:
+        pass

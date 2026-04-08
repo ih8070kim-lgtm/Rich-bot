@@ -526,3 +526,8 @@ def bc_restore_state(system_state: dict):
         print(f"[BC_RESTORE] armed={list(_armed.keys())} cd={len(_cooldown_until)}")
     else:
         print(f"[BC_RESTORE] armed=0 cd={len(_cooldown_until)}")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("BC_RESTORE", f"armed={len(_armed)} cd={len(_cooldown_until)}")
+    except Exception:
+        pass
