@@ -1252,89 +1252,88 @@ def plan_dca(
             break
 
     # ═════════════════════════════════════════════════════════════
-    # ★ V10.27f: URGENCY_DCA — light side 불타기 (ROI 높은 순, 2슬롯 한정)
-    # urgency >= 15 → T2까지 / urgency >= 20 → T3까지
-    # 기존 DCA ROI 트리거 무관, urgency 자체가 트리거
+    # ★ V10.29c: URGENCY_DCA — T1 TP 블록 시에만 light side T2 불타기
+    # 반대편 T3가 깊어서 T1 TP가 _t3_defense로 블록된 경우,
+    # T2로 밀어서 trim 왕복으로 수익 추출. 블록 해제 시 자연 복귀.
     # ═════════════════════════════════════════════════════════════
-    _URG_DCA_MED = 15
-    _URG_DCA_HIGH = 20
     _URG_DCA_MAX_SLOTS = 2
 
-    if _urg_dca["urgency"] >= _URG_DCA_MED and _dca_heavy_side:
-        _urg_light_side = _urg_dca["light_side"]
-        _urg_max_tier = 2  # ★ V10.29b: T2 cap — T3 스윙 보호
-        _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
+    # light side T1 중 TP가 블록된 포지션 찾기
+    _urg_blocked_candidates = []
+    _urg_prices = snapshot.all_prices or {}
+    _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
 
-        # light side 후보: ROI 높은 순 정렬
-        _urg_candidates = []
-        _urg_prices = snapshot.all_prices or {}
-        for _us, _up in _pos_items(st):
-            if _up.get("side", "") != _urg_light_side:
-                continue
-            if _up.get("role", "") in _HEDGE_ROLES_SLOT:
-                continue
-            if _us in _urg_dca_syms:
-                continue  # 이미 정상 DCA intent 생성됨
-            _u_dca_lv = int(_up.get("dca_level", 1) or 1)
-            if _u_dca_lv >= _urg_max_tier:
-                continue
-            if _up.get("max_dca_reached"):
-                continue
-            # ★ V10.29c: pending_dca 체크 — 이미 DCA 주문 대기 중이면 스킵 (DEDUP 스팸 방지)
-            if _up.get("pending_dca"):
-                continue
-            # 쿨다운 체크
-            _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
-            _u_next_tier = _u_dca_lv + 1
-            _u_cd = DCA_COOLDOWN_BY_TIER.get(_u_next_tier, DCA_COOLDOWN_SEC)
-            _u_cd = int(_u_cd * max(0.5, 1.0 - _urg_dca["urgency"] * 0.03))
-            if time.time() - _u_last_dca < _u_cd:
-                continue
-            _u_cp = float(_urg_prices.get(_us, 0))
-            _u_ep = float(_up.get("ep", 0))
-            if _u_cp <= 0 or _u_ep <= 0:
-                continue
-            _u_roi = calc_roi_pct(_u_ep, _u_cp, _urg_light_side, LEVERAGE)
-            _urg_candidates.append((_us, _up, _u_cp, _u_roi, _u_dca_lv))
+    for _us, _up in _pos_items(st):
+        if _up.get("role", "") in _HEDGE_ROLES_SLOT:
+            continue
+        _u_dca_lv = int(_up.get("dca_level", 1) or 1)
+        if _u_dca_lv != 1:  # T1만 대상
+            continue
+        if _up.get("max_dca_reached") or _up.get("pending_dca"):
+            continue
+        if _us in _urg_dca_syms:
+            continue
 
-        # ROI 높은 순 정렬 → 상위 2개
-        _urg_candidates.sort(key=lambda x: -x[3])
-        _urg_filled = 0
+        _u_side = _up.get("side", "")
+        if not _u_side:
+            continue
 
-        for _us, _up, _u_cp, _u_roi, _u_dca_lv in _urg_candidates:
-            if _urg_filled >= _URG_DCA_MAX_SLOTS:
-                break
-            _u_next_tier = _u_dca_lv + 1
-            # 사이징: 기존 DCA weight 기반
-            _u_ep = float(_up.get("ep", 0))
-            _u_amt = float(_up.get("amt", 0))
-            _u_notional = _u_ep * _u_amt
-            _u_cum_w = sum(DCA_WEIGHTS[:_u_dca_lv])
-            _u_total_w = sum(DCA_WEIGHTS)
-            _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
-            _u_tier_w = DCA_WEIGHTS[_u_next_tier - 1] if _u_next_tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
-            _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
-            if _u_qty <= 0:
-                continue
+        # _t3_defense 체크: 이 포지션의 TP가 블록됐는지
+        _u_def = _t3_defense(_u_side, 1, st, snapshot)
+        if not _u_def.get("blocked", False):
+            continue  # 블록 안 됐으면 정상 TP 가능 → 불타기 불필요
 
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.DCA,
-                symbol=_us,
-                side=_urg_light_side,
-                qty=_u_qty,
-                price=_u_cp,
-                reason=f"URGENCY_DCA(urg={_urg_dca['urgency']:.0f},roi={_u_roi:+.1f}%)_T{_u_next_tier}",
-                metadata={
-                    "tier": _u_next_tier,
-                    "roi_now": _u_roi,
-                    "_expected_role": _up.get("role", ""),
-                    "locked_regime": _up.get("locked_regime", "LOW"),
-                },
-            ))
-            _urg_filled += 1
-            print(f"[URGENCY_DCA] {_us} {_urg_light_side} T{_u_dca_lv}→T{_u_next_tier} "
-                  f"roi={_u_roi:+.1f}% urg={_urg_dca['urgency']:.0f}")
+        # 쿨다운 체크
+        _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
+        _u_cd = DCA_COOLDOWN_BY_TIER.get(2, DCA_COOLDOWN_SEC)
+        if time.time() - _u_last_dca < _u_cd:
+            continue
+
+        _u_cp = float(_urg_prices.get(_us, 0))
+        _u_ep = float(_up.get("ep", 0))
+        if _u_cp <= 0 or _u_ep <= 0:
+            continue
+        _u_roi = calc_roi_pct(_u_ep, _u_cp, _u_side, LEVERAGE)
+        _urg_blocked_candidates.append((_us, _up, _u_cp, _u_roi, _u_side))
+
+    # ROI 높은 순 → 상위 2개
+    _urg_blocked_candidates.sort(key=lambda x: -x[3])
+    _urg_filled = 0
+
+    for _us, _up, _u_cp, _u_roi, _u_side in _urg_blocked_candidates:
+        if _urg_filled >= _URG_DCA_MAX_SLOTS:
+            break
+        _u_next_tier = 2
+        # 사이징: 기존 DCA weight 기반
+        _u_ep = float(_up.get("ep", 0))
+        _u_amt = float(_up.get("amt", 0))
+        _u_notional = _u_ep * _u_amt
+        _u_cum_w = sum(DCA_WEIGHTS[:1])
+        _u_total_w = sum(DCA_WEIGHTS)
+        _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
+        _u_tier_w = DCA_WEIGHTS[1]
+        _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
+        if _u_qty <= 0:
+            continue
+
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=IntentType.DCA,
+            symbol=_us,
+            side=_u_side,
+            qty=_u_qty,
+            price=_u_cp,
+            reason=f"URGENCY_DCA(tp_blocked,roi={_u_roi:+.1f}%)_T{_u_next_tier}",
+            metadata={
+                "tier": _u_next_tier,
+                "roi_now": _u_roi,
+                "_expected_role": _up.get("role", ""),
+                "locked_regime": _up.get("locked_regime", "LOW"),
+            },
+        ))
+        _urg_filled += 1
+        print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
+              f"roi={_u_roi:+.1f}% (TP blocked by opp T3)")
 
     return intents
 
