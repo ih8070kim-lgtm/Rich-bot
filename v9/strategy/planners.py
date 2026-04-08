@@ -727,18 +727,12 @@ def plan_open(
 
         # ★ v10.12: 롱 EMA10, 숏 EMA5
         mr_long_ok  = can_long  and ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult_long)
-        # ★ PATCH: 숏 OR 조건 — 기존(EMA5+1.8×) OR 롱 미러링(EMA10+2.4×)
-        # 횡보장에서 EMA5가 너무 빠르게 따라와 기존 조건이 거의 안 충족됨
-        # EMA10 기준 미러링은 롱과 동일한 거리 감지 → 대칭적 MR 포착
-        _mr_short_ema5  = ema_5_15m  > 0 and curr_p > ema_5_15m  + atr_coin * _mr_atr_mult_short
-        _mr_short_ema10 = ema_10_15m > 0 and curr_p > ema_10_15m + atr_coin * _mr_atr_mult_long
-        mr_short_ok = can_short and (_mr_short_ema5 or _mr_short_ema10)
+        # ★ V10.29b: 숏 EMA5 제거 — EMA10만 사용 (숏 WR 69%→품질 개선)
+        mr_short_ok = can_short and ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult_long)
 
-        # ★ V10.27d: EMA30 A/B 테스트 — EMA10 미충족 시에만 발동
-        mr_e30_long_ok  = (not mr_long_ok) and can_long and ema_30_15m is not None and \
-                          (curr_p < ema_30_15m - atr_coin * _mr_atr_mult_long)
-        mr_e30_short_ok = (not mr_short_ok) and can_short and ema_30_15m is not None and \
-                          (curr_p > ema_30_15m + atr_coin * _mr_atr_mult_short)
+        # ★ V10.29b: E30 전면 제거 — 7건 중 6건 손실, 건당 -$10
+        mr_e30_long_ok  = False
+        mr_e30_short_ok = False
 
         # ★ v10.7: TDECAY 제거 — ZOMBIE로 통합
 
