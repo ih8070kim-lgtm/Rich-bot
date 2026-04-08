@@ -416,3 +416,22 @@ BC_UNI_TOP_N        = 20        # 일일 유니버스 상위 20개
 BC_BETA_SHORT_D     = 7
 BC_BETA_LONG_D      = 30
 BC_RETURN_WINDOW     = 7
+
+# ═══════════════════════════════════════════════════════════════
+# Crash Bounce (롱 전용 — BTC 급락 반등)
+# ═══════════════════════════════════════════════════════════════
+CB_ENABLED          = True
+CB_CRASH_4H         = -0.05     # BTC 4h ROC ≤ -5%
+CB_CRASH_24H        = -0.08     # 또는 24h ROC ≤ -8%
+CB_VOL_SURGE_GATE   = 1.0       # BTC 볼륨 서지
+CB_ENTRY_DELAY_H    = 0         # 즉시 진입
+CB_MAX_ENTRIES      = 3         # 크래시 1회당 최대 3건
+CB_MAX_POS          = 3         # 동시 최대 3개
+CB_SIZE_PCT         = 0.10      # ★ 테스트: equity 10%
+CB_TOP_BETA_N       = 3         # beta 상위 3개
+CB_SL_PCT           = 3.0       # SL 3%
+CB_TRAIL_ACTIVATION = 0.015     # 1.5% 수익 시 트레일
+CB_TRAIL_FLOOR      = 0.01
+CB_TRAIL_ATR_MULT   = 1.0
+CB_MAX_HOLD_H       = 48        # 48시간
+CB_COOLDOWN_H       = 48        # 크래시 간 쿨다운

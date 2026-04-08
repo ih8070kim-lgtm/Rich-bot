@@ -283,7 +283,7 @@ def _tid() -> str:
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.17: Slot Balance 규칙
 # ═════════════════════════════════════════════════════════════════
-_HEDGE_ROLES_SLOT = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE", "BC"}
+_HEDGE_ROLES_SLOT = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE", "BC", "CB"}
 
 def _count_active_by_side(st: Dict) -> tuple:
     """활성 포지션 수 (롱, 숏) — HEDGE/INSURANCE 계열 제외 (calc_skew와 동일 기준)."""
@@ -394,7 +394,7 @@ def _calc_urgency(st: Dict, snapshot) -> dict:
     light_side = "sell" if heavy_side == "buy" else "buy"
 
     # heavy side 평균 ROI
-    _HEDGE_ROLES_U = {"HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE", "BC"}
+    _HEDGE_ROLES_U = {"HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE", "BC", "CB"}
     heavy_rois = []
     prices = snapshot.all_prices or {}
     for sym, sym_st in st.items():

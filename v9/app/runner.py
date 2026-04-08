@@ -58,6 +58,17 @@ except Exception as _bc_err:
     print(f"[V9 Runner] Beta Cycle import 실패(비활성): {_bc_err}")
     _BC_ENABLED = False
 
+# ★ Crash Bounce 엔진
+try:
+    from v9.config import CB_ENABLED as _CB_ENABLED
+    if _CB_ENABLED:
+        from v9.engines.crash_bounce import cb_init, cb_on_tick
+    else:
+        _CB_ENABLED = False
+except Exception as _cb_err:
+    print(f"[V9 Runner] Crash Bounce import 실패(비활성): {_cb_err}")
+    _CB_ENABLED = False
+
 
 # ═══════════════════════════════════════════════════════════════
 # v10.11b: 바이낸스 ↔ 포지션북 동기화
@@ -1690,6 +1701,11 @@ async def _main_loop(ex_init, dry_run: bool):
         bc_init(ex)
         print("[V9 Runner] Beta Cycle 엔진 활성화")
 
+    # ★ Crash Bounce 초기화
+    if _CB_ENABLED:
+        cb_init(ex)
+        print("[V9 Runner] Crash Bounce 엔진 활성화")
+
     # ── 상태 로드 ────────────────────────────────────────────────
     book = load_position_book()
     st           = book['st']
@@ -2144,6 +2160,14 @@ async def _main_loop(ex_init, dry_run: bool):
                     intents += _bc_tick_intents
                 except Exception as _bc_e2:
                     print(f"[BC] on_tick 오류(무시): {_bc_e2}")
+
+            # ★ Crash Bounce 통합 (매 틱)
+            if _CB_ENABLED:
+                try:
+                    _cb_intents = cb_on_tick(snapshot, st)
+                    intents += _cb_intents
+                except Exception as _cb_e:
+                    print(f"[CB] on_tick 오류(무시): {_cb_e}")
 
             # ★ V10.29: Counter 디버그 → 텔레그램 전송
             _ctr_msgs = system_state.pop("_counter_tg", [])
