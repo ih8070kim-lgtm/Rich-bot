@@ -879,7 +879,7 @@ def plan_open(
                 else:
                     trigger_side = "sell"
                     _e30_tag = "SKEW_E30" if _pend_entry_type == "SKEW_E30" else ("E30" if _is_e30_entry else "MR")
-                    reason = f"HF_{_e30_tag}_5mRSI_ATR({atr_mult:.1f}x)"
+                    reason = f"HF_{_e30_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})"
 
             if final_long_trig and trigger_side is None:
                 if OPEN_WAIT_NEXT_BAR:
@@ -894,7 +894,7 @@ def plan_open(
                 else:
                     trigger_side = "buy"
                     _e30_tag = "SKEW_E30" if _pend_entry_type == "SKEW_E30" else ("E30" if _is_e30_entry else "MR")
-                    reason = f"HF_{_e30_tag}_5mRSI_ATR({atr_mult:.1f}x)"
+                    reason = f"HF_{_e30_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})"
 
         if trigger_side is None:
             continue
