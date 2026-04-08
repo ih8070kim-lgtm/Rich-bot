@@ -491,13 +491,38 @@ def _calc_atr_1h(sym, ohlcv_1h) -> float:
 
 
 # 기본 후보 풀 (config에 BC_CANDIDATE_POOL이 없을 때)
+# ★ V10.29c: GLOBAL_BLACKLIST 심볼 제거 (DOGE, WIF)
 _DEFAULT_POOL = sorted({
     "XRP/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
     "ICP/USDT", "ETC/USDT", "XLM/USDT", "ARB/USDT", "OP/USDT",
     "SEI/USDT", "INJ/USDT", "WLD/USDT", "TIA/USDT", "GRT/USDT",
     "STRK/USDT", "SUI/USDT", "NEAR/USDT", "AAVE/USDT", "UNI/USDT",
     "APT/USDT", "ATOM/USDT", "STX/USDT", "FET/USDT", "FIL/USDT",
-    "RUNE/USDT", "DOGE/USDT", "WIF/USDT", "JUP/USDT", "PENDLE/USDT",
+    "RUNE/USDT", "JUP/USDT", "PENDLE/USDT",
     "ORDI/USDT", "PYTH/USDT", "MANTA/USDT", "DYM/USDT",
     "JASMY/USDT", "1000SATS/USDT", "NOT/USDT",
 })
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.29c: State 영속화 (재시작 시 ARMED/쿨다운 보존)
+# ═══════════════════════════════════════════════════════════════
+def bc_save_state(system_state: dict):
+    """모듈 글로벌 → system_state."""
+    system_state["_bc_armed"] = dict(_armed)
+    system_state["_bc_cooldown_until"] = dict(_cooldown_until)
+    system_state["_bc_daily_entry_count"] = _daily_entry_count
+    system_state["_bc_last_entry_date"] = _last_entry_date
+
+
+def bc_restore_state(system_state: dict):
+    """system_state → 모듈 글로벌."""
+    global _armed, _cooldown_until, _daily_entry_count, _last_entry_date
+    _armed = system_state.get("_bc_armed", {})
+    _cooldown_until = system_state.get("_bc_cooldown_until", {})
+    _daily_entry_count = system_state.get("_bc_daily_entry_count", 0)
+    _last_entry_date = system_state.get("_bc_last_entry_date", "")
+    if _armed:
+        print(f"[BC_RESTORE] armed={list(_armed.keys())} cd={len(_cooldown_until)}")
+    else:
+        print(f"[BC_RESTORE] armed=0 cd={len(_cooldown_until)}")

@@ -281,6 +281,14 @@ def _save_all(st, cooldowns, system_state):
         save_hedge_state(system_state)
     except Exception as _e:
         print(f"[_save_all] global state save 실패(무시): {_e}")
+    # ★ V10.29c: BC/CB state 영속화
+    try:
+        from v9.engines.beta_cycle import bc_save_state
+        from v9.engines.crash_bounce import cb_save_state
+        bc_save_state(system_state)
+        cb_save_state(system_state)
+    except Exception as _e:
+        print(f"[_save_all] BC/CB state save 실패(무시): {_e}")
     save_position_book(st, cooldowns, system_state)
 
 
@@ -1711,6 +1719,14 @@ async def _main_loop(ex_init, dry_run: bool):
     from v9.engines.hedge_core import restore_hedge_state
     restore_strategy_state(system_state)
     restore_hedge_state(system_state)
+    # ★ V10.29c: BC/CB state 복원
+    try:
+        from v9.engines.beta_cycle import bc_restore_state
+        from v9.engines.crash_bounce import cb_restore_state
+        bc_restore_state(system_state)
+        cb_restore_state(system_state)
+    except Exception as _e:
+        print(f"[BOOT] BC/CB state restore 실패(무시): {_e}")
 
     # ★ v10.15: minroi 상태 로드
     _minroi = load_minroi()

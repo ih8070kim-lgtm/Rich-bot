@@ -43,13 +43,14 @@ _crash_entries: int = 0
 _crash_roc: float = 0.0
 
 # 기본 후보 풀
+# ★ V10.29c: GLOBAL_BLACKLIST 심볼 제거 (DOGE, WIF)
 _DEFAULT_POOL = sorted({
     "XRP/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
     "ICP/USDT", "ETC/USDT", "XLM/USDT", "ARB/USDT", "OP/USDT",
     "SEI/USDT", "INJ/USDT", "WLD/USDT", "TIA/USDT", "GRT/USDT",
     "STRK/USDT", "SUI/USDT", "NEAR/USDT", "AAVE/USDT", "UNI/USDT",
     "APT/USDT", "ATOM/USDT", "STX/USDT", "FET/USDT", "FIL/USDT",
-    "RUNE/USDT", "DOGE/USDT", "WIF/USDT", "JUP/USDT", "PENDLE/USDT",
+    "RUNE/USDT", "JUP/USDT", "PENDLE/USDT",
     "ORDI/USDT", "MANTA/USDT", "DYM/USDT", "NOT/USDT",
 })
 
@@ -370,3 +371,29 @@ def _calc_atr_1h(ohlcv_1h) -> float:
         except (IndexError, TypeError, ValueError):
             continue
     return float(np.mean(trs)) if trs else 0.02
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.29c: State 영속화 (재시작 시 크래시 이벤트 상태 보존)
+# ═══════════════════════════════════════════════════════════════
+def cb_save_state(system_state: dict):
+    """모듈 글로벌 → system_state."""
+    system_state["_cb_last_crash_ts"] = _last_crash_ts
+    system_state["_cb_crash_active"] = _crash_active
+    system_state["_cb_crash_trigger_ts"] = _crash_trigger_ts
+    system_state["_cb_crash_entries"] = _crash_entries
+    system_state["_cb_crash_roc"] = _crash_roc
+
+
+def cb_restore_state(system_state: dict):
+    """system_state → 모듈 글로벌."""
+    global _last_crash_ts, _crash_active, _crash_trigger_ts, _crash_entries, _crash_roc
+    _last_crash_ts = system_state.get("_cb_last_crash_ts", 0.0)
+    _crash_active = system_state.get("_cb_crash_active", False)
+    _crash_trigger_ts = system_state.get("_cb_crash_trigger_ts", 0.0)
+    _crash_entries = system_state.get("_cb_crash_entries", 0)
+    _crash_roc = system_state.get("_cb_crash_roc", 0.0)
+    if _crash_active:
+        print(f"[CB_RESTORE] crash ACTIVE roc={_crash_roc:+.1%} entries={_crash_entries}")
+    else:
+        print(f"[CB_RESTORE] idle (last_crash={_last_crash_ts:.0f})")

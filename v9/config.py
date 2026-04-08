@@ -417,3 +417,23 @@ BC_UNI_TOP_N        = 20        # 일일 유니버스 상위 20개
 BC_BETA_SHORT_D     = 7
 BC_BETA_LONG_D      = 30
 BC_RETURN_WINDOW     = 7
+
+# ═══════════════════════════════════════════════════════════════
+# Crash Bounce (v10.29c — WF 검증 best config)
+#   CR5% | 24h8% | VS1.0 | DL0h | SL3% | TR_ATR1.0 | MH48h | B3
+#   WR=72% | PF=3.71 | MDD=-2.1% | 12mo OOS $+211
+# ═══════════════════════════════════════════════════════════════
+CB_CRASH_4H          = -0.05      # BTC 4h ROC ≤ -5% → 크래시
+CB_CRASH_24H         = -0.08      # BTC 24h ROC ≤ -8% → 크래시 (단독 트리거)
+CB_VOL_SURGE_GATE    = 1.0        # 4h 크래시 시 볼륨 서지 게이트
+CB_ENTRY_DELAY_H     = 0          # 크래시 후 진입 대기 (0=즉시)
+CB_SL_PCT            = 3.0        # SL 3%
+CB_TRAIL_ACTIVATION  = 0.02       # 2% 수익 시 트레일 시작
+CB_TRAIL_FLOOR       = 0.01       # 트레일 최소 1%
+CB_TRAIL_ATR_MULT    = 1.0        # ATR × 1.0
+CB_MAX_HOLD_H        = 48         # 최대 보유 48시간
+CB_MAX_POS           = 3          # 동시 최대 포지션
+CB_MAX_ENTRIES       = 3          # 크래시당 최대 진입
+CB_SIZE_PCT          = 0.10       # equity × 10%
+CB_TOP_BETA_N        = 3          # 베타 상위 3개 진입
+CB_COOLDOWN_H        = 48         # 크래시 이벤트 쿨다운 48시간

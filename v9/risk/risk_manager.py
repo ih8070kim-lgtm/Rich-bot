@@ -164,6 +164,17 @@ def evaluate_intent(
                         _bc_count += 1
             if _bc_count >= BC_MAX_POS:
                 return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:BC_CAP({_bc_count}/{BC_MAX_POS})")
+        # ★ V10.29c: Crash Bounce — CB 자체 상한만 체크
+        elif _intent_role == "CB":
+            from v9.config import CB_MAX_POS
+            _cb_count = 0
+            for _cb_sym, _cb_sd in st.items():
+                if isinstance(_cb_sd, dict):
+                    _cb_p = _cb_sd.get("p_long")
+                    if isinstance(_cb_p, dict) and _cb_p.get("role") == "CB":
+                        _cb_count += 1
+            if _cb_count >= CB_MAX_POS:
+                return _reject(RejectCode.REJECT_SLOT_LIMIT, f"SLOTS:CB_CAP({_cb_count}/{CB_MAX_POS})")
         else:
             # ★ v10.15: 전체 하드캡 (BC 제외) 먼저 체크
             if slots.risk_total >= TOTAL_MAX_SLOTS:
@@ -198,8 +209,8 @@ def evaluate_intent(
                 return _reject(RejectCode.FORCE_T4_MAXLOSS_BREACH, f"roi={roi_r5:.2f}%")
 
     # ── R6: 쿨다운 / Corr ────────────────────────────────────────
-    # ★ BC는 자체 쿨다운 + excess return 사용 → MR 쿨다운/Corr 스킵
-    if itype in (IntentType.OPEN, IntentType.DCA) and not is_asym and meta.get("role") != "BC":
+    # ★ BC/CB는 자체 쿨다운 + excess return 사용 → MR 쿨다운/Corr 스킵
+    if itype in (IntentType.OPEN, IntentType.DCA) and not is_asym and meta.get("role") not in ("BC", "CB"):
         now      = time.time()
         cd_until = cooldowns.get(sym, 0.0)
         if now < cd_until:
