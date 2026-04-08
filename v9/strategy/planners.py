@@ -1753,11 +1753,12 @@ def plan_force_close(
 
             from v9.config import HARD_SL_BY_TIER
 
-            # ★ V10.29b: T4_DEFENSE — T3에서 -8% 넘으면 방어 모드
-            # 데드캣바운스 포착: worst+2% 반등 시 손절 (전액 SL보다 손실 축소)
-            _T4_ENTRY = -8.0     # 방어 모드 진입 ROI
-            _T4_TP_GAP = 2.0     # worst 대비 TP 갭
-            _T4_HARD_SL = -12.0  # 절대 SL
+            # ★ V10.29c: T3 방어 모드 — 단계별 갭 축소 약손절
+            # -8% 진입 → TP -3%(갭5) / -9% → TP -5%(갭4) / -10% → TP -7%(갭3)
+            # -11% → TP -9%(갭2) / -12% HARD SL
+            # 공식: TP = 2×worst + 13, 갭 = 13 + worst
+            _T4_ENTRY   = -8.0    # 방어 모드 진입 ROI
+            _T4_HARD_SL = -12.0   # 절대 SL
 
             if _dca_lv_sl >= 3:
                 _sl_ep = get_sl_entry(p, _dca_lv_sl)
@@ -1769,8 +1770,11 @@ def plan_force_close(
                 if not _t4_active and _sl_roi <= _T4_ENTRY:
                     p["t4_defense"] = True
                     p["t4_worst_roi"] = _sl_roi
+                    p["t4_defense_ts"] = now
                     _t4_active = True
-                    _dbg = f"[T4_DEF] ⚡ {symbol} {p.get('side','')} 방어모드 진입 roi={_sl_roi:.1f}%"
+                    _gap = 13.0 + _sl_roi  # -8% → gap 5
+                    _tp = 2.0 * _sl_roi + 13.0  # -8% → TP -3%
+                    _dbg = f"[T3_DEF] ⚡ {symbol} {p.get('side','')} 방어모드 진입 roi={_sl_roi:.1f}% tp={_tp:.1f}%(갭{_gap:.0f})"
                     print(_dbg)
                     system_state.setdefault("_counter_tg", []).append(_dbg)
 
@@ -1781,20 +1785,22 @@ def plan_force_close(
                         p["t4_worst_roi"] = _sl_roi
                         _t4_worst = _sl_roi
 
-                    _t4_tp = _t4_worst + _T4_TP_GAP
+                    # 단계별 TP: 갭 = 13 + worst (5→4→3→2→1)
+                    _t4_tp = 2.0 * _t4_worst + 13.0
+                    _t4_gap = 13.0 + _t4_worst
 
                     # 반등 TP 히트
                     if _sl_roi >= _t4_tp:
                         force = True
-                        reason = f"T4_DEF_TP(worst={_t4_worst:.1f}%,tp={_t4_tp:.1f}%,roi={_sl_roi:.1f}%)"
-                        _dbg = f"[T4_DEF] ✅ {symbol} 반등 탈출 roi={_sl_roi:.1f}% worst={_t4_worst:.1f}%"
+                        reason = f"T3_DEF_TP(worst={_t4_worst:.1f}%,tp={_t4_tp:.1f}%,gap={_t4_gap:.0f},roi={_sl_roi:.1f}%)"
+                        _dbg = f"[T3_DEF] ✅ {symbol} 반등 탈출 roi={_sl_roi:.1f}% worst={_t4_worst:.1f}% gap={_t4_gap:.0f}"
                         print(_dbg)
                         system_state.setdefault("_counter_tg", []).append(_dbg)
 
                     # 절대 SL
                     elif _sl_roi <= _T4_HARD_SL:
                         force = True
-                        reason = f"T4_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
+                        reason = f"T3_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
 
                     # 아직 방어 중 → 기존 SL 무시
                     if not force:
