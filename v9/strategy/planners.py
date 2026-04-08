@@ -2445,12 +2445,20 @@ def plan_counter(
             if now - system_state.get(_wp_log_key, 0) > 300:
                 system_state[_wp_log_key] = now
                 print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%}(>{_WP_MAX:.0%}) — WP 탈락")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("BB_FILTER", f"{sym} psq={psq} wp={wp:.0%} — WP 탈락")
+                except Exception: pass
             continue
 
         # Volume surge
         vs = _vol_surge_15m(volumes)
         if vs < _VS_GATE:
             print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x(<{_VS_GATE}) — VS 탈락")
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("BB_FILTER", f"{sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x — VS 탈락")
+            except Exception: pass
             continue
 
         # 방향 결정 (BB 돌파)
@@ -2461,15 +2469,27 @@ def plan_counter(
             entry_side = "sell"
         if not entry_side:
             print(f"[BB_FILTER] {sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x — 돌파 미발생(price={curr_p:.4f} BB=[{bb_prev[2]:.4f},{bb_prev[0]:.4f}])")
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("BB_FILTER", f"{sym} psq={psq} wp={wp:.0%} vs={vs:.1f}x — 돌파 미발생")
+            except Exception: pass
             continue
 
         # BTC 필터
         if _BB_BTC_FILTER:
             if entry_side == "buy" and btc_dir < 0:
                 print(f"[BB_FILTER] {sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("BB_FILTER", f"{sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                except Exception: pass
                 continue
             if entry_side == "sell" and btc_dir > 0:
                 print(f"[BB_FILTER] {sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("BB_FILTER", f"{sym} {entry_side} psq={psq} wp={wp:.0%} vs={vs:.1f}x — BTC역방향")
+                except Exception: pass
                 continue
 
         # 한 번만 트리거
