@@ -385,7 +385,10 @@ def calc_tp1_thresh(dca_level: int, worst_roi: float,
     elif is_heavy:
         return tp1_base * max(0.5, 1.0 - urgency * 0.03)
     else:
-        return tp1_base * min(1.5, 1.0 + urgency * 0.025)
+        # ★ V10.29c: light side TP 증가 제거 — 정상 TP로 빠르게 나가서 슬롯 회전 극대화
+        # 기존: tp1_base * min(1.5, 1.0 + urgency * 0.025) → T1이 +3%까지 잠김
+        # trim 건당 $3~6 >> T1 TP 연장 수익 $0.5~1
+        return tp1_base
 
 
 def get_sl_entry(p: dict, tier: int) -> float:

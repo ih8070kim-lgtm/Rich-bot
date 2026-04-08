@@ -366,9 +366,11 @@ def _t3_defense(pos_side: str, dca_level: int, st: Dict, snapshot) -> dict:
     if dca_level >= 3:
         return {"tp_mult": mult, "blocked": False, "opp_t3_roi": worst_t3_roi}
 
-    # ── 내가 T2: 항상 블록 ──
+    # ── 내가 T2: 트림 허용, tp_mult 없음 — URGENCY_DCA 사이클 보장 ──
+    # ★ V10.29c: blocked=False + tp_mult=1.0 → trim이 정상 1.5%에서 발동
+    # TP 블록 → T2 불타기 → trim(1.5%) → T1 복귀 → 반복
     if dca_level == 2:
-        return {"tp_mult": mult, "blocked": True, "opp_t3_roi": worst_t3_roi}
+        return {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": worst_t3_roi}
 
     # ── 내가 T1: 배수 적용, -7% 이하만 블록 ──
     return {"tp_mult": mult, "blocked": deep, "opp_t3_roi": worst_t3_roi}
@@ -2316,16 +2318,16 @@ def plan_counter(
         for _bf_sym, _bf_pool in _ohlcv_bf.items():
             if _bf_sym in _bb_squeeze_count or _bf_sym in _bb_prev_squeeze_len:
                 continue  # 이미 restore된 심볼은 스킵
-            _bf_15m = _bf_pool.get("15m", [])
-            if len(_bf_15m) < _KC_P + 30:
+            _bf_1h = _bf_pool.get("1h", [])  # ★ V10.29c: 1h 봉 백필
+            if len(_bf_1h) < _KC_P + 30:
                 continue
-            _bf_closes = [float(b[4]) for b in _bf_15m]
-            _bf_highs = [float(b[2]) for b in _bf_15m]
-            _bf_lows = [float(b[3]) for b in _bf_15m]
-            # 최근 60봉(15시간)을 봉 단위로 역산하여 스퀴즈 이력 구축
+            _bf_closes = [float(b[4]) for b in _bf_1h]
+            _bf_highs = [float(b[2]) for b in _bf_1h]
+            _bf_lows = [float(b[3]) for b in _bf_1h]
+            # 최근 60봉(60시간)을 봉 단위로 역산하여 스퀴즈 이력 구축
             _bf_sq = 0
             _bf_psq = 0
-            for _bi in range(_KC_P + 1, len(_bf_15m) - max(0, len(_bf_15m) - 60)):
+            for _bi in range(_KC_P + 1, len(_bf_1h) - max(0, len(_bf_1h) - 60)):
                 _end = _bi + 1
                 _bf_c = _bf_closes[:_end]
                 _bf_h = _bf_highs[:_end]
@@ -2396,13 +2398,13 @@ def plan_counter(
         if _bb_cooldowns.get(cd_key, 0) > now: continue
 
         pool = _ohlcv_pool.get(sym, {})
-        ohlcv_15m = pool.get("15m", [])
-        if len(ohlcv_15m) < _KC_P + 130: continue
+        ohlcv_1h = pool.get("1h", [])  # ★ V10.29c: 1h 봉 — 백테스트(1h 루프)와 동일
+        if len(ohlcv_1h) < _KC_P + 130: continue
 
-        closes = [float(b[4]) for b in ohlcv_15m]
-        highs = [float(b[2]) for b in ohlcv_15m]
-        lows = [float(b[3]) for b in ohlcv_15m]
-        volumes = [float(b[5]) for b in ohlcv_15m]
+        closes = [float(b[4]) for b in ohlcv_1h]
+        highs = [float(b[2]) for b in ohlcv_1h]
+        lows = [float(b[3]) for b in ohlcv_1h]
+        volumes = [float(b[5]) for b in ohlcv_1h]
 
         # BB / KC 계산
         bb = _calc_bb_15m(closes)
@@ -2412,9 +2414,9 @@ def plan_counter(
         # 스퀴즈 판정
         squeezing = bb[0] < kc[0] and bb[2] > kc[2]
 
-        # ★ V10.29c: 봉 단위 카운팅 — 같은 15m 봉이면 전체 스킵
-        # 백테스트(봉 루프)와 동일: SQ_MIN=3 = 3봉 = 45분
-        _last_ts = float(ohlcv_15m[-1][0]) if ohlcv_15m else 0
+        # ★ V10.29c: 봉 단위 카운팅 — 같은 1h 봉이면 전체 스킵
+        # 백테스트(1h 루프)와 동일: SQ_MIN=3 = 3봉 = 3시간
+        _last_ts = float(ohlcv_1h[-1][0]) if ohlcv_1h else 0
         _prev_ts = _bb_last_bar_ts.get(sym, 0)
         if _last_ts == _prev_ts:
             continue  # 같은 봉이면 스킵 (이미 처리함)
