@@ -751,9 +751,40 @@ def plan_open(
         micro_long_ok  = _bull_cnt >= 2
         micro_short_ok = _bear_cnt >= 2
 
-        # ★ V10.27d: MR + E30 A/B 테스트
-        _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok
-        _mr_short_final = mr_short_ok and short_trig and micro_short_ok
+        # ★ V10.29b: VS(레짐별) + MTF RSI 이중 필터
+        # 백테스트: VS2_NH+MTF56_35 = -$394 (최적, LOW에서 VS OFF)
+        _MR_VS_GATE = 2.0
+        _MTF_PERIOD = 56
+        _MTF_RSI_OS = 35
+        _MTF_RSI_OB = 65
+
+        # VS 체크 — LOW 레짐에서는 스킵 (횡보장 진입 허용)
+        _mr_vs_ok = True
+        _mr_vol_surge = 0.0
+        _cur_regime = _btc_vol_regime(snapshot)
+        if _cur_regime != "LOW":
+            _vol_15m = [float(x[5]) for x in ohlcv_15m] if ohlcv_15m else []
+            if len(_vol_15m) >= 30:
+                _vf = sum(_vol_15m[-5:]) / 5
+                _vs = sum(_vol_15m[-30:]) / 30
+                _mr_vol_surge = _vf / _vs if _vs > 0 else 1.0
+                _mr_vs_ok = _mr_vol_surge >= _MR_VS_GATE
+
+        # MTF RSI 체크
+        _mr_mtf_ok = True
+        _mtf_rsi = 50.0
+        _ohlcv_1h = pool.get("1h", [])
+        if len(_ohlcv_1h) >= _MTF_PERIOD + 2:
+            _closes_1h = [float(x[4]) for x in _ohlcv_1h]
+            _mtf_rsi = calc_rsi(_closes_1h, period=_MTF_PERIOD)
+            if mr_long_ok and _mtf_rsi > _MTF_RSI_OS:
+                _mr_mtf_ok = False
+            if mr_short_ok and _mtf_rsi < _MTF_RSI_OB:
+                _mr_mtf_ok = False
+
+        # ★ V10.27d: MR 최종 — VS AND MTF 둘 다 통과해야 진입
+        _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok  and _mr_vs_ok and _mr_mtf_ok
+        _mr_short_final = mr_short_ok and short_trig and micro_short_ok and _mr_vs_ok and _mr_mtf_ok
 
         # E30: EMA10 미충족 + EMA30 충족 + 같은 RSI/micro 조건 + 슬롯 여유
         _e30_long_final  = mr_e30_long_ok  and long_trig  and micro_long_ok  and _active_e30 < MAX_E30_SLOTS
@@ -842,7 +873,7 @@ def plan_open(
                         "armed_ts_ms": last_5m_ts,
                         "side":        "sell",
                         "entry_type":  "15mE30" if _is_e30_entry else "MR",
-                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)",
+                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_ob})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})",
                     }
                     continue
                 else:
@@ -857,7 +888,7 @@ def plan_open(
                         "armed_ts_ms": last_5m_ts,
                         "side":        "buy",
                         "entry_type":  _pend_entry_type or ("15mE30" if _is_e30_entry else "MR"),
-                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)",
+                        "reason":      f"HF_{'E30' if _is_e30_entry else 'MR'}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})",
                     }
                     continue
                 else:
