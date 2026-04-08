@@ -975,67 +975,14 @@ def plan_dca(
     intents: List[Intent] = []
     now = time.time()
 
-    # ★ v10.20 → v10.21: 동적 DCA 제한 — 방향별 분리
-    # 시장 전체 방향성 이동(동시 DCA 다수 / HARD_SL 반복) 감지 시 DCA 레벨 자동 축소
-    _dyn_now = now
-    # (1) 현재 DCA 진행 중 포지션 수 — 방향별 분리
-    _in_dca_long = _in_dca_short = 0
-    for _, p2 in _pos_items(st):
-        if int(p2.get("dca_level", 1) or 1) >= 2 and p2.get("role", "") not in _HEDGE_ROLES_SLOT:
-            if p2.get("side", "") == "buy":
-                _in_dca_long += 1
-            else:
-                _in_dca_short += 1
-
-    def _conc_max(cnt):
-        return 4 if cnt < 2 else (3 if cnt < 3 else 2)
-
-    # (2) 최근 2시간 HARD_SL 발생 수 — 방향별 분리
-    _hsl_cutoff = _dyn_now - 7200
-    _hsl_raw = (system_state or {}).get("_hard_sl_history", [])
-    # 하위호환: 기존 float list → dict list 마이그레이션
-    _hsl_hist = []
-    for e in (_hsl_raw or []):
-        if isinstance(e, dict):
-            if e.get("ts", 0) > _hsl_cutoff:
-                _hsl_hist.append(e)
-        elif isinstance(e, (int, float)):
-            if e > _hsl_cutoff:
-                _hsl_hist.append({"ts": e, "side": "buy"})  # 레거시: 방향 불명 → buy 기본
-    if system_state is not None:
-        system_state["_hard_sl_history"] = _hsl_hist
-    _hsl_long  = sum(1 for e in _hsl_hist if e.get("side") == "buy")
-    _hsl_short = sum(1 for e in _hsl_hist if e.get("side") == "sell")
-
-    def _hsl_max(cnt):
-        return 4 if cnt == 0 else (3 if cnt < 2 else 2)
-
-    # 방향별 동적 max tier
-    _dyn_max_long  = min(_conc_max(_in_dca_long),  _hsl_max(_hsl_long))
-    _dyn_max_short = min(_conc_max(_in_dca_short), _hsl_max(_hsl_short))
-    if _dyn_max_long < 4 or _dyn_max_short < 4:
-        print(f"[DCA_LIMIT] L=T{_dyn_max_long}(dca={_in_dca_long},sl={_hsl_long}) "
-              f"S=T{_dyn_max_short}(dca={_in_dca_short},sl={_hsl_short})")
-
-    # ★ v10.12: BTC Crash Filter — 롱 DCA만 차단 (2중 감지)
-    _btc_pool_dca = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
-    _btc_1m_dca = _btc_pool_dca.get("1m", [])
-    _btc_crash_dca = False
-    if len(_btc_1m_dca) >= 4:
-        _btc_now = float(_btc_1m_dca[-1][4])
-        _btc_1ago = float(_btc_1m_dca[-2][4])
-        _btc_3ago = float(_btc_1m_dca[-4][4])
-        # 1분 -0.5% OR 3분 -0.8%
-        if _btc_1ago > 0 and (_btc_now - _btc_1ago) / _btc_1ago <= BTC_CRASH_1M_THRESHOLD:
-            _btc_crash_dca = True
-        elif _btc_3ago > 0 and (_btc_now - _btc_3ago) / _btc_3ago <= BTC_CRASH_3M_THRESHOLD:
-            _btc_crash_dca = True
-
-    # ★ v10.13: killswitch 감지 (보험 시그널용)
+    # ★ V10.29c: DCA 제한 데드코드 정리 — killswitch만 유지
     _killswitch_dca = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0) >= 0.8
 
-    # ★ V10.18: DCA에도 Slot Balance Gate 적용 (루프 밖 1회 계산)
-    _dca_longs, _dca_shorts = _count_active_by_side(st)
+    # _hard_sl_history TTL 정리 (24시간 초과 제거, force_close에서 append됨)
+    _hsl_raw = (system_state or {}).get("_hard_sl_history", [])
+    if _hsl_raw and len(_hsl_raw) > 50:
+        _cutoff = now - 86400
+        system_state["_hard_sl_history"] = [e for e in _hsl_raw if isinstance(e, dict) and e.get("ts", 0) > _cutoff]
 
     # ★ V10.25: 스큐 ≥ 15% → light side DCA T2 상한 (헷지 대용)
     _total_cap_skew = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
