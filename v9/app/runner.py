@@ -718,25 +718,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             dca_level = int(p.get("dca_level", 1) or 1)
             is_long = (pos_side == "buy")
 
-            # ★ V10.29: 최소 슬롯 유지 — 방향별 1개 이하면 선주문 차단
-            _ms_longs = _ms_shorts = 0
-            for _ms_s, _ms_ss in st.items():
-                if not isinstance(_ms_ss, dict): continue
-                for _ms_side, _ms_p in iter_positions(_ms_ss):
-                    if isinstance(_ms_p, dict) and _ms_p.get("role", "") not in (
-                        "INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
-                        if _ms_side == "buy": _ms_longs += 1
-                        else: _ms_shorts += 1
-            if is_long and _ms_longs <= 1:
-                p["min_slot_hold"] = True
-                if p.get("tp1_preorder_id"):
-                    await _cancel_tp1_preorder(ex, p, sym)
-                continue
-            if not is_long and _ms_shorts <= 1:
-                p["min_slot_hold"] = True
-                if p.get("tp1_preorder_id"):
-                    await _cancel_tp1_preorder(ex, p, sym)
-                continue
+            # ★ V10.29b: 최소 슬롯 유지 제거
             p.pop("min_slot_hold", None)
 
             # ★ V10.29b: T3 방어 블록 체크
@@ -2161,7 +2143,7 @@ async def _main_loop(ex_init, dry_run: bool):
                 except Exception as _bc_e2:
                     print(f"[BC] on_tick 오류(무시): {_bc_e2}")
 
-            # ★ Crash Bounce 통합 (매 틱)
+            # ★ Crash Bounce 매 틱
             if _CB_ENABLED:
                 try:
                     _cb_intents = cb_on_tick(snapshot, st)

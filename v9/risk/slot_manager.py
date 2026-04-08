@@ -59,8 +59,8 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
                     continue
                 if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
                     continue
-            # ★ BC/CB 포지션은 MR 슬롯에서 완전 제외
-            if (p or {}).get("role") in ("BC", "CB"):
+            # ★ BC 포지션은 MR 슬롯에서 완전 제외
+            if (p or {}).get("role") == "BC":
                 continue
             hard_total += 1
             if side == "buy":  hard_long  += 1

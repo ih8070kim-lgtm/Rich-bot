@@ -283,7 +283,7 @@ def _tid() -> str:
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.17: Slot Balance 규칙
 # ═════════════════════════════════════════════════════════════════
-_HEDGE_ROLES_SLOT = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE", "BC", "CB"}
+_HEDGE_ROLES_SLOT = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE", "BC"}
 
 def _count_active_by_side(st: Dict) -> tuple:
     """활성 포지션 수 (롱, 숏) — HEDGE/INSURANCE 계열 제외 (calc_skew와 동일 기준)."""
@@ -394,7 +394,7 @@ def _calc_urgency(st: Dict, snapshot) -> dict:
     light_side = "sell" if heavy_side == "buy" else "buy"
 
     # heavy side 평균 ROI
-    _HEDGE_ROLES_U = {"HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE", "BC", "CB"}
+    _HEDGE_ROLES_U = {"HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE", "BC"}
     heavy_rois = []
     prices = snapshot.all_prices or {}
     for sym, sym_st in st.items():
@@ -1499,14 +1499,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ V10.29b: T1 TP — 방어 배수 적용
         _effective_tp1 = tp1_thresh * _def["tp_mult"]
 
-        # ★ V10.29: 최소 슬롯 유지 — T1 TP1/trailing 진입 차단 (교체 대기)
-        _tp1_longs, _tp1_shorts = _count_active_by_side(st)
-        if is_long and _tp1_longs <= 1:
-            p["min_slot_hold"] = True
-            continue
-        if not is_long and _tp1_shorts <= 1:
-            p["min_slot_hold"] = True
-            continue
+        # ★ V10.29b: 최소 슬롯 유지 제거 — ATR 3.0 진입 감소로 교착 위험
         p.pop("min_slot_hold", None)
 
         if roi_gross >= _effective_tp1:
