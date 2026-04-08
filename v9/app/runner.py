@@ -1311,13 +1311,18 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         # ★ V10.26: DCA 새 출발 — worst_roi/max_roi 0 리셋
         p["worst_roi"] = 0.0
         p["max_roi_seen"] = 0.0
+        p["t4_defense"] = False  # ★ V10.29b: DCA 시 방어모드 리셋
+        p["t4_worst_roi"] = 0.0
+        p["last_dca_qty"] = filled_qty
+        p.setdefault("dca_qty_by_tier", {})
+        p["dca_qty_by_tier"][str(tier)] = filled_qty
 
         # ★ V10.28b: Trim 선주문 플래그
         if tier >= 2 and tier <= 4:
             from v9.config import calc_trim_price, calc_trim_qty
             _pos_side = side  # DCA side = position side
             _trim_price = calc_trim_price(avg_price, _pos_side, tier)
-            _trim_qty = calc_trim_qty(float(p["amt"]), tier)
+            _trim_qty = filled_qty  # ★ V10.29b: DCA 수량 그대로 트림
             p.setdefault("trim_preorders", {})
             p["trim_to_place"] = {
                 "tier": tier,
@@ -1542,7 +1547,10 @@ async def _place_trim_preorders(ex, st, snapshot):
                 if _regen_dca >= 2 and not _regen_trp and p.get("ep") and p.get("amt"):
                     from v9.config import calc_trim_price, calc_trim_qty
                     _regen_ep = float(p.get("ep", 0))
-                    _regen_qty = calc_trim_qty(float(p["amt"]), _regen_dca)
+                    # ★ V10.29b: 산만큼 판다
+                    _dca_qtys = p.get("dca_qty_by_tier", {})
+                    _ldq = float(_dca_qtys.get(str(_regen_dca), 0) or 0)
+                    _regen_qty = _ldq if _ldq > 0 and _ldq <= float(p["amt"]) * 0.8 else calc_trim_qty(float(p["amt"]), _regen_dca)
                     _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca)
                     if _regen_qty > 0 and _regen_price > 0:
                         p["trim_to_place"] = {

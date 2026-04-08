@@ -266,7 +266,7 @@ OPEN_DIR_COOLDOWN_SEC    = 10 * 60   # 같은 방향 진입 후 10분 대기
 _open_dir_cd = {"buy": 0.0, "sell": 0.0}  # {side: next_allowed_ts}
 
 # ★ V10.27: 통합 ATR base + slot 불균형 ±패널티
-_ATR_BASE = 2.4           # 롱/숏 통합
+_ATR_BASE = 3.0           # ★ V10.29b: 백테스트 최적 (2.4→3.0)
 _ATR_SLOT_STEP = 0.2      # 슬롯 차이 1개당 heavy +0.2 / light -0.2
 
 
@@ -1465,9 +1465,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
                 _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0) * _def["tp_mult"]
                 if roi_gross >= _DCA_TRIM_ROI:
                     total_qty = float(p.get("amt", 0.0))
-                    _trim_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                    _trim_ep = float(p.get("ep", 0) or 0)
-                    trim_qty = calc_trim_qty(total_qty, dca_level, ep=_trim_ep, bal=_trim_bal)
+                    # ★ V10.29b: 산만큼 판다 — 해당 티어 DCA 수량 그대로 트림
+                    _dca_qtys = p.get("dca_qty_by_tier", {})
+                    _tier_dca = float(_dca_qtys.get(str(dca_level), 0) or 0)
+                    if _tier_dca > 0 and _tier_dca <= total_qty * 0.8:
+                        trim_qty = _tier_dca
+                    else:
+                        _trim_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+                        _trim_ep = float(p.get("ep", 0) or 0)
+                        trim_qty = calc_trim_qty(total_qty, dca_level, ep=_trim_ep, bal=_trim_bal)
                     _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
                     if trim_qty >= _sym_min_qty:
                         intents.append(Intent(
@@ -1791,23 +1797,72 @@ def plan_force_close(
 
         else:
             # ── HARD_SL (CORE 포지션 전용) ────────────────────────
-            # ★ V10.27c: DCA 트리거 -1% 뒤 SL / T4는 체결가 -2%
             _dca_lv_sl = int(p.get("dca_level", 1) or 1)
 
             from v9.config import HARD_SL_BY_TIER
-            _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
 
-            # ★ V10.29: 공유 함수 — DCA와 동일 기준점
-            _sl_ep = get_sl_entry(p, _dca_lv_sl)
+            # ★ V10.29b: T4_DEFENSE — T3에서 -8% 넘으면 방어 모드
+            # 데드캣바운스 포착: worst+2% 반등 시 손절 (전액 SL보다 손실 축소)
+            _T4_ENTRY = -8.0     # 방어 모드 진입 ROI
+            _T4_TP_GAP = 2.0     # worst 대비 TP 갭
+            _T4_HARD_SL = -12.0  # 절대 SL
 
-            if _sl_ep > 0:
-                _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
-                if _sl_roi <= _sl_thresh:
-                    force  = True
-                    reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
-                    # ★ v10.21: HARD_SL 발생 기록 — 방향별 (plan_dca 동적 제한)
-                    _hsl = system_state.setdefault("_hard_sl_history", [])
-                    _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
+            if _dca_lv_sl >= 3:
+                _sl_ep = get_sl_entry(p, _dca_lv_sl)
+                _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE) if _sl_ep > 0 else 0
+
+                _t4_active = p.get("t4_defense", False)
+
+                # 방어 모드 진입
+                if not _t4_active and _sl_roi <= _T4_ENTRY:
+                    p["t4_defense"] = True
+                    p["t4_worst_roi"] = _sl_roi
+                    _t4_active = True
+                    _dbg = f"[T4_DEF] ⚡ {symbol} {p.get('side','')} 방어모드 진입 roi={_sl_roi:.1f}%"
+                    print(_dbg)
+                    system_state.setdefault("_counter_tg", []).append(_dbg)
+
+                if _t4_active:
+                    # worst 갱신
+                    _t4_worst = float(p.get("t4_worst_roi", _sl_roi) or _sl_roi)
+                    if _sl_roi < _t4_worst:
+                        p["t4_worst_roi"] = _sl_roi
+                        _t4_worst = _sl_roi
+
+                    _t4_tp = _t4_worst + _T4_TP_GAP
+
+                    # 반등 TP 히트
+                    if _sl_roi >= _t4_tp:
+                        force = True
+                        reason = f"T4_DEF_TP(worst={_t4_worst:.1f}%,tp={_t4_tp:.1f}%,roi={_sl_roi:.1f}%)"
+                        _dbg = f"[T4_DEF] ✅ {symbol} 반등 탈출 roi={_sl_roi:.1f}% worst={_t4_worst:.1f}%"
+                        print(_dbg)
+                        system_state.setdefault("_counter_tg", []).append(_dbg)
+
+                    # 절대 SL
+                    elif _sl_roi <= _T4_HARD_SL:
+                        force = True
+                        reason = f"T4_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
+
+                    # 아직 방어 중 → 기존 SL 무시
+                    if not force:
+                        pass  # 기존 HARD_SL 스킵
+
+            # ── 기존 HARD_SL (T1/T2 또는 T4_DEFENSE 미활성 T3) ──
+            if not force:
+                _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
+
+                # ★ V10.29: 공유 함수 — DCA와 동일 기준점
+                _sl_ep = get_sl_entry(p, _dca_lv_sl)
+
+                if _sl_ep > 0:
+                    _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
+                    if _sl_roi <= _sl_thresh:
+                        force  = True
+                        reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
+                        # ★ v10.21: HARD_SL 발생 기록
+                        _hsl = system_state.setdefault("_hard_sl_history", [])
+                        _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
 
             # ★ V10.17: ZOMBIE — BAD + 슬롯풀 + T2+ + ROI≤-5%
             # ★ V10.29b: T3 제외 — 스윙은 SL -10% 단독 관리
@@ -2213,49 +2268,65 @@ def plan_pair_cut(
 # 전체 Intent 생성
 # ═════════════════════════════════════════════════════════════════
 # ═════════════════════════════════════════════════════════════════
-# ★ V10.29: Counter Signal — MR ROI- + 일목구름 돌파 → 반대 사이드 MR 진입
+# ★ V10.29b: BB Squeeze OR — 스퀴즈 해제 브레이크아웃 진입
 # ═════════════════════════════════════════════════════════════════
-_counter_cooldowns: Dict[str, float] = {}  # "SYM_side" → next allowed timestamp
-_counter_prev_cloud: Dict[str, str] = {}   # "SYM" → "ABOVE"/"BELOW"/"INSIDE"
-_counter_dbg_ts: Dict[str, float] = {}     # debug print 쿨다운 (5분)
+_bb_cooldowns: Dict[str, float] = {}       # "SYM_side" → next allowed timestamp
+_bb_squeeze_count: Dict[str, int] = {}     # SYM → 연속 스퀴즈 봉 수
+_bb_prev_squeeze_len: Dict[str, int] = {}  # SYM → 직전 스퀴즈 길이
 
-def _ichimoku_cloud_15m(ohlcv_15m):
-    """15m OHLCV 리스트에서 일목구름 계산 (직전 완성 봉 기준).
-    Returns: {"cloud_top", "cloud_bot", "tenkan", "kijun"} or None.
-    """
-    ICH_T=9; ICH_K=26; ICH_B=52; ICH_S=26
-    n = len(ohlcv_15m)
-    if n < ICH_B + ICH_S + 2:
-        return None
+# BB Squeeze 파라미터 (백테스트 최적: BB15 WP10% VS1.5 SQ3)
+_BB_P = 15; _BB_M = 2.0
+_KC_P = 20; _KC_A = 1.5
+_SQ_MIN = 3        # 최소 연속 스퀴즈 봉
+_WP_MAX = 0.10     # BB width percentile 상한
+_VS_GATE = 1.5     # 거래량 서지 배수
+_BB_BTC_FILTER = True
 
-    def _hl(bars, period, end_i):
-        sl = bars[max(0, end_i-period+1):end_i+1]
-        if not sl: return None
-        return (max(b[2] for b in sl) + min(b[3] for b in sl)) / 2
 
-    prev = n - 2  # 직전 완성 봉 (look-ahead 방지)
-    cloud_i = prev - ICH_S
-    if cloud_i < ICH_B:
-        return None
+def _calc_bb_15m(closes):
+    """BB 상단/중간/하단/width (15m closes 리스트)."""
+    if len(closes) < _BB_P: return None
+    w = closes[-_BB_P:]
+    ma = sum(w) / _BB_P
+    std = (sum((x - ma) ** 2 for x in w) / _BB_P) ** 0.5
+    if ma <= 0: return None
+    return (ma + _BB_M * std, ma, ma - _BB_M * std, 2 * _BB_M * std / ma)
 
-    tenkan = _hl(ohlcv_15m, ICH_T, prev)
-    kijun = _hl(ohlcv_15m, ICH_K, prev)
-    if tenkan is None or kijun is None:
-        return None
 
-    sa_t = _hl(ohlcv_15m, ICH_T, cloud_i)
-    sa_k = _hl(ohlcv_15m, ICH_K, cloud_i)
-    sb = _hl(ohlcv_15m, ICH_B, cloud_i)
-    if None in (sa_t, sa_k, sb):
-        return None
+def _calc_kc_15m(closes, highs, lows):
+    """Keltner Channel (15m)."""
+    if len(closes) < _KC_P + 1: return None
+    ma = sum(closes[-_KC_P:]) / _KC_P
+    trs = []
+    for j in range(-_KC_P, 0):
+        if j - 1 < -len(closes): continue
+        c_prev = closes[j - 1]
+        if c_prev <= 0: continue
+        trs.append(max(highs[j] - lows[j], abs(highs[j] - c_prev), abs(lows[j] - c_prev)))
+    if not trs: return None
+    atr = sum(trs) / len(trs)
+    return (ma + _KC_A * atr, ma, ma - _KC_A * atr)
 
-    senkou_a = (sa_t + sa_k) / 2
-    return {
-        "cloud_top": max(senkou_a, sb),
-        "cloud_bot": min(senkou_a, sb),
-        "tenkan": tenkan,
-        "kijun": kijun,
-    }
+
+def _bb_width_pctile(closes, lookback=120):
+    """현재 BB width의 percentile."""
+    if len(closes) < _BB_P + lookback: return 0.5
+    widths = []
+    for end in range(len(closes) - lookback, len(closes) + 1):
+        sl = closes[end - _BB_P:end]
+        if len(sl) < _BB_P: continue
+        ma = sum(sl) / _BB_P
+        std = (sum((x - ma) ** 2 for x in sl) / _BB_P) ** 0.5
+        if ma > 0: widths.append(2 * _BB_M * std / ma)
+    if len(widths) < 20: return 0.5
+    return sum(1 for w in widths if w <= widths[-1]) / len(widths)
+
+
+def _vol_surge_15m(volumes, fast=5, slow=30):
+    if len(volumes) < slow: return 1.0
+    vf = sum(volumes[-fast:]) / fast
+    vs = sum(volumes[-slow:]) / slow
+    return vf / vs if vs > 0 else 1.0
 
 
 def plan_counter(
@@ -2263,12 +2334,11 @@ def plan_counter(
     st: Dict,
     system_state: Dict,
 ) -> List[Intent]:
-    """★ V10.29: MR 물림 확인 → 유니버스 전체에서 일목구름 돌파 심볼 진입.
-    MR 손실 = 추세 존재 확인 필터. 진입은 구름 돌파 심볼 (다른 심볼).
+    """★ V10.29b: BB Squeeze 브레이크아웃 → MR OR 진입.
     role=CORE_MR → DCA/TP/SL 전부 기존 MR과 동일."""
     from v9.config import (
-        COUNTER_ENABLED, COUNTER_ROI_THRESH,
-        COUNTER_SIZE_RATIO, COUNTER_COOLDOWN_SEC, COUNTER_MAX,
+        COUNTER_ENABLED, COUNTER_COOLDOWN_SEC, COUNTER_MAX,
+        COUNTER_SIZE_RATIO,
         DCA_WEIGHTS, LEVERAGE, GRID_DIVISOR,
     )
     if not COUNTER_ENABLED:
@@ -2278,142 +2348,132 @@ def plan_counter(
     now = time.time()
     prices = snapshot.all_prices or {}
 
-    # 현재 COUNTER 포지션 수
+    # 현재 BB 포지션 수
     cnt_active = 0
     cnt_syms = set()
     for _s, _ss in st.items():
-        if not isinstance(_ss, dict):
-            continue
+        if not isinstance(_ss, dict): continue
         for _side, _p in iter_positions(_ss):
             if isinstance(_p, dict) and _p.get("entry_type") == "COUNTER":
                 cnt_active += 1
                 cnt_syms.add(_s)
-
     if cnt_active >= COUNTER_MAX:
         return []
 
-    # ── Step 1: MR 물림 확인 (추세 필터) ──
-    # 어느 방향이 물려있는지 추적 → 반대 방향만 진입
-    mr_losing_side = None  # "buy" or "sell"
-    for sym, sym_st in st.items():
-        if not isinstance(sym_st, dict):
-            continue
-        for pos_side, p in iter_positions(sym_st):
-            if not isinstance(p, dict):
-                continue
-            if p.get("role", "") != "CORE_MR":
-                continue
-            if p.get("step", 0) >= 1:
-                continue
-            ep = float(p.get("ep", 0) or 0)
-            cp = float(prices.get(sym, 0) or 0)
-            if ep <= 0 or cp <= 0:
-                continue
-            roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE)
-            if roi <= COUNTER_ROI_THRESH:
-                mr_losing_side = pos_side
-                break
-        if mr_losing_side:
-            break
+    # BTC 방향 (12봉 ROC)
+    btc_dir = 0
+    if _BB_BTC_FILTER:
+        _btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
+        _btc_1h = _btc_pool.get("1h", [])
+        if len(_btc_1h) >= 13:
+            _btc_now = float(_btc_1h[-1][4])
+            _btc_prev = float(_btc_1h[-13][4])
+            if _btc_prev > 0 and _btc_now > 0:
+                _roc = (_btc_now / _btc_prev) - 1
+                if _roc > 0.005: btc_dir = 1
+                elif _roc < -0.005: btc_dir = -1
 
-    if not mr_losing_side:
-        return []
-
-    # ★ V10.29b: MR 물림 반대 방향만 진입
-    counter_side = "sell" if mr_losing_side == "buy" else "buy"
-
-    # ── Step 2: 유니버스 전체에서 구름 돌파 스캔 ──
+    # ── 유니버스 스캔: BB Squeeze 해제 → 브레이크아웃 ──
     _ohlcv_pool = snapshot.ohlcv_pool or {}
     for sym in _ohlcv_pool:
-        if cnt_active >= COUNTER_MAX:
-            break
+        if cnt_active >= COUNTER_MAX: break
 
         curr_p = float(prices.get(sym, 0) or 0)
-        if curr_p <= 0:
-            continue
+        if curr_p <= 0: continue
 
-        # 이미 포지션 있는 심볼 스킵 (MR/counter 무관)
+        # 이미 포지션 있는 심볼 스킵
         _has_pos = False
         _sym_st = st.get(sym, {})
         if isinstance(_sym_st, dict):
             for _side, _p in iter_positions(_sym_st):
                 if isinstance(_p, dict) and float(_p.get("amt", 0) or 0) > 0:
-                    _has_pos = True
-                    break
-        if _has_pos:
-            continue
-        if sym in cnt_syms:
-            continue
+                    _has_pos = True; break
+        if _has_pos or sym in cnt_syms: continue
+
+        # 쿨다운
+        cd_key = f"{sym}_bb"
+        if _bb_cooldowns.get(cd_key, 0) > now: continue
 
         pool = _ohlcv_pool.get(sym, {})
         ohlcv_15m = pool.get("15m", [])
-        ich = _ichimoku_cloud_15m(ohlcv_15m)
-        if ich is None:
-            if now - _counter_dbg_ts.get(sym, 0) > 300:
-                _dbg = f"[COUNTER] {sym} ich=None (15m봉={len(ohlcv_15m)}/80필요)"
-                print(_dbg)
-                system_state.setdefault("_counter_tg", []).append(_dbg)
-                _counter_dbg_ts[sym] = now
-            continue
+        if len(ohlcv_15m) < _KC_P + 130: continue
 
-        # 구름 위치
-        if curr_p > ich["cloud_top"]:
-            cur_pos = "ABOVE"
-        elif curr_p < ich["cloud_bot"]:
-            cur_pos = "BELOW"
+        closes = [float(b[4]) for b in ohlcv_15m]
+        highs = [float(b[2]) for b in ohlcv_15m]
+        lows = [float(b[3]) for b in ohlcv_15m]
+        volumes = [float(b[5]) for b in ohlcv_15m]
+
+        # BB / KC 계산
+        bb = _calc_bb_15m(closes)
+        kc = _calc_kc_15m(closes, highs, lows)
+        if not bb or not kc: continue
+
+        # 스퀴즈 판정
+        squeezing = bb[0] < kc[0] and bb[2] > kc[2]
+
+        if squeezing:
+            _bb_squeeze_count[sym] = _bb_squeeze_count.get(sym, 0) + 1
         else:
-            cur_pos = "INSIDE"
+            if _bb_squeeze_count.get(sym, 0) > 0:
+                _bb_prev_squeeze_len[sym] = _bb_squeeze_count[sym]
+            _bb_squeeze_count[sym] = 0
 
-        prev_pos = _counter_prev_cloud.get(sym)
-        _counter_prev_cloud[sym] = cur_pos
+        if squeezing: continue  # 스퀴즈 중엔 진입 안함
 
-        if prev_pos is None:
-            continue
+        # 최소 스퀴즈 기간 확인
+        psq = _bb_prev_squeeze_len.get(sym, 0)
+        if psq < _SQ_MIN: continue
 
-        # ── MR 물림 반대 방향만 스캔 (구름 전환 돌파 확인) ──
+        # 직전 봉 BB (돌파 기준)
+        bb_prev = _calc_bb_15m(closes[:-1])
+        if not bb_prev: continue
+
+        # Width percentile
+        wp = _bb_width_pctile(closes[:-1])
+        if wp > _WP_MAX: continue
+
+        # Volume surge
+        vs = _vol_surge_15m(volumes)
+        if vs < _VS_GATE: continue
+
+        # 방향 결정 (BB 돌파)
         entry_side = None
+        if curr_p > bb_prev[0]:
+            entry_side = "buy"
+        elif curr_p < bb_prev[2]:
+            entry_side = "sell"
+        if not entry_side: continue
 
-        if counter_side == "buy" and ich["tenkan"] > ich["kijun"]:
-            if cur_pos == "ABOVE" and prev_pos in ("INSIDE", "BELOW"):
-                entry_side = "buy"
+        # BTC 필터
+        if _BB_BTC_FILTER:
+            if entry_side == "buy" and btc_dir < 0: continue
+            if entry_side == "sell" and btc_dir > 0: continue
 
-        if counter_side == "sell" and ich["tenkan"] < ich["kijun"]:
-            if cur_pos == "BELOW" and prev_pos in ("INSIDE", "ABOVE"):
-                entry_side = "sell"
-
-        if entry_side is None:
-            continue
-
-        # 쿨다운
-        cd_key = f"{sym}_{entry_side}_counter"
-        if _counter_cooldowns.get(cd_key, 0) > now:
-            continue
+        # 한 번만 트리거
+        _bb_prev_squeeze_len[sym] = 0
 
         # ── 진입 ──
         total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-        if total_cap <= 0:
-            continue
+        if total_cap <= 0: continue
         grid = (total_cap / GRID_DIVISOR) * LEVERAGE
         tw = sum(DCA_WEIGHTS)
         base_size = grid * DCA_WEIGHTS[0] / tw
         cnt_size = base_size * COUNTER_SIZE_RATIO
         qty = cnt_size / curr_p if curr_p > 0 else 0
-        if qty <= 0:
-            continue
+        if qty <= 0: continue
 
         from v9.config import DCA_ENTRY_ROI_BY_TIER
         _dca_targets = []
-        for _dt_tier in range(2, len(DCA_WEIGHTS) + 1):  # ★ V10.29b: DCA_WEIGHTS 길이 기반
+        for _dt_tier in range(2, len(DCA_WEIGHTS) + 1):
             _dt_roi = DCA_ENTRY_ROI_BY_TIER.get(_dt_tier, -1.8)
             _dt_dist = abs(_dt_roi) / 100 / LEVERAGE
             if entry_side == "buy":
                 _dt_p = curr_p * (1.0 - _dt_dist)
             else:
                 _dt_p = curr_p * (1.0 + _dt_dist)
-            # ★ V10.29b FIX: notional 누락 → plan_dca KeyError 수정
-            _dt_notional = grid * DCA_WEIGHTS[_dt_tier-1] / tw
+            _dt_notional = grid * DCA_WEIGHTS[_dt_tier - 1] / tw
             _dca_targets.append({"tier": _dt_tier, "target_p": _dt_p,
-                                  "weight": DCA_WEIGHTS[_dt_tier-1],
+                                  "weight": DCA_WEIGHTS[_dt_tier - 1],
                                   "notional": _dt_notional,
                                   "roi_trigger": _dt_roi})
 
@@ -2423,8 +2483,8 @@ def plan_counter(
             symbol=sym,
             side=entry_side,
             qty=qty,
-            price=None,  # ★ V10.29b: 시장가 (추세 시그널 즉시 체결)
-            reason=f"COUNTER_ICH(cloud={prev_pos}→{cur_pos},vs_{mr_losing_side})",
+            price=None,
+            reason=f"BB_SQ(sq={psq},wp={wp:.0%},vs={vs:.1f}x)",
             metadata={
                 "atr": 0.0,
                 "dca_targets": _dca_targets,
@@ -2434,13 +2494,12 @@ def plan_counter(
                 "locked_regime": "NORMAL",
             },
         ))
-        _counter_cooldowns[cd_key] = now + COUNTER_COOLDOWN_SEC
+        _bb_cooldowns[cd_key] = now + COUNTER_COOLDOWN_SEC
         cnt_active += 1
         cnt_syms.add(sym)
 
-        _dbg = (f"[COUNTER_ICH] ⚡ {sym} {entry_side} "
-                f"cloud={prev_pos}→{cur_pos} "
-                f"TK{'>' if ich['tenkan']>ich['kijun'] else '<'}KJ "
+        _dbg = (f"[BB_SQ] ⚡ {sym} {entry_side} "
+                f"sq={psq} wp={wp:.0%} vs={vs:.1f}x "
                 f"size=${cnt_size:.1f}")
         print(_dbg)
         system_state.setdefault("_counter_tg", []).append(_dbg)
