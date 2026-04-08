@@ -1693,12 +1693,13 @@ def plan_force_close(
         force  = False
         reason = ""
 
-        # ★ v10.12: 잔량 정리 — notional < $5이면 즉시 market 청산
+        # ★ V10.29b: 잔량 정리 — notional < $20 또는 qty < min_qty
         _res_amt = float(p.get("amt", 0.0) or 0.0)
         _res_notional = _res_amt * curr_p
-        if 0 < _res_notional < 5.0:
+        _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+        if 0 < _res_notional < 20.0 or (0 < _res_amt < _res_min_qty * 2):
             force  = True
-            reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f})"
+            reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
 
         # ★ v10.10: DD_SHUTDOWN — 출혈 중인 CORE만 청산
         # HEDGE/INSURANCE_SH: 폭락 방어 중 → 살려야 함
@@ -2262,11 +2263,11 @@ _bb_squeeze_count: Dict[str, int] = {}     # SYM → 연속 스퀴즈 봉 수
 _bb_prev_squeeze_len: Dict[str, int] = {}  # SYM → 직전 스퀴즈 길이
 
 # BB Squeeze 파라미터 (백테스트 최적: BB15 WP10% VS1.5 SQ3)
-_BB_P = 15; _BB_M = 2.0
+_BB_P = 20; _BB_M = 2.0
 _KC_P = 20; _KC_A = 1.5
 _SQ_MIN = 3        # 최소 연속 스퀴즈 봉
-_WP_MAX = 0.10     # BB width percentile 상한
-_VS_GATE = 1.5     # 거래량 서지 배수
+_WP_MAX = 0.15     # ★ V10.29b: BB20 WP15% VS2.0 (+$1805 12mo)
+_VS_GATE = 2.0     # ★ V10.29b: 백테스트 최적
 _BB_BTC_FILTER = True
 
 
