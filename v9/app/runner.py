@@ -1322,7 +1322,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         if tier >= 2 and tier <= 4:
             from v9.config import calc_trim_price, calc_trim_qty
             _pos_side = side  # DCA side = position side
-            _trim_price = calc_trim_price(avg_price, _pos_side, tier)
+            # ★ V10.29c FIX: 블렌디드 EP 기준 (기존 avg_price=DCA체결가 → 마이너스 trim 버그)
+            _trim_price = calc_trim_price(float(p["ep"]), _pos_side, tier)
             _trim_qty = filled_qty  # ★ V10.29b: DCA 수량 그대로 트림
             p.setdefault("trim_preorders", {})
             p["trim_to_place"] = {
@@ -1330,10 +1331,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 "price": round(_trim_price, 8),
                 "qty": _trim_qty,
                 "side": "sell" if _pos_side == "buy" else "buy",
-                "entry_price": avg_price,
+                "entry_price": float(p["ep"]),  # ★ V10.29c FIX: 블렌디드 EP
             }
             print(f"[TRIM_PREP] {sym} {_pos_side} T{tier}: "
-                  f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f}")
+                  f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f} (ep={p['ep']:.4f})")
 
         print(f"[PENDING_FILL] {sym} {side} DCA T{tier} 반영 "
               f"ep={p['ep']:.4f} qty={p['amt']:.1f}")
