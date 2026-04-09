@@ -275,6 +275,14 @@ def apply_order_results(
                     if p.get("trim_preorders"):
                         for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():
                             _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _tc_info.get("oid", "")})
+                    # ★ V10.29c: pending DCA/TP limit 전부 취소
+                    try:
+                        from v9.execution.order_router import _PENDING_LIMITS
+                        _ps = "LONG" if pos_side == "buy" else "SHORT"
+                        for _oid, _info in list(_PENDING_LIMITS.items()):
+                            if _info.get("sym") == sym and _info.get("positionSide") == _ps:
+                                _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _oid})
+                    except Exception: pass
                     cooldowns[sym] = now + 900
                     clear_position(st, sym, pos_side)
                     _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
@@ -400,6 +408,20 @@ def apply_order_results(
                 for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():
                     _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _tc_info.get("oid", "")})
                 print(f"[TRIM_CANCEL_Q] {sym} {pos_side} trim {len(p['trim_preorders'])}건 취소 대기")
+            # ★ V10.29c: 포지션 청산 시 해당 심볼의 pending DCA/TP limit 전부 취소
+            # 미취소 시 DCA limit이 체결되어 유령 포지션 생성 (ARB $150 잔존 버그)
+            try:
+                from v9.execution.order_router import _PENDING_LIMITS
+                _ps = "LONG" if pos_side == "buy" else "SHORT"
+                _dca_cancel_count = 0
+                for _oid, _info in list(_PENDING_LIMITS.items()):
+                    if _info.get("sym") == sym and _info.get("positionSide") == _ps:
+                        _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _oid})
+                        _dca_cancel_count += 1
+                if _dca_cancel_count:
+                    print(f"[PENDING_CANCEL_Q] {sym} {pos_side} pending {_dca_cancel_count}건 취소 대기")
+            except Exception as _pc_e:
+                print(f"[PENDING_CANCEL_Q] {sym} 스캔 실패(무시): {_pc_e}")
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 
