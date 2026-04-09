@@ -1434,8 +1434,11 @@ def plan_dca(
         if not _u_side:
             continue
 
-        # _t3_defense 체크: 이 포지션의 TP가 블록됐는지
-        _u_def = _t3_defense(_u_side, 1, st, snapshot)
+        # ★ V10.29c: T3 방어는 urgency ≥ 17일 때만 적용
+        if _urg_dca["urgency"] >= 17:
+            _u_def = _t3_defense(_u_side, 1, st, snapshot)
+        else:
+            _u_def = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
         if not _u_def.get("blocked", False):
             continue  # 블록 안 됐으면 정상 TP 가능 → 불타기 불필요
 
@@ -1558,8 +1561,12 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
             continue
 
-        # ★ V10.29b: T3 ROI 기반 반대편 방어
-        _def = _t3_defense(p.get("side", ""), dca_level, st, snapshot)
+        # ★ V10.29c: T3 방어는 urgency ≥ 17일 때만 적용
+        # urgency 낮으면 T3가 있어도 정상 exit 허용
+        if _urg["urgency"] >= 17:
+            _def = _t3_defense(p.get("side", ""), dca_level, st, snapshot)
+        else:
+            _def = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
 
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
@@ -1680,7 +1687,11 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ V10.22: Skew-Aware light-side 보호 (trailing에도 적용)
             if p.get("role", "") not in _HEDGE_ROLES_SLOT:
                 _tr_dca = int(p.get("dca_level", 1) or 1)
-                _tr_def = _t3_defense(_iter_side, _tr_dca, st, snapshot)
+                # ★ V10.29c: T3 방어는 urgency ≥ 17일 때만 적용
+                if _urg["urgency"] >= 17:
+                    _tr_def = _t3_defense(_iter_side, _tr_dca, st, snapshot)
+                else:
+                    _tr_def = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
                 if _tr_def["blocked"]:
                     continue
 
