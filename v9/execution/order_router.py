@@ -40,7 +40,9 @@ async def cancel_pending_orders(ex, sym: str):
     """
     TRAIL_ON / FORCE_CLOSE 실행 직전, pending limit 주문 전부 취소.
     TP1 미체결이 남아 있으면 TRAIL 전량 reduceOnly가 -2022로 거절됨.
+    ★ V10.29d: _PENDING_LIMITS도 같이 취소 (DCA limit 잔존 방지)
     """
+    # (1) _PENDING_ORDERS 취소
     orders = list(_PENDING_ORDERS.pop(sym, []))
     for oid, itype_s in orders:
         try:
@@ -48,6 +50,18 @@ async def cancel_pending_orders(ex, sym: str):
             print(f"[order_router] cancel_pending {sym} oid={oid} ({itype_s})")
         except Exception as e:
             print(f"[order_router] cancel_pending {sym} oid={oid} 실패(무시): {e}")
+
+    # (2) _PENDING_LIMITS에서 같은 심볼 취소
+    _to_cancel = [(oid, info) for oid, info in list(_PENDING_LIMITS.items())
+                  if info.get("sym") == sym]
+    for oid, info in _to_cancel:
+        try:
+            await asyncio.to_thread(ex.cancel_order, oid, sym)
+            _PENDING_LIMITS.pop(oid, None)
+            print(f"[order_router] cancel_pending_limit {sym} oid={oid} ({info.get('intent_type','')})")
+        except Exception as e:
+            _PENDING_LIMITS.pop(oid, None)  # 실패해도 레지스트리에서 제거
+            print(f"[order_router] cancel_pending_limit {sym} oid={oid} 실패(무시): {e}")
 # 이유: open_fail_cooldown_until = now + 300 과 일치시킴
 #       5초 TTL이면 같은 심볼을 5초 후에 다시 OPEN 가능 → 중복매수 원인
 DEDUP_TTL = 300
