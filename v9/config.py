@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.29c"  # ★ V10.29c: ATR 3.0 고정 (슬롯 패널티 버그 수정) + URGENCY_DCA DEDUP 방지
+VERSION = "10.29c"  # ★ V10.29c: ATR 3.0 고정 + TREND + T3_DEF_FIX + pending cancel
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
