@@ -1624,7 +1624,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         if roi_gross >= _effective_tp1:
             total_qty  = float(p.get("amt", 0.0))
-            close_qty = total_qty * TP1_PARTIAL_RATIO
+            # ★ V10.29d: 노셔널 기반 T1 close qty
+            from v9.config import calc_tier_notional, notional_to_qty
+            _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+            _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
+            if _t1_notional > 0 and curr_p > 0:
+                _t1_qty = notional_to_qty(_t1_notional, curr_p)
+                close_qty = _t1_qty * TP1_PARTIAL_RATIO
+            else:
+                close_qty = total_qty * TP1_PARTIAL_RATIO  # fallback
             _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
             if close_qty < _sym_min_qty:
                 close_qty = total_qty
@@ -1632,6 +1640,8 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             _remaining = total_qty - close_qty
             if 0 < _remaining < _sym_min_qty:
                 close_qty = total_qty
+            # ★ V10.29d: close_qty가 실제 보유보다 크면 cap
+            close_qty = min(close_qty, total_qty)
             if close_qty <= 0:
                 continue
             intents.append(Intent(
@@ -1753,12 +1763,24 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 trail_reason = f"TRAILING_TIMEOUT_{dyn_timeout_sec//60}m"
 
             if trailing_triggered:
+                # ★ V10.29d: 노셔널 기반 trail qty — T1 목표 노셔널 기준
+                from v9.config import calc_tier_notional, notional_to_qty
+                _trail_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                _trail_amt = float(p.get("amt", 0.0))
+                _dca_lv = int(p.get("dca_level", 1) or 1)
+                _target_notional = calc_tier_notional(_dca_lv, _trail_bal) if _trail_bal > 0 else 0
+                if _target_notional > 0 and curr_p > 0:
+                    _trail_qty = min(notional_to_qty(_target_notional, curr_p), _trail_amt)
+                else:
+                    _trail_qty = _trail_amt  # fallback
+                if _trail_qty <= 0:
+                    _trail_qty = _trail_amt
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.TRAIL_ON,
                     symbol=symbol,
                     side="sell" if is_long else "buy",
-                    qty=float(p.get("amt", 0.0)),
+                    qty=_trail_qty,
                     price=curr_p,
                     reason=trail_reason,
                     metadata={

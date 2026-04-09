@@ -763,9 +763,16 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 # 선주문이 없으면 plan_tp1이 처리 → 스킵
                 continue
 
-            # 수량 계산
+            # 수량 계산 — ★ V10.29d: 노셔널 기반
+            from v9.config import calc_tier_notional, notional_to_qty
             total_qty = float(p.get("amt", 0) or 0)
-            close_qty = total_qty * TP1_PARTIAL_RATIO
+            _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+            _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
+            if _t1_notional > 0 and target_price > 0:
+                _t1_qty = notional_to_qty(_t1_notional, target_price)
+                close_qty = _t1_qty * TP1_PARTIAL_RATIO
+            else:
+                close_qty = total_qty * TP1_PARTIAL_RATIO  # fallback
             _min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
             if close_qty < _min_qty:
                 close_qty = total_qty
@@ -1320,11 +1327,16 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         # ★ V10.28b: Trim 선주문 플래그
         if tier >= 2 and tier <= 4:
-            from v9.config import calc_trim_price, calc_trim_qty
+            from v9.config import calc_trim_price, calc_trim_qty, calc_tier_notional, notional_to_qty
             _pos_side = side  # DCA side = position side
             # ★ V10.29c FIX: 블렌디드 EP 기준 (기존 avg_price=DCA체결가 → 마이너스 trim 버그)
             _trim_price = calc_trim_price(float(p["ep"]), _pos_side, tier)
-            _trim_qty = filled_qty  # ★ V10.29b: DCA 수량 그대로 트림
+            # ★ V10.29d: 노셔널 기반 trim — 목표 tier 노셔널까지만 남기고 나머지 정리
+            _bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+            _mark = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
+            _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark)
+            if _trim_qty <= 0:
+                _trim_qty = filled_qty  # fallback: DCA 수량 그대로
             p.setdefault("trim_preorders", {})
             p["trim_to_place"] = {
                 "tier": tier,
@@ -1334,7 +1346,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 "entry_price": float(p["ep"]),  # ★ V10.29c FIX: 블렌디드 EP
             }
             print(f"[TRIM_PREP] {sym} {_pos_side} T{tier}: "
-                  f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f} (ep={p['ep']:.4f})")
+                  f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f} (ep={p['ep']:.4f}, notional-based)")
 
         print(f"[PENDING_FILL] {sym} {side} DCA T{tier} 반영 "
               f"ep={p['ep']:.4f} qty={p['amt']:.1f}")
@@ -1543,16 +1555,18 @@ async def _place_trim_preorders(ex, st, snapshot):
 
             ttp = p.get("trim_to_place")
             if not ttp:
-                # ★ V10.29b: trim 재생성 — stale 정리 후 trim 없는 T2/T3 복구
+                # ★ V10.29d: trim 재생성 — 노셔널 기반
                 _regen_dca = int(p.get("dca_level", 1) or 1)
                 _regen_trp = p.get("trim_preorders", {})
                 if _regen_dca >= 2 and not _regen_trp and p.get("ep") and p.get("amt"):
                     from v9.config import calc_trim_price, calc_trim_qty
                     _regen_ep = float(p.get("ep", 0))
-                    # ★ V10.29b: 산만큼 판다
-                    _dca_qtys = p.get("dca_qty_by_tier", {})
-                    _ldq = float(_dca_qtys.get(str(_regen_dca), 0) or 0)
-                    _regen_qty = _ldq if _ldq > 0 and _ldq <= float(p["amt"]) * 0.8 else calc_trim_qty(float(p["amt"]), _regen_dca)
+                    _regen_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                    _regen_mark = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
+                    _regen_qty = calc_trim_qty(
+                        float(p["amt"]), _regen_dca,
+                        ep=_regen_ep, bal=_regen_bal, mark_price=_regen_mark
+                    )
                     _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca)
                     if _regen_qty > 0 and _regen_price > 0:
                         p["trim_to_place"] = {
@@ -1564,7 +1578,7 @@ async def _place_trim_preorders(ex, st, snapshot):
                         }
                         ttp = p["trim_to_place"]
                         print(f"[TRIM_REGEN] {sym} {pos_side} T{_regen_dca}: "
-                              f"trim 재생성 {_regen_qty:.4f}@${_regen_price:.4f}")
+                              f"trim 재생성 {_regen_qty:.4f}@${_regen_price:.4f} (notional-based)")
                     else:
                         continue
                 else:
@@ -2136,14 +2150,22 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ Beta Cycle 통합
             if _BC_ENABLED:
-                # ★ V10.29c: 1h 전환 — 매 사이클 호출 (5분 throttle은 함수 내부)
-                try:
-                    _bc_intents = bc_on_daily_close(snapshot, st, system_state)
-                    intents += _bc_intents
-                    if _bc_intents:
-                        print(f"[BC] 시그널: {len(_bc_intents)}건 진입 intent")
-                except Exception as _bc_e:
-                    print(f"[BC] check_signals 오류(무시): {_bc_e}")
+                # 일봉 마감 감지 (UTC 00:00 직후, 1일 1회)
+                _bc_hour = int(time.strftime("%H", time.gmtime()))
+                _bc_today = time.strftime("%Y-%m-%d", time.gmtime())
+                if not hasattr(_main_loop, '_bc_last_daily'):
+                    _main_loop._bc_last_daily = ""
+                if _bc_hour == 0 and _main_loop._bc_last_daily != _bc_today:
+                    _main_loop._bc_last_daily = _bc_today
+                    try:
+                        # ★ V10.29b-BC FIX: 동기 fetch → 별도 스레드 (MR 메인루프 블로킹 방지)
+                        _bc_daily_intents = await asyncio.to_thread(
+                            bc_on_daily_close, snapshot, st, system_state)
+                        intents += _bc_daily_intents
+                        if _bc_daily_intents:
+                            print(f"[BC] 일봉 시그널: {len(_bc_daily_intents)}건 진입 intent")
+                    except Exception as _bc_e:
+                        print(f"[BC] on_daily_close 오류(무시): {_bc_e}")
 
                 # 매 틱 포지션 관리
                 try:

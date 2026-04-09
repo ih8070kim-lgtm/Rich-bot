@@ -339,32 +339,53 @@ def calc_trim_price(blended_ep: float, side: str, tier: int) -> float:
     return blended_ep * (1 - roi_pct / LEVERAGE / 100)
 
 
-def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0) -> float:
-    """★ V10.29b: Trim 매도 수량 — 목표 티어 노셔널 기준.
+def calc_tier_notional(tier: int, bal: float) -> float:
+    """★ V10.29d: 특정 tier까지 누적 목표 노셔널 (USDT).
+    tier=0 → 0, tier=1 → T1 비중, tier=2 → T1+T2 비중, ...
+    bal = real_balance_usdt (총 자본)
+    """
+    if tier <= 0 or bal <= 0:
+        return 0.0
+    total_w = sum(DCA_WEIGHTS)
+    if total_w <= 0:
+        return 0.0
+    cum_w = sum(DCA_WEIGHTS[:min(tier, len(DCA_WEIGHTS))])
+    grid_notional = bal / GRID_DIVISOR * LEVERAGE
+    return grid_notional * cum_w / total_w
 
-    URGENCY_DCA 등으로 비대해진 포지션을 정상 크기로 복원.
-    ep/bal 없으면 레거시 비율 방식 fallback.
+
+def notional_to_qty(target_notional: float, price: float) -> float:
+    """★ V10.29d: 노셔널 → 수량 변환. price=0이면 0 반환."""
+    if price <= 0 or target_notional <= 0:
+        return 0.0
+    return target_notional / price
+
+
+def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0,
+                  mark_price: float = 0.0) -> float:
+    """★ V10.29d: Trim 수량 — 순수 노셔널 기반.
+
+    현재 포지션 노셔널에서 목표 tier 노셔널을 빼서 트림할 수량 계산.
+    mark_price가 있으면 실시간 가격 기준, 없으면 ep fallback.
     """
     if tier < 1 or total_amt <= 0:
         return 0.0
 
-    # 목표: trim 후 target_tier의 정상 노셔널로 복원
     target_tier = tier - 1
-    cum_w_target = sum(DCA_WEIGHTS[:target_tier]) if target_tier > 0 else 0
-    cum_w_current = sum(DCA_WEIGHTS[:tier])
-    total_w = sum(DCA_WEIGHTS)
+    price = mark_price if mark_price > 0 else ep
 
-    # ep/bal 있으면 그리드 기준 절대값
-    if ep > 0 and bal > 0:
-        grid_notional = bal / GRID_DIVISOR * LEVERAGE
-        target_notional = grid_notional * cum_w_target / total_w if total_w > 0 else 0
-        current_notional = total_amt * ep
+    # bal 있으면 절대 노셔널 기준
+    if bal > 0 and price > 0:
+        target_notional = calc_tier_notional(target_tier, bal)
+        current_notional = total_amt * price
         trim_notional = current_notional - target_notional
         if trim_notional <= 0:
             return 0.0
-        return trim_notional / ep
+        return trim_notional / price
 
-    # fallback: 비율 방식
+    # fallback: 비율 방식 (bal 없을 때)
+    total_w = sum(DCA_WEIGHTS)
+    cum_w_current = sum(DCA_WEIGHTS[:min(tier, len(DCA_WEIGHTS))])
     if cum_w_current <= 0:
         return 0.0
     tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
@@ -404,26 +425,29 @@ TREND_MIN_SCORE      = 1.5     # 추세 점수 최소값 (EMA이격 × VS × RSI
 TREND_COOLDOWN_SEC   = 300     # 동일 심볼 재진입 쿨다운 5분
 
 # ═══════════════════════════════════════════════════════════════
-# Beta Cycle (v10.29c — 1h 전환, 백테스트 +$921 WR72% MDD-5.8%)
+# Beta Cycle (v3 Final — Short-Only)
 # ═══════════════════════════════════════════════════════════════
 BC_ENABLED          = True
 CB_ENABLED          = True    # ★ V10.29b: Crash Bounce 알파
-BC_ARM_THRESH       = 0.03      # ★ V10.29c: excess return ≥ 3% → ARMED (일봉 5% → 1h 3%)
-BC_NORM_THRESH      = 0.02      # ★ V10.29c: excess ≤ 2% → 정상화 진입
+BC_ARM_THRESH       = 0.05      # excess return ≥ 5% → ARMED
+BC_NORM_THRESH      = 0.04      # excess ≤ 4% → 정상화 진입
 BC_SHORT_SL         = 8.0       # SL 8%
 BC_SHORT_TP         = 6.0       # TP 6%
 BC_TRAIL_ACTIVATION = 0.03      # 3% 수익 시 트레일 시작
 BC_TRAIL_FLOOR      = 0.015     # 트레일 최소 1.5%
 BC_TRAIL_ATR_MULT   = 1.5       # ATR × 1.5
-BC_COOLDOWN_SEC     = 10800     # ★ V10.29c: 3시간 쿨다운 (일봉 3일 → 1h 3시간)
-BC_MAX_POS          = 2
-BC_SIZE_DIVISOR     = 10        # equity/10 ≈ 10%
-BC_MAX_HOLD_HOURS   = 168       # ★ V10.29c: 7일 (일봉 14일 → 1h 7일)
-BC_ARMED_EXPIRY_H   = 168       # ★ V10.29c: ARMED 만료 7일
-BC_UNI_TOP_N        = 20
-BC_RETURN_WINDOW     = 24       # ★ V10.29c: 24시간 excess return (일봉 7일 → 1h 24시간)
-BC_BETA_WINDOW       = 168      # ★ V10.29c: 7일 베타 (일봉 30일 → 1h 7일)
-BC_CHECK_INTERVAL    = 300      # 5분마다 ARM/NORM 체크
+BC_COOLDOWN_DAYS    = 3         # 동일 심볼 재진입 쿨다운
+BC_ENTRY_PER_DAY    = 3         # 하루 최대 진입
+BC_MAX_POS          = 2         # ★ 테스트: 슬롯 2개
+BC_SIZE_DIVISOR     = 10        # ★ 테스트: equity/10 ≈ 10%
+BC_MAX_HOLD_HOURS   = 336       # 14일
+BC_ARMED_EXPIRY_D   = 30        # ARMED 만료
+BC_PULLBACK_MAX     = 0.08      # 고점 대비 8% 이상 빠지면 스킵
+BC_PULLBACK_MIN     = 0.005     # 0.5% 미만이면 대기
+BC_UNI_TOP_N        = 20        # 일일 유니버스 상위 20개
+BC_BETA_SHORT_D     = 7
+BC_BETA_LONG_D      = 30
+BC_RETURN_WINDOW     = 7
 
 # ═══════════════════════════════════════════════════════════════
 # Crash Bounce (v10.29c — WF 검증 best config)
