@@ -769,6 +769,10 @@ def plan_open(
         # ★ V10.29c FIX: 기존 버그 — _mr_atr_mult_long 사용 → _mr_atr_mult 통일
         mr_short_ok = can_short and ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult)
 
+        # ★ V10.29c: TREND용 raw 시그널 — 슬롯 체크 없이 ATR 이격만 판정
+        _mr_signal_long  = ema_10_15m > 0 and (curr_p < ema_10_15m - atr_coin * _mr_atr_mult)
+        _mr_signal_short = ema_10_15m > 0 and (curr_p > ema_10_15m + atr_coin * _mr_atr_mult)
+
         # ★ V10.29b: E30 전면 제거 — 7건 중 6건 손실, 건당 -$10
         mr_e30_long_ok  = False
         mr_e30_short_ok = False
@@ -824,6 +828,10 @@ def plan_open(
         # ★ V10.27d: MR 최종 — VS AND MTF 둘 다 통과해야 진입
         _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok  and _mr_vs_ok and _mr_mtf_ok
         _mr_short_final = mr_short_ok and short_trig and micro_short_ok and _mr_vs_ok and _mr_mtf_ok
+
+        # ★ V10.29c: TREND용 시그널 — MR 품질 필터 통과했지만 슬롯 블록일 수 있음
+        _trend_signal_long  = _mr_signal_long  and long_trig  and micro_long_ok  and _mr_vs_ok and _mr_mtf_ok
+        _trend_signal_short = _mr_signal_short and short_trig and micro_short_ok and _mr_vs_ok and _mr_mtf_ok
 
         # E30: EMA10 미충족 + EMA30 충족 + 같은 RSI/micro 조건 + 슬롯 여유
         _e30_long_final  = mr_e30_long_ok  and long_trig  and micro_long_ok  and _active_e30 < MAX_E30_SLOTS
@@ -1016,14 +1024,19 @@ def plan_open(
         if entry_type_tag == "15mE30":
             _active_e30 += 1
 
-        # ★ V10.29c: TREND COMPANION — MR 진입 시 반대 방향 추세 심볼 동시 진입
-        # MR 롱 → 유니버스에서 하방 추세 최강 심볼 숏
-        # MR 숏 → 유니버스에서 상방 추세 최강 심볼 롱
+        # ★ V10.29c: TREND COMPANION — MR 시그널 감지 시 반대 방향 추세 심볼 진입
+        # MR이 슬롯 블록으로 진입 못 해도, 시그널 자체가 "추세 존재"를 의미 → TREND 발동
         from v9.config import TREND_ENABLED, TREND_MIN_SCORE, TREND_COOLDOWN_SEC
+        _trend_signal_side = None
         if TREND_ENABLED:
-            _tr_opp_side = "sell" if trigger_side == "buy" else "buy"
+            if _trend_signal_long:
+                _trend_signal_side = "buy"  # 롱 시그널 → 시장 하방 → TREND 숏
+            elif _trend_signal_short:
+                _trend_signal_side = "sell"  # 숏 시그널 → 시장 상방 → TREND 롱
+
+        if _trend_signal_side:
+            _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
             _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
-            # 이미 이번 루프에서 생성된 intent의 심볼도 제외
             _tr_entered = {i.symbol for i in intents}
 
             if _tr_opp_slots < MAX_MR_PER_SIDE:
@@ -1040,7 +1053,6 @@ def plan_open(
                         continue
                     if _tr_sym == "BTC/USDT":
                         continue
-                    # 쿨다운
                     if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                         continue
                     _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
@@ -1053,7 +1065,6 @@ def plan_open(
 
                     _tr_score = _calc_trend_score(_tr_15m)
 
-                    # 반대 방향 추세만: MR 롱 → 하락 추세(음수), MR 숏 → 상승 추세(양수)
                     if _tr_opp_side == "sell" and _tr_score < -TREND_MIN_SCORE:
                         if abs(_tr_score) > _tr_best_score:
                             _tr_best_score = abs(_tr_score)
@@ -1081,7 +1092,7 @@ def plan_open(
                             side=_tr_opp_side,
                             qty=_tr_qty,
                             price=_tr_cp,
-                            reason=f"TREND_COMP(mr={symbol},score={_tr_best_score:.1f})",
+                            reason=f"TREND_COMP(sig={symbol},score={_tr_best_score:.1f})",
                             metadata={
                                 "atr": 0,
                                 "dca_targets": _tr_dca_targets,
@@ -1095,11 +1106,14 @@ def plan_open(
                             _core_long += 1
                         else:
                             _core_short += 1
+                        _mr_blocked = not (_mr_long_final or _mr_short_final)
                         print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
-                              f"← MR {symbol} {trigger_side}")
+                              f"← sig {symbol} {_trend_signal_side}"
+                              f"{' (MR BLOCKED)' if _mr_blocked else ''}")
                         try:
                             from v9.logging.logger_csv import log_system
-                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}")
+                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}"
+                                       f"{' (MR_BLOCKED)' if _mr_blocked else ''}")
                         except Exception: pass
 
     return intents
