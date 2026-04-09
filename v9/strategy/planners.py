@@ -254,9 +254,7 @@ from v9.utils.utils_math import (
 )
 
 
-OPEN_ATR_TIGHTEN_MULT    = 1.5
-OPEN_ATR_LOOSEN_MULT     = 0.7
-OPEN_RSI_SHIFT           = 3
+# ★ V10.29d: ATR shift 상수 제거 (RSI 35/65 고정)
 OPEN_SYMBOL_COOLDOWN_SEC = 10 * 60
 OPEN_WAIT_NEXT_BAR       = False
 OPEN_PENDING_TTL_SEC     = 5 * 60
@@ -442,11 +440,10 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # 레거시 호환: _build_dca_targets 사이징용으로만 사용
 DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ V10.29b: 블렌디드 EP 기준 (바이낸스 ROI 그대로)
 
-REGIME_HARD_SL       = {"BAD": -5.0, "LOW": -6.5, "NORMAL": -8.0, "HIGH": -10.0}
-_REGIME_WIDTH = {"HIGH": 4, "NORMAL": 3, "LOW": 2, "BAD": 1}
-
+# ★ V10.29d: REGIME_HARD_SL 제거 (미사용 데드코드)
+# ★ V10.29d: _wider_regime — DCA 거리 통일로 무의미, 호환용 stub 유지
 def _wider_regime(a: str, b: str) -> str:
-    return a if _REGIME_WIDTH.get(a, 0) >= _REGIME_WIDTH.get(b, 0) else b
+    return "LOW"  # 모든 레짐 동일 거리 → 항상 LOW
 
 def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
@@ -685,34 +682,23 @@ def plan_open(
         if len(ohlcv_1m) < 15 or len(ohlcv_15m) < 15 or len(ohlcv_5m) < 21:
             continue
 
-        # ── (1) RSI 파라미터 (v10.2: 35/65 — ATR 보정 유지)
+        # ── (1) RSI 파라미터 — ★ V10.29d: 고정 35/65 (레짐 패널티 제거)
         rsi5_os = 35
         rsi5_ob = 65
 
-        # ── (2) 코인 ATR% 보정
+        # ── (2) 코인 ATR% (MTF 스코어, 로그용으로만 유지)
         atr_coin     = atr_from_ohlcv(ohlcv_1m[-15:], period=10)
         atr_pct_coin = atr_coin / curr_p if curr_p > 0 else HARD_SL_ATR_BASE
         atr_mult     = atr_pct_coin / HARD_SL_ATR_BASE if HARD_SL_ATR_BASE > 0 else 1.0
 
+        # ★ V10.29d: ATR 기반 RSI shift 제거 — shift = 0 고정
         shift = 0
-        if   atr_mult > OPEN_ATR_TIGHTEN_MULT: shift =  OPEN_RSI_SHIFT
-        elif atr_mult < OPEN_ATR_LOOSEN_MULT:  shift = -1
 
         adj_rsi5_os = max(20, rsi5_os - shift)
         adj_rsi5_ob = min(80, rsi5_ob + shift)
 
-        # ★ V10.29 FIX (B1): urgency 높을 때 heavy side 진입 강화, light side 완화
-        # 기존: 무조건 숏 완화 → 숏이 heavy일 때 스큐 악화 악순환
-        # 수정: heavy side 진입을 어렵게, light side 진입을 쉽게
-        if _urg_open["urgency"] >= 10:
-            if _urg_open["heavy_side"] == "sell":
-                # 숏 과다 → 숏 진입 어렵게(OB↑), 롱 진입 쉽게(OS↑)
-                adj_rsi5_ob = min(80, adj_rsi5_ob + 5)  # 65→70
-                adj_rsi5_os = min(50, adj_rsi5_os + 5)  # 35→40
-            elif _urg_open["heavy_side"] == "buy":
-                # 롱 과다 → 롱 진입 어렵게(OS↓), 숏 진입 쉽게(OB↓)
-                adj_rsi5_os = max(20, adj_rsi5_os - 5)  # 35→30
-                adj_rsi5_ob = max(55, adj_rsi5_ob - 5)  # 65→60
+        # ★ V10.29d: RSI shift 전면 제거 — 35/65 완전 고정
+        # (ATR 기반, urgency/skew 기반 모두 제거)
 
         # ── (2-b) BTC 변동성 레짐 보정 — ATR 배수 레짐별 조정 (루프 밖에서 계산됨)
 
