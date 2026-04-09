@@ -1655,6 +1655,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
     intents: List[Intent] = []
     now = time.time()
+    _urg = _calc_urgency(st, snapshot)  # ★ V10.29c: trailing 방어 게이트용
 
     for symbol, sym_st in st.items():
         if not isinstance(sym_st, dict):
