@@ -289,11 +289,16 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
         if itype == IntentType.OPEN:
             _dir = "📈L" if side == "buy" else "📉S"
             _role = _meta.get("role", "")
+            _entry = _meta.get("entry_type", "")
             if _role in ("HEDGE", "CORE_HEDGE"):
                 _badge = "🛡"
             elif _role == "INSURANCE_SH":
                 _badge = "🩹"
-            elif _meta.get("entry_type") == "COUNTER":
+            elif _role == "BC":
+                _badge = "🌀"
+            elif _entry == "TREND":
+                _badge = "🔀"
+            elif _entry == "COUNTER":
                 _badge = "⚡"
             else:
                 _badge = "🔁"
@@ -305,8 +310,11 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
         elif itype == IntentType.DCA:
             tier = _meta.get("tier", 2)
             _dir = "L" if side == "buy" else "S"
+            _is_urgency = "URGENCY" in (intent.reason or "")
+            _dca_badge = "⚠️" if _is_urgency else "📦"
+            _dca_label = "URG" if _is_urgency else "DCA"
             await send_telegram_message(
-                f"📦 <b>{short_sym}</b> DCA T{tier} {_dir}\n"
+                f"{_dca_badge} <b>{short_sym}</b> {_dca_label} T{tier} {_dir}\n"
                 f"@ {avg_px:.4f}  ${notional:.1f}  {ts}"
             )
 
@@ -325,14 +333,23 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
                 roi = pnl = 0.0
 
             icon = "🟢" if pnl >= 0 else "🔴"
-            _labels = {
-                IntentType.FORCE_CLOSE: "🚨",
-                IntentType.TP1: "✅",
-                IntentType.TP2: "💰",
-                IntentType.TRAIL_ON: "🎯",
-                IntentType.CLOSE: "🔚",
-            }
-            label = _labels.get(itype, "🔚")
+            _reason = intent.reason or ""
+            # ★ V10.29d: 청산 유형별 아이콘
+            if "TRIM" in _reason:
+                label = "✂️"
+            elif itype == IntentType.FORCE_CLOSE:
+                if "ZOMBIE" in _reason:
+                    label = "💀"
+                else:
+                    label = "🚨"
+            elif itype == IntentType.TRAIL_ON:
+                label = "🎯"
+            elif itype == IntentType.TP1:
+                label = "✅"
+            elif itype == IntentType.TP2:
+                label = "💰"
+            else:
+                label = "🔚"
 
             await send_telegram_message(
                 f"{label} <b>{short_sym}</b> T{dca}\n"
@@ -365,10 +382,17 @@ async def notify_async_fill(
                 f"✅ <b>{short_sym}</b> TP1 Limit\n"
                 f"{icon} {roi:+.1f}% <b>${pnl:+.2f}</b>  {ts}"
             )
+        elif fill_type == "TRIM_FILL":
+            icon = "🟢" if pnl >= 0 else "🔴"
+            await send_telegram_message(
+                f"✂️ <b>{short_sym}</b> Trim T{tier}\n"
+                f"{icon} {roi:+.1f}% <b>${pnl:+.2f}</b>  {ts}"
+            )
         elif fill_type == "PENDING_OPEN":
             _dir = "📈L" if side == "buy" else "📉S"
+            _badge = "🌀" if role == "BC" else "🔁"
             await send_telegram_message(
-                f"{_dir} 🔁 <b>{short_sym}</b> Limit\n"
+                f"{_dir} {_badge} <b>{short_sym}</b> Limit\n"
                 f"@ {avg_px:.4f}  ${notional:.1f}  {ts}"
             )
         elif fill_type == "PENDING_DCA":
@@ -495,14 +519,19 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
 
     exit_str = " / ".join(f"{k} {v}" for k, v in sorted(reason_counts.items(), key=lambda x: -x[1]))
 
-    # ── Role 분포 ──
+    # ── Role/전략 분포 ──
     role_map = {}
     for t in trades:
         rl = t["role"]
-        if "HEDGE" in rl:
+        et = t.get("entry", "")
+        if rl == "BC":
+            rk = "BC"
+        elif "HEDGE" in rl:
             rk = "Hedge"
         elif "INSURANCE" in rl:
             rk = "Ins"
+        elif et == "TREND":
+            rk = "Trend"
         elif "BREAKOUT" in rl or "E30" in rl:
             rk = "E30"
         else:
