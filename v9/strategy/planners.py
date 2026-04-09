@@ -1958,11 +1958,12 @@ def plan_force_close(
                         reason = f"T3_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
 
                     # 아직 방어 중 → 기존 SL 무시
-                    if not force:
-                        pass  # 기존 HARD_SL 스킵
+                    # ★ V10.29c FIX: pass → 플래그로 정상 HARD_SL 차단
 
             # ── 기존 HARD_SL (T1/T2 또는 T4_DEFENSE 미활성 T3) ──
-            if not force:
+            # ★ V10.29c FIX: 방어 모드 활성 시 정상 HARD_SL 스킵
+            _t4_skip = (_dca_lv_sl >= 3 and p.get("t4_defense", False) and not force)
+            if not force and not _t4_skip:
                 _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
 
                 # ★ V10.29: 공유 함수 — DCA와 동일 기준점
