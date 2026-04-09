@@ -1367,9 +1367,31 @@ def plan_dca(
     _urg_light_side = _urg_dca.get("light_side", "")
 
     if _urg_score >= 17:
-        _URG_DCA_MAX = 2
+        _URG_DCA_CAP = 2
     elif _urg_score >= 12:
-        _URG_DCA_MAX = 1
+        _URG_DCA_CAP = 1
+    else:
+        _URG_DCA_CAP = 0
+
+    # ★ V10.29d: light side 기존 T2+ 수 차감 → 이미 T2 있으면 추가 안 함
+    # pending DCA limit 조회 (스팸 방지 + T2 카운트 겸용)
+    try:
+        from v9.execution.order_router import get_pending_limits as _gpl_urg
+        _urg_pending_syms = {v["sym"] for v in _gpl_urg().values()
+                            if v.get("intent_type") == "DCA"}
+    except Exception:
+        _urg_pending_syms = set()
+
+    if _URG_DCA_CAP > 0 and _urg_light_side:
+        _existing_t2 = 0
+        for _ct_s, _ct_p in _pos_items(st):
+            if _ct_p.get("side") == _urg_light_side \
+               and _ct_p.get("role", "") not in _HEDGE_ROLES_SLOT \
+               and int(_ct_p.get("dca_level", 1) or 1) >= 2:
+                _existing_t2 += 1
+        # pending DCA limit도 T2 예정으로 카운트
+        _existing_t2 += len(_urg_pending_syms)
+        _URG_DCA_MAX = max(0, _URG_DCA_CAP - _existing_t2)
     else:
         _URG_DCA_MAX = 0
 
@@ -1386,12 +1408,17 @@ def plan_dca(
                 continue
             if _up.get("max_dca_reached") or _up.get("pending_dca"):
                 continue
-            if _us in _urg_dca_syms:
+            if _us in _urg_dca_syms or _us in _urg_pending_syms:
                 continue
 
             _u_side = _up.get("side", "")
             if _u_side != _urg_light_side:
                 continue  # light side만
+
+            # ★ V10.29d: 최소 5분 보유 후에만 URGENCY_DCA (신규 진입 즉시 DCA 방지)
+            _u_entry_time = float(_up.get("time", 0) or 0)
+            if time.time() - _u_entry_time < 300:
+                continue
 
             _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
             _u_cd = DCA_COOLDOWN_BY_TIER.get(2, DCA_COOLDOWN_SEC)
@@ -1440,6 +1467,8 @@ def plan_dca(
                 },
             ))
             _urg_filled += 1
+            # ★ V10.29d: pending_dca 세팅 → 다음 틱에서 재발사 방지
+            _up["pending_dca"] = "URGENCY"
             print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
                   f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}]")
 
