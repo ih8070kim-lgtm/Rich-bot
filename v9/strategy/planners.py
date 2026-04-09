@@ -1442,8 +1442,6 @@ def plan_dca(
             _urg_filled += 1
             print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
                   f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}]")
-        print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
-              f"roi={_u_roi:+.1f}% opp_t3={_opp_roi:+.1f}%")
 
     return intents
 
