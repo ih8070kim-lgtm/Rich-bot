@@ -493,6 +493,60 @@ def _is_falling_knife_short(ohlcv_5m: list) -> bool:
 # ═════════════════════════════════════════════════════════════════
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V10.29c: TREND COMPANION — MR 진입 시 반대 방향 추세 심볼 동시 진입
+# ═════════════════════════════════════════════════════════════════
+_trend_cooldown: Dict[str, float] = {}  # sym → next allowed ts
+
+def _calc_trend_score(ohlcv_15m: list, ohlcv_1m: list = None) -> float:
+    """추세 점수: EMA 이격 × 거래량 서지 × RSI 가중치.
+    양수=상승 추세, 음수=하락 추세. abs() >= TREND_MIN_SCORE 이면 유효."""
+    if len(ohlcv_15m) < 35:
+        return 0.0
+    closes = [float(b[4]) for b in ohlcv_15m]
+    highs = [float(b[2]) for b in ohlcv_15m]
+    lows = [float(b[3]) for b in ohlcv_15m]
+    volumes = [float(b[5]) for b in ohlcv_15m]
+
+    c = closes[-1]
+    if c <= 0:
+        return 0.0
+
+    # EMA10 이격 (ATR 단위)
+    k = 2 / 11; e = closes[-30]
+    for v in closes[-30:]: e = v * k + e * (1 - k)
+    trs = []
+    for j in range(-14, 0):
+        if closes[j - 1] > 0:
+            trs.append(max(highs[j] - lows[j], abs(highs[j] - closes[j - 1]), abs(lows[j] - closes[j - 1])) / closes[j - 1])
+    atr = (sum(trs) / len(trs) * c) if trs else 0
+    if atr <= 0:
+        return 0.0
+    ema_dist = (c - e) / atr
+
+    # 거래량 서지 (5봉/30봉)
+    if len(volumes) >= 30:
+        vf = sum(volumes[-5:]) / 5
+        vs = sum(volumes[-30:]) / 30
+        vol_s = vf / vs if vs > 0 else 1.0
+    else:
+        vol_s = 1.0
+
+    # RSI 14
+    if len(closes) >= 16:
+        gains, losses = [], []
+        for j in range(-14, 0):
+            d = closes[j] - closes[j - 1]
+            gains.append(max(d, 0)); losses.append(max(-d, 0))
+        ag = sum(gains) / 14; al = sum(losses) / 14
+        rsi = 100 - (100 / (1 + ag / al)) if al > 0 else 100.0
+    else:
+        rsi = 50.0
+    rsi_w = (rsi - 50) / 50  # -1 ~ +1
+
+    return ema_dist * vol_s * (1 + abs(rsi_w))
+
+
+# ═════════════════════════════════════════════════════════════════
 # ASYM 슬롯 킬 대상 탐색  (★ v9.9)
 # ═════════════════════════════════════════════════════════════════
 
@@ -961,6 +1015,92 @@ def plan_open(
         # ★ V10.27d: E30 슬롯 카운터 증가 (루프 내 중복 방지)
         if entry_type_tag == "15mE30":
             _active_e30 += 1
+
+        # ★ V10.29c: TREND COMPANION — MR 진입 시 반대 방향 추세 심볼 동시 진입
+        # MR 롱 → 유니버스에서 하방 추세 최강 심볼 숏
+        # MR 숏 → 유니버스에서 상방 추세 최강 심볼 롱
+        from v9.config import TREND_ENABLED, TREND_MIN_SCORE, TREND_COOLDOWN_SEC
+        if TREND_ENABLED:
+            _tr_opp_side = "sell" if trigger_side == "buy" else "buy"
+            _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
+            # 이미 이번 루프에서 생성된 intent의 심볼도 제외
+            _tr_entered = {i.symbol for i in intents}
+
+            if _tr_opp_slots < MAX_MR_PER_SIDE:
+                _tr_best_sym = None
+                _tr_best_score = 0
+                _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
+                _tr_prices = snapshot.all_prices or {}
+                _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
+                            for _, p in iter_positions(ss)
+                            if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
+
+                for _tr_sym in _tr_ohlcv_pool:
+                    if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
+                        continue
+                    if _tr_sym == "BTC/USDT":
+                        continue
+                    # 쿨다운
+                    if _trend_cooldown.get(_tr_sym, 0) > now_ts:
+                        continue
+                    _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
+                    _tr_15m = _tr_pool.get("15m", [])
+                    if len(_tr_15m) < 35:
+                        continue
+                    _tr_cp = float(_tr_prices.get(_tr_sym, 0))
+                    if _tr_cp <= 0:
+                        continue
+
+                    _tr_score = _calc_trend_score(_tr_15m)
+
+                    # 반대 방향 추세만: MR 롱 → 하락 추세(음수), MR 숏 → 상승 추세(양수)
+                    if _tr_opp_side == "sell" and _tr_score < -TREND_MIN_SCORE:
+                        if abs(_tr_score) > _tr_best_score:
+                            _tr_best_score = abs(_tr_score)
+                            _tr_best_sym = _tr_sym
+                    elif _tr_opp_side == "buy" and _tr_score > TREND_MIN_SCORE:
+                        if _tr_score > _tr_best_score:
+                            _tr_best_score = _tr_score
+                            _tr_best_sym = _tr_sym
+
+                if _tr_best_sym:
+                    _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
+                    _tr_grid = total_cap / GRID_DIVISOR * LEVERAGE
+                    _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                    _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
+
+                    if _tr_qty > 0:
+                        _tr_dca_targets = _build_dca_targets(
+                            _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
+                        _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
+
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.OPEN,
+                            symbol=_tr_best_sym,
+                            side=_tr_opp_side,
+                            qty=_tr_qty,
+                            price=_tr_cp,
+                            reason=f"TREND_COMP(mr={symbol},score={_tr_best_score:.1f})",
+                            metadata={
+                                "atr": 0,
+                                "dca_targets": _tr_dca_targets,
+                                "positionSide": "LONG" if _tr_opp_side == "buy" else "SHORT",
+                                "entry_type": "TREND",
+                                "role": "CORE_MR",
+                                "locked_regime": _btc_regime,
+                            },
+                        ))
+                        if _tr_opp_side == "buy":
+                            _core_long += 1
+                        else:
+                            _core_short += 1
+                        print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
+                              f"← MR {symbol} {trigger_side}")
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}")
+                        except Exception: pass
 
     return intents
 
