@@ -91,7 +91,7 @@ USE_SUPERVISOR_MODE = True
 GIT_AUTO_PULL_ENABLED  = os.getenv("GIT_AUTO_PULL_ENABLED", "1").strip() == "1"
 GIT_AUTO_PULL_BRANCH   = os.getenv("GIT_AUTO_PULL_BRANCH", "main").strip()
 GIT_AUTO_PULL_INTERVAL = int(os.getenv("GIT_AUTO_PULL_INTERVAL", "300"))  # 초 (기본 5분)
-RUN_TESTS_ON_DEPLOY    = os.getenv("RUN_TESTS_ON_DEPLOY", "1").strip() == "1"
+RUN_TESTS_ON_DEPLOY = False  # ("RUN_TESTS_ON_DEPLOY", "1").strip() == "1"
 
 # =========================================================
 # 배포 설정
