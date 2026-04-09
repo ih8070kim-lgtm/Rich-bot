@@ -138,9 +138,13 @@ async def execute_intents(
                 )
                 continue
 
-        # Tick Limit 체크 (HEDGE/CORE_HEDGE/INSURANCE_SH role은 면제)
+        # Tick Limit 체크 (HEDGE/CORE_HEDGE/INSURANCE_SH/TREND_COMP/BC 면제)
         _intent_role = (intent.metadata or {}).get("role", "")
-        _is_exempt = (itype == IntentType.OPEN and _intent_role in ("HEDGE", "CORE_HEDGE", "INSURANCE_SH"))
+        _entry_type = (intent.metadata or {}).get("entry_type", "")
+        _is_exempt = (itype == IntentType.OPEN and (
+            _intent_role in ("HEDGE", "CORE_HEDGE", "INSURANCE_SH", "BC", "CB")
+            or _entry_type == "TREND"  # ★ V10.29d: TREND_COMP는 MR과 동시 진입 허용
+        ))
         limit = _TICK_LIMITS.get(itype, None)
         if limit is not None and not _is_exempt:
             current_count = tick_counts.get(itype, 0)
