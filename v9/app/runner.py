@@ -2136,22 +2136,14 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ Beta Cycle 통합
             if _BC_ENABLED:
-                # 일봉 마감 감지 (UTC 00:00 직후, 1일 1회)
-                _bc_hour = int(time.strftime("%H", time.gmtime()))
-                _bc_today = time.strftime("%Y-%m-%d", time.gmtime())
-                if not hasattr(_main_loop, '_bc_last_daily'):
-                    _main_loop._bc_last_daily = ""
-                if _bc_hour == 0 and _main_loop._bc_last_daily != _bc_today:
-                    _main_loop._bc_last_daily = _bc_today
-                    try:
-                        # ★ V10.29b-BC FIX: 동기 fetch → 별도 스레드 (MR 메인루프 블로킹 방지)
-                        _bc_daily_intents = await asyncio.to_thread(
-                            bc_on_daily_close, snapshot, st, system_state)
-                        intents += _bc_daily_intents
-                        if _bc_daily_intents:
-                            print(f"[BC] 일봉 시그널: {len(_bc_daily_intents)}건 진입 intent")
-                    except Exception as _bc_e:
-                        print(f"[BC] on_daily_close 오류(무시): {_bc_e}")
+                # ★ V10.29c: 1h 전환 — 매 사이클 호출 (5분 throttle은 함수 내부)
+                try:
+                    _bc_intents = bc_on_daily_close(snapshot, st, system_state)
+                    intents += _bc_intents
+                    if _bc_intents:
+                        print(f"[BC] 시그널: {len(_bc_intents)}건 진입 intent")
+                except Exception as _bc_e:
+                    print(f"[BC] check_signals 오류(무시): {_bc_e}")
 
                 # 매 틱 포지션 관리
                 try:
