@@ -307,24 +307,15 @@ def _count_active_by_side(st: Dict) -> tuple:
 # ═════════════════════════════════════════════════════════════════
 # 내 사이드에 T3(-3% 이하)가 있으면 반대편 출구를 제한.
 #   T1: TP ×1.5/2.0 또는 블록(-7%)
-#   T2: 블록 (URGENCY_DCA 빌드업 보호)
-#   T3: 트림 가격 ×1.5/2.0 (절대 블록 안함)
-# T3 SL/청산 시 방어 자동 해제.
+# ★ V10.29d: T3 방어 — 블록/배수 전면 제거
+# URGENCY_DCA가 opp_t3_roi로 1슬롯 DCA→trim 사이클 판단
 # ═════════════════════════════════════════════════════════════════
 
 def _t3_defense(pos_side: str, dca_level: int, st: Dict, snapshot) -> dict:
-    """★ V10.29b: 반대편 T3 ROI가 깊을수록 이쪽 출구 제한.
-
-    Returns:
-        tp_mult:    T1 TP / T3 트림 배수 (1.0 = 정상)
-        blocked:    True → T1 TP/T2 트림·TP/트레일링 전면 차단
-        opp_t3_roi: 반대편 최악 T3 ROI (방어 판단 소스)
-    """
+    """★ V10.29d: opp_t3_roi 정보만 제공. 블록/배수 없음."""
     _default = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
 
     opp_side = "sell" if pos_side == "buy" else "buy"
-
-    # 반대편 T3 중 최악 ROI 탐색
     worst_t3_roi = 0.0
     prices = snapshot.all_prices or {}
     for sym, sym_st in st.items():
@@ -345,33 +336,7 @@ def _t3_defense(pos_side: str, dca_level: int, st: Dict, snapshot) -> dict:
         if roi < worst_t3_roi:
             worst_t3_roi = roi
 
-    # 반대편에 T3 없거나 ROI > -3% → 방어 불필요
-    if worst_t3_roi > -3.0:
-        return _default
-
-    # 구간 판정
-    if worst_t3_roi <= -7.0:
-        mult = 2.0
-        deep = True
-    elif worst_t3_roi <= -5.0:
-        mult = 2.0
-        deep = False
-    else:  # -5.0 < roi <= -3.0
-        mult = 1.5
-        deep = False
-
-    # ── 내가 T3: 트림 배수만 적용, 절대 블록 안함 ──
-    if dca_level >= 3:
-        return {"tp_mult": mult, "blocked": False, "opp_t3_roi": worst_t3_roi}
-
-    # ── 내가 T2: 트림 허용, tp_mult 없음 — URGENCY_DCA 사이클 보장 ──
-    # ★ V10.29c: blocked=False + tp_mult=1.0 → trim이 정상 1.5%에서 발동
-    # TP 블록 → T2 불타기 → trim(1.5%) → T1 복귀 → 반복
-    if dca_level == 2:
-        return {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": worst_t3_roi}
-
-    # ── 내가 T1: 배수 적용, -7% 이하만 블록 ──
-    return {"tp_mult": mult, "blocked": deep, "opp_t3_roi": worst_t3_roi}
+    return {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": worst_t3_roi}
 
 
 
@@ -1394,91 +1359,91 @@ def plan_dca(
             break
 
     # ═════════════════════════════════════════════════════════════
-    # ★ V10.29c: URGENCY_DCA — T1 TP 블록 시에만 light side T2 불타기
-    # 반대편 T3가 깊어서 T1 TP가 _t3_defense로 블록된 경우,
-    # T2로 밀어서 trim 왕복으로 수익 추출. 블록 해제 시 자연 복귀.
+    # ★ V10.29d: URGENCY_DCA — urgency 기반 light side T1→T2 강제 DCA
+    # urgency ≥ 12: 1슬롯 / urgency ≥ 17: 2슬롯
+    # T2 trim(+1.5%) → T1 복귀 → 반복 = 신규진입 없이 수익 추출
     # ═════════════════════════════════════════════════════════════
-    _URG_DCA_MAX_SLOTS = 2
+    _urg_score = _urg_dca["urgency"]
+    _urg_light_side = _urg_dca.get("light_side", "")
 
-    # light side T1 중 TP가 블록된 포지션 찾기
-    _urg_blocked_candidates = []
-    _urg_prices = snapshot.all_prices or {}
-    _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
+    if _urg_score >= 17:
+        _URG_DCA_MAX = 2
+    elif _urg_score >= 12:
+        _URG_DCA_MAX = 1
+    else:
+        _URG_DCA_MAX = 0
 
-    for _us, _up in _pos_items(st):
-        if _up.get("role", "") in _HEDGE_ROLES_SLOT:
-            continue
-        _u_dca_lv = int(_up.get("dca_level", 1) or 1)
-        if _u_dca_lv != 1:  # T1만 대상
-            continue
-        if _up.get("max_dca_reached") or _up.get("pending_dca"):
-            continue
-        if _us in _urg_dca_syms:
-            continue
+    if _URG_DCA_MAX > 0 and _urg_light_side:
+        _urg_candidates = []
+        _urg_prices = snapshot.all_prices or {}
+        _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
 
-        _u_side = _up.get("side", "")
-        if not _u_side:
-            continue
+        for _us, _up in _pos_items(st):
+            if _up.get("role", "") in _HEDGE_ROLES_SLOT:
+                continue
+            _u_dca_lv = int(_up.get("dca_level", 1) or 1)
+            if _u_dca_lv != 1:
+                continue
+            if _up.get("max_dca_reached") or _up.get("pending_dca"):
+                continue
+            if _us in _urg_dca_syms:
+                continue
 
-        # ★ V10.29c: T3 방어는 urgency ≥ 17일 때만 적용
-        if _urg_dca["urgency"] >= 17:
-            _u_def = _t3_defense(_u_side, 1, st, snapshot)
-        else:
-            _u_def = {"tp_mult": 1.0, "blocked": False, "opp_t3_roi": 0.0}
-        if not _u_def.get("blocked", False):
-            continue  # 블록 안 됐으면 정상 TP 가능 → 불타기 불필요
+            _u_side = _up.get("side", "")
+            if _u_side != _urg_light_side:
+                continue  # light side만
 
-        # 쿨다운 체크
-        _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
-        _u_cd = DCA_COOLDOWN_BY_TIER.get(2, DCA_COOLDOWN_SEC)
-        if time.time() - _u_last_dca < _u_cd:
-            continue
+            _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
+            _u_cd = DCA_COOLDOWN_BY_TIER.get(2, DCA_COOLDOWN_SEC)
+            if time.time() - _u_last_dca < _u_cd:
+                continue
 
-        _u_cp = float(_urg_prices.get(_us, 0))
-        _u_ep = float(_up.get("ep", 0))
-        if _u_cp <= 0 or _u_ep <= 0:
-            continue
-        _u_roi = calc_roi_pct(_u_ep, _u_cp, _u_side, LEVERAGE)
-        _urg_blocked_candidates.append((_us, _up, _u_cp, _u_roi, _u_side))
+            _u_cp = float(_urg_prices.get(_us, 0))
+            _u_ep = float(_up.get("ep", 0))
+            if _u_cp <= 0 or _u_ep <= 0:
+                continue
+            _u_roi = calc_roi_pct(_u_ep, _u_cp, _u_side, LEVERAGE)
+            _urg_candidates.append((_us, _up, _u_cp, _u_roi, _u_side))
 
-    # ROI 높은 순 → 상위 2개
-    _urg_blocked_candidates.sort(key=lambda x: -x[3])
-    _urg_filled = 0
+        # ROI 높은 순 (trim에서 가장 빨리 수익)
+        _urg_candidates.sort(key=lambda x: -x[3])
+        _urg_filled = 0
 
-    for _us, _up, _u_cp, _u_roi, _u_side in _urg_blocked_candidates:
-        if _urg_filled >= _URG_DCA_MAX_SLOTS:
-            break
-        _u_next_tier = 2
-        # 사이징: 기존 DCA weight 기반
-        _u_ep = float(_up.get("ep", 0))
-        _u_amt = float(_up.get("amt", 0))
-        _u_notional = _u_ep * _u_amt
-        _u_cum_w = sum(DCA_WEIGHTS[:1])
-        _u_total_w = sum(DCA_WEIGHTS)
-        _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
-        _u_tier_w = DCA_WEIGHTS[1]
-        _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
-        if _u_qty <= 0:
-            continue
+        for _us, _up, _u_cp, _u_roi, _u_side in _urg_candidates:
+            if _urg_filled >= _URG_DCA_MAX:
+                break
+            _u_next_tier = 2
+            _u_ep = float(_up.get("ep", 0))
+            _u_amt = float(_up.get("amt", 0))
+            _u_notional = _u_ep * _u_amt
+            _u_cum_w = sum(DCA_WEIGHTS[:1])
+            _u_total_w = sum(DCA_WEIGHTS)
+            _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
+            _u_tier_w = DCA_WEIGHTS[1]
+            _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
+            if _u_qty <= 0:
+                continue
 
-        intents.append(Intent(
-            trace_id=_tid(),
-            intent_type=IntentType.DCA,
-            symbol=_us,
-            side=_u_side,
-            qty=_u_qty,
-            price=_u_cp,
-            reason=f"URGENCY_DCA(tp_blocked,roi={_u_roi:+.1f}%)_T{_u_next_tier}",
-            metadata={
-                "tier": _u_next_tier,
-                "roi_now": _u_roi,
-                "_expected_role": _up.get("role", ""),
-                "locked_regime": _up.get("locked_regime", "LOW"),
-            },
-        ))
-        _urg_filled += 1
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.DCA,
+                symbol=_us,
+                side=_u_side,
+                qty=_u_qty,
+                price=_u_cp,
+                reason=f"URGENCY_DCA(urg={_urg_score:.0f},roi={_u_roi:+.1f}%)_T{_u_next_tier}",
+                metadata={
+                    "tier": _u_next_tier,
+                    "roi_now": _u_roi,
+                    "_expected_role": _up.get("role", ""),
+                    "locked_regime": _up.get("locked_regime", "LOW"),
+                },
+            ))
+            _urg_filled += 1
+            print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
+                  f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}]")
         print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
-              f"roi={_u_roi:+.1f}% (TP blocked by opp T3)")
+              f"roi={_u_roi:+.1f}% opp_t3={_opp_roi:+.1f}%")
 
     return intents
 
