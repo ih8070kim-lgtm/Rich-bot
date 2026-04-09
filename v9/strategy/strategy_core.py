@@ -238,24 +238,9 @@ def apply_order_results(
                 # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
                 p["worst_roi"] = 0.0
                 p["max_roi_seen"] = 0.0
-                # ★ V10.28b: Trim 선주문 플래그 — runner가 실제 주문
-                if tier >= 2 and tier <= 3:
-                    from v9.config import calc_trim_price, calc_trim_qty
-                    _trim_price = calc_trim_price(float(p["ep"]), pos_side, tier)
-                    # ★ V10.29b: 산만큼 판다
-                    _dca_qtys = p.get("dca_qty_by_tier", {})
-                    _ldq = float(_dca_qtys.get(str(tier), 0) or 0)
-                    _trim_qty = _ldq if _ldq > 0 and _ldq <= float(p["amt"]) * 0.8 else calc_trim_qty(float(p["amt"]), tier)
-                    p.setdefault("trim_preorders", {})
-                    p["trim_to_place"] = {
-                        "tier": tier,
-                        "price": round(_trim_price, 8),
-                        "qty": _trim_qty,
-                        "side": "sell" if pos_side == "buy" else "buy",
-                        "entry_price": float(p["ep"]),  # 블렌디드 EP
-                    }
-                    print(f"[TRIM_PREP] {sym} {pos_side} T{tier}: "
-                          f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f}")
+                # ★ V10.29d: trim_to_place는 runner._process_pending_fill에서 단독 처리
+                # (strategy_core는 limit DCA에 filled_qty=0 → 여기 도달 안함)
+                # 만약 도달하더라도 runner가 노셔널 기반으로 재세팅하므로 여기서 안 건드림
                 print(f"[DCA_RESET] {sym} {pos_side} T{tier}: "
                       f"worst_roi=0 max_roi=0 (새 ep={p['ep']:.4f})")
                 # ★ v10.10: sh_trigger 제거 — DCA_BLOCKED_INSURANCE로 대체

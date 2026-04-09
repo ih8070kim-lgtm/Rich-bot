@@ -66,8 +66,8 @@ def bc_on_daily_close(snapshot, st: Dict, system_state: Dict) -> List[Intent]:
         _daily_entry_count = 0
         _last_entry_date = today
 
-    # 1h 봉 부트스트랩 (최초 또는 데이터 부족 시)
-    _fetch_hourly_bars()
+    # 1h 봉 부트스트랩 (전체 후보풀)
+    _fetch_hourly_bars(full=True)
     _update_universe()
 
     return []  # 시그널은 bc_on_tick에서 처리
@@ -86,19 +86,19 @@ def bc_on_tick(snapshot, st: Dict) -> List[Intent]:
     # ── 1h 봉 업데이트 (ohlcv_pool에서 새 봉 감지) ──
     new_bar_detected = _update_hourly_from_pool(snapshot)
 
-    # ── 매 시간 자체 fetch (ohlcv_pool에 없는 BC 심볼 보완) ──
+    # ── 매 시간 자체 fetch (유니버스 심볼만 refresh) ──
     if time.time() - _last_hourly_fetch_ts > 3900:  # 65분
-        _fetch_hourly_bars()
+        _fetch_hourly_bars(full=False)
         if not _universe:
             _update_universe()
         new_bar_detected = True  # fetch 후 시그널 체크 강제
 
-    # ── 데이터 부족 → 1h fetch 시도 ──
+    # ── 데이터 부족 → 전체 풀 fetch ──
     beta_w = getattr(CFG, 'BC_BETA_WINDOW', 168)
     if len(_btc_hourly) < beta_w + 10:
         # 60초에 1회만 시도
         if time.time() - _last_hourly_fetch_ts > 60:
-            _fetch_hourly_bars()
+            _fetch_hourly_bars(full=True)
             _update_universe()
         return _manage_positions(snapshot, st)
 
@@ -357,8 +357,8 @@ def _update_hourly_from_pool(snapshot) -> bool:
     return new_bar
 
 
-def _fetch_hourly_bars():
-    """ccxt로 1h 봉 대량 fetch (부트스트랩)."""
+def _fetch_hourly_bars(full: bool = False):
+    """1h 봉 fetch. full=True: 전체 후보풀 (부트스트랩), False: 유니버스만 (매시간)."""
     global _last_hourly_fetch_ts
     if _exchange is None:
         return
@@ -367,7 +367,15 @@ def _fetch_hourly_bars():
     _last_hourly_fetch_ts = now
     buf_size = getattr(CFG, 'BC_1H_BUFFER_SIZE', 250)
 
-    print(f"[BC] 📥 Fetching 1h bars (buf={buf_size})...")
+    # full이면 전체 후보풀, 아니면 유니버스 + armed만
+    if full or not _universe:
+        syms = getattr(CFG, 'BC_CANDIDATE_POOL', _DEFAULT_POOL)
+        mode = "bootstrap"
+    else:
+        syms = list(_universe | set(_armed.keys()))
+        mode = "refresh"
+
+    print(f"[BC] 📥 Fetching 1h bars ({mode}, {len(syms)+1}개, buf={buf_size})...")
 
     # BTC
     try:
@@ -379,9 +387,7 @@ def _fetch_hourly_bars():
         print(f"[BC] BTC 1h fetch 실패: {e}")
         return
 
-    # 후보 심볼
-    pool = getattr(CFG, 'BC_CANDIDATE_POOL', _DEFAULT_POOL)
-    for sym in pool:
+    for sym in syms:
         try:
             bars = _exchange.fetch_ohlcv(sym, "1h", limit=buf_size)
             _hourly_closes[sym] = deque(maxlen=buf_size)
@@ -397,10 +403,18 @@ def _fetch_hourly_bars():
 
 
 def _update_universe():
-    """excess_vol + mr_tendency 스코어링 → 상위 N개."""
+    """★ V10.29d: ARM→NORM 사이클 기반 유니버스 스코어링.
+
+    score = arm_hit_rate × 0.4 + norm_success_rate × 0.35 + mr_tendency × 0.25
+      - arm_hit_rate:      lookback 구간에서 excess ≥ ARM 비율 (빈도)
+      - norm_success_rate: ARM 이벤트 중 excess가 0~NORM으로 복귀한 비율 (품질)
+      - mr_tendency:       excess 자기상관 반전 강도 (되돌림 경향)
+    """
     global _universe
     beta_w = getattr(CFG, 'BC_BETA_WINDOW', 168)
     ret_w = getattr(CFG, 'BC_RETURN_WINDOW', 24)
+    arm_th = getattr(CFG, 'BC_ARM_THRESH', 0.05)
+    norm_th = getattr(CFG, 'BC_NORM_THRESH', 0.04)
 
     if len(_btc_hourly) < beta_w + 65:
         return
@@ -413,12 +427,10 @@ def _update_universe():
         if len(c) < beta_w + 65:
             continue
 
-        # excess return 히스토리 (60봉)
+        # excess 시계열 구축
         excess_hist = []
-        for di in range(max(0, len(c) - 60), len(c)):
-            if di < ret_w + beta_w + 1:
-                continue
-            if di >= len(btc_c):
+        for di in range(max(0, len(c) - 120), len(c)):
+            if di < ret_w + beta_w + 1 or di >= len(btc_c):
                 continue
             try:
                 alt_ret = (c[di] / c[di - ret_w]) - 1
@@ -437,26 +449,57 @@ def _update_universe():
             except Exception:
                 pass
 
-        if len(excess_hist) < 20:
+        if len(excess_hist) < 30:
             continue
 
-        ev = float(np.std(excess_hist))
         ea = np.array(excess_hist)
+        total_bars = len(ea)
+
+        # ── (1) arm_hit_rate: ARM 달성 빈도 ──
+        arm_hits = int(np.sum(ea >= arm_th))
+        arm_hit_rate = arm_hits / total_bars if total_bars > 0 else 0
+
+        # ── (2) norm_success_rate: ARM→NORM 사이클 완료 비율 ──
+        arm_events = 0
+        norm_events = 0
+        in_armed = False
+        for ex_val in ea:
+            if not in_armed and ex_val >= arm_th:
+                in_armed = True
+                arm_events += 1
+            elif in_armed and 0 <= ex_val <= norm_th:
+                norm_events += 1
+                in_armed = False
+            elif in_armed and ex_val < 0:
+                # excess 음수 = 과도하게 떨어짐 (진입 스킵 대상)
+                in_armed = False
+        norm_success = norm_events / max(1, arm_events)
+
+        # ── (3) mr_tendency: 자기상관 반전 ──
         lag = min(5, len(ea) // 3)
         try:
             mr = -float(np.corrcoef(ea[:-lag], ea[lag:])[0][1]) if len(ea) > lag * 2 else 0.0
         except Exception:
             mr = 0.0
+        if np.isnan(mr):
+            mr = 0.0
 
-        if np.isnan(ev) or np.isnan(mr):
+        # ── 최종 스코어 ──
+        # arm_events가 0이면 진입 불가 → 스킵
+        if arm_events == 0:
             continue
-        scores.append((sym, ev * 0.6 + max(0, mr) * 0.4))
+
+        score = arm_hit_rate * 0.4 + norm_success * 0.35 + max(0, mr) * 0.25
+        scores.append((sym, score, arm_events, norm_events))
 
     scores.sort(key=lambda x: -x[1])
     top_n = getattr(CFG, 'BC_UNI_TOP_N', 20)
     _universe = {s[0] for s in scores[:top_n]}
     if _universe:
-        print(f"[BC] 🌐 Universe: {len(_universe)}개 ({', '.join(sorted(list(_universe))[:5])}...)")
+        top3 = scores[:3]
+        detail = ", ".join(f"{s[0].replace('/USDT','')}({s[2]}→{s[3]},{s[1]:.2f})"
+                          for s in top3)
+        print(f"[BC] 🌐 Universe: {len(_universe)}개 top3=[{detail}]")
 
 
 # ═══════════════════════════════════════════════════════════════

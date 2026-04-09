@@ -773,6 +773,8 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 close_qty = _t1_qty * TP1_PARTIAL_RATIO
             else:
                 close_qty = total_qty * TP1_PARTIAL_RATIO  # fallback
+            # ★ V10.29d FIX: 노셔널 기반 qty가 실제 보유 초과 방지
+            close_qty = min(close_qty, total_qty)
             _min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
             if close_qty < _min_qty:
                 close_qty = total_qty
@@ -1415,10 +1417,16 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                     from v9.strategy.planners import _build_dca_targets
                     from v9.config import DCA_WEIGHTS as _TW, GRID_DIVISOR as _TG, LEVERAGE as _TL
                     _trim_ep = float(p.get("ep", 0) or 0)
-                    _trim_amt = float(p.get("amt", 0) or 0)
-                    _cum_w = sum(_TW[:_target_tier])
-                    _total_w = sum(_TW)
-                    _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
+                    # ★ V10.29d FIX: 실제 bal에서 grid_notional 직접 계산 (역추정 제거)
+                    _trim_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                    if _trim_bal > 0:
+                        _grid_est = _trim_bal / _TG * _TL
+                    else:
+                        # fallback: 포지션에서 역추정
+                        _trim_amt = float(p.get("amt", 0) or 0)
+                        _cum_w = sum(_TW[:_target_tier])
+                        _total_w = sum(_TW)
+                        _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
                     p["dca_targets"] = [
                         t for t in _build_dca_targets(_trim_ep, pos_side, _grid_est, p.get("locked_regime", "LOW"))
                         if t.get("tier", 0) > _target_tier
