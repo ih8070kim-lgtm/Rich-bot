@@ -1457,7 +1457,14 @@ def plan_dca(
             _u_ep = float(_up.get("ep", 0))
             if _u_cp <= 0 or _u_ep <= 0:
                 continue
+
             _u_roi = calc_roi_pct(_u_ep, _u_cp, _u_side, LEVERAGE)
+
+            # ★ V10.29d: ROI ≤ -1% 일 때만 DCA — trim 후 재진입 스프레드 확보
+            # trim +1.5% → T1 복귀 → 가격 -0.33% 하락 → ROI -1% → DCA → 사이클
+            if _u_roi > -1.0:
+                continue
+
             _urg_candidates.append((_us, _up, _u_cp, _u_roi, _u_side))
 
         # ROI 높은 순 (trim에서 가장 빨리 수익)
@@ -1541,7 +1548,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             if _urg["urgency"] >= 12 and int(p.get("dca_level", 1) or 1) <= 1:
                 continue  # T1 TP 차단 → DCA→trim 사이클 유지
             elif _urg["urgency"] < 12:
-                p.pop("urgency_tp_block", None)  # urgency 해제 → 블록 해제
+                p.pop("urgency_tp_block", None); p.pop("original_ep", None)  # urgency 해제 → 블록+고정EP 해제
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
             continue
@@ -1703,7 +1710,7 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
                 if _urg["urgency"] >= 12 and int((p or {}).get("dca_level", 1) or 1) <= 1:
                     continue
                 elif _urg["urgency"] < 12:
-                    p.pop("urgency_tp_block", None)
+                    p.pop("urgency_tp_block", None); p.pop("original_ep", None)
             curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
             if curr_p <= 0:
                 continue

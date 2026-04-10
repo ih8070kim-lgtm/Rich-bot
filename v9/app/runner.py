@@ -715,7 +715,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                         await _cancel_tp1_preorder(ex, p, sym)
                     continue
                 else:
-                    p.pop("urgency_tp_block", None)
+                    p.pop("urgency_tp_block", None); p.pop("original_ep", None)
             # ★ V10.29: T2+ → TP1 선주문 전면 차단 (trim이 exit 담당)
             _dca_lv = int(p.get("dca_level", 1) or 1)
             if _dca_lv >= 2:
