@@ -706,8 +706,16 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue
             _role = p.get("role", "")
-            if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
+            if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "BC", "CB"):
                 continue
+            # ★ V10.29d: URGENCY_DCA 슬롯 TP 블록
+            if p.get("urgency_tp_block"):
+                if _urg["urgency"] >= 12:
+                    if p.get("tp1_preorder_id"):
+                        await _cancel_tp1_preorder(ex, p, sym)
+                    continue
+                else:
+                    p.pop("urgency_tp_block", None)
             # ★ V10.29: T2+ → TP1 선주문 전면 차단 (trim이 exit 담당)
             _dca_lv = int(p.get("dca_level", 1) or 1)
             if _dca_lv >= 2:
