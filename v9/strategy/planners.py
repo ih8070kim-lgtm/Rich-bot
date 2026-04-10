@@ -794,9 +794,15 @@ def plan_open(
         micro_long_ok  = _bull_cnt >= 2
         micro_short_ok = _bear_cnt >= 2
 
-        # ★ V10.29d: VS 레짐 게이트 제거 — 레짐별 차등 전면 제거
-        _mr_vs_ok = True
+        # ★ V10.29d: VS 거래량 — 로그용만 (필터 제거, 분석용 기록)
+        _mr_vs_ok = True  # 필터 OFF
         _mr_vol_surge = 0.0
+        _cur_regime = _btc_vol_regime(snapshot)
+        _vol_15m = [float(x[5]) for x in ohlcv_15m] if ohlcv_15m else []
+        if len(_vol_15m) >= 30:
+            _vf = sum(_vol_15m[-5:]) / 5
+            _vs = sum(_vol_15m[-30:]) / 30
+            _mr_vol_surge = _vf / _vs if _vs > 0 else 1.0
 
         # ★ V10.29d: MTF RSI 필터 비활성화 — MTF 없이 19전 19승, 과도한 제한
         _mr_mtf_ok = True
