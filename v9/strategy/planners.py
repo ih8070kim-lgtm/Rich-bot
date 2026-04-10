@@ -1159,6 +1159,10 @@ def plan_dca(
 
     for symbol, p in _dca_positions:
 
+        # ★ V10.29d: BC/CB는 자체 관리 — MR DCA 제외
+        if p.get("role") in ("BC", "CB"):
+            continue
+
         # ★ v10.11: CORE_HEDGE 수익 중이면 DCA 금지 (보험→본체 방지)
         if is_hedge_dca_blocked(p, snapshot, symbol):
             continue
@@ -1543,6 +1547,9 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             continue
         if p.get("pending_close"):
             continue
+        # ★ V10.29d: BC/CB는 자체 SL/TP — MR TP1 제외
+        if p.get("role") in ("BC", "CB"):
+            continue
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
             continue
@@ -1696,6 +1703,9 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ v10.10 fix: iter_positions side를 dict에 강제 주입
             if isinstance(p, dict):
                 p["side"] = _iter_side
+            # ★ V10.29d: BC/CB는 자체 trail — MR trail 제외
+            if (p or {}).get("role") in ("BC", "CB"):
+                continue
             curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
             if curr_p <= 0:
                 continue
