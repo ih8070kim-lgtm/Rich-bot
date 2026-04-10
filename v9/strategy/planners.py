@@ -813,17 +813,9 @@ def plan_open(
                 _mr_vol_surge = _vf / _vs if _vs > 0 else 1.0
                 _mr_vs_ok = _mr_vol_surge >= _MR_VS_GATE
 
-        # MTF RSI 체크
+        # ★ V10.29d: MTF RSI 필터 비활성화 — MTF 없이 19전 19승, 과도한 제한
         _mr_mtf_ok = True
         _mtf_rsi = 50.0
-        _ohlcv_1h = pool.get("1h", [])
-        if len(_ohlcv_1h) >= _MTF_PERIOD + 2:
-            _closes_1h = [float(x[4]) for x in _ohlcv_1h]
-            _mtf_rsi = calc_rsi(_closes_1h, period=_MTF_PERIOD)
-            if mr_long_ok and _mtf_rsi > _MTF_RSI_OS:
-                _mr_mtf_ok = False
-            if mr_short_ok and _mtf_rsi < _MTF_RSI_OB:
-                _mr_mtf_ok = False
 
         # ★ V10.27d: MR 최종 — VS AND MTF 둘 다 통과해야 진입
         _mr_long_final  = mr_long_ok  and long_trig  and micro_long_ok  and _mr_vs_ok and _mr_mtf_ok
@@ -1322,18 +1314,15 @@ def plan_dca(
                 break  # 차단 → 다음 심볼
 
             # ── 차단 아님 → DCA 진입 ──
-            # ★ V10.29b: corr/hedge/RSI 필터 전면 제거 — ROI 트리거만으로 DCA
-
-            # ★ V10.29b FIX: notional 누락 방어 (COUNTER 레거시 dca_targets 호환)
-            _notional = target.get("notional", 0)
-            if not _notional:
-                _fb_cap = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                if _fb_cap > 0:
-                    _fb_grid = (_fb_cap / GRID_DIVISOR) * LEVERAGE
-                    _fb_tw = sum(DCA_WEIGHTS)
-                    _fb_w = target.get("weight", DCA_WEIGHTS[min(tier_now-1, len(DCA_WEIGHTS)-1)])
-                    _notional = _fb_grid * _fb_w / _fb_tw
-            qty = _notional / curr_p if curr_p > 0 and _notional > 0 else 0.0
+            # ★ V10.29d: 노셔널 기반 DCA sizing — 목표 tier 노셔널까지 부족분만 매수
+            from v9.config import calc_tier_notional
+            _dca_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+            _target_notional = calc_tier_notional(tier_now, _dca_bal)
+            _current_notional = float(p.get("amt", 0) or 0) * curr_p
+            _dca_notional = _target_notional - _current_notional
+            if _dca_notional < 10:
+                _dca_notional = 10  # 최소 $10
+            qty = _dca_notional / curr_p if curr_p > 0 else 0.0
             if qty <= 0:
                 continue
 
@@ -1486,14 +1475,15 @@ def plan_dca(
             if _urg_filled >= _URG_DCA_MAX:
                 break
             _u_next_tier = 2
-            _u_ep = float(_up.get("ep", 0))
-            _u_amt = float(_up.get("amt", 0))
-            _u_notional = _u_ep * _u_amt
-            _u_cum_w = sum(DCA_WEIGHTS[:1])
-            _u_total_w = sum(DCA_WEIGHTS)
-            _u_grid = _u_notional / (_u_cum_w / _u_total_w) if _u_cum_w > 0 else _u_notional * 5
-            _u_tier_w = DCA_WEIGHTS[1]
-            _u_qty = (_u_grid * _u_tier_w / _u_total_w) / _u_cp if _u_cp > 0 else 0
+            # ★ V10.29d: 노셔널 기반 — T2 목표까지 부족분만
+            from v9.config import calc_tier_notional
+            _u_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+            _u_target = calc_tier_notional(2, _u_bal)
+            _u_current = float(_up.get("amt", 0) or 0) * _u_cp
+            _u_dca_notional = _u_target - _u_current
+            if _u_dca_notional < 10:
+                _u_dca_notional = 10
+            _u_qty = _u_dca_notional / _u_cp if _u_cp > 0 else 0
             if _u_qty <= 0:
                 continue
 
@@ -1515,8 +1505,10 @@ def plan_dca(
             _urg_filled += 1
             # ★ V10.29d: pending_dca 세팅 → 다음 틱에서 재발사 방지
             _up["pending_dca"] = "URGENCY"
+            # ★ V10.29d: TP 블록 — trim 사이클 보호 (urgency 해제 시 클리어)
+            _up["urgency_tp_block"] = True
             print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
-                  f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}]")
+                  f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}] TP_BLOCKED")
 
     return intents
 
@@ -1550,6 +1542,13 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ V10.29d: BC/CB는 자체 SL/TP — MR TP1 제외
         if p.get("role") in ("BC", "CB"):
             continue
+        # ★ V10.29d: URGENCY_DCA 슬롯 TP 블록 — trim 사이클 보호
+        # T1일 때만 블록 (T2 trim은 허용 — 수익 추출 경로)
+        if p.get("urgency_tp_block"):
+            if _urg["urgency"] >= 12 and int(p.get("dca_level", 1) or 1) <= 1:
+                continue  # T1 TP 차단 → DCA→trim 사이클 유지
+            elif _urg["urgency"] < 12:
+                p.pop("urgency_tp_block", None)  # urgency 해제 → 블록 해제
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
             continue
@@ -1706,6 +1705,12 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ V10.29d: BC/CB는 자체 trail — MR trail 제외
             if (p or {}).get("role") in ("BC", "CB"):
                 continue
+            # ★ V10.29d: URGENCY_DCA 슬롯 trail 블록 — trim 사이클 보호
+            if (p or {}).get("urgency_tp_block"):
+                if _urg["urgency"] >= 12 and int((p or {}).get("dca_level", 1) or 1) <= 1:
+                    continue
+                elif _urg["urgency"] < 12:
+                    p.pop("urgency_tp_block", None)
             curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
             if curr_p <= 0:
                 continue
