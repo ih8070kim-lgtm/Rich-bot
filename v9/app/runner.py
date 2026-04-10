@@ -1380,13 +1380,90 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         old_ep = float(p.get("ep", 0))
         p["amt"] = max(0.0, float(p.get("amt", 0)) - filled_qty)
-        # ★ V10.28b FIX: TP1 limit 체결 → pending 마커 해제
         p.pop("tp1_limit_oid", None)
 
-        if p["amt"] <= 0:
+        # ★ V10.29d: is_trim 우선 체크 (전량 매도 방지)
+        if info.get("is_trim"):
+            _target_tier = info.get("target_tier", max(1, int(p.get("dca_level", 2)) - 1))
+            _old_tier = int(p.get("dca_level", 1))
+            p["dca_level"] = _target_tier
+            p["worst_roi"] = 0.0
+            p["max_roi_seen"] = 0.0
+            p["pending_dca"] = None
+            p["step"] = 0
+            p["tp1_done"] = False
+            p["trailing_on_time"] = None
+            p["tp1_preorder_id"] = None
+            p["tp1_preorder_price"] = None
+            _ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
+            for _t in range(_target_tier + 1, _old_tier + 1):
+                if _t in _ep_keys:
+                    p[_ep_keys[_t]] = 0.0
+            try:
+                from v9.strategy.planners import _build_dca_targets
+                from v9.config import DCA_WEIGHTS as _TW, GRID_DIVISOR as _TG, LEVERAGE as _TL
+                _trim_ep = float(p.get("ep", 0) or 0)
+                _trim_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                if _trim_bal > 0:
+                    _grid_est = _trim_bal / _TG * _TL
+                else:
+                    _trim_amt = float(p.get("amt", 0) or 0)
+                    _cum_w = sum(_TW[:_target_tier])
+                    _total_w = sum(_TW)
+                    _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
+                p["dca_targets"] = [
+                    t for t in _build_dca_targets(_trim_ep, pos_side, _grid_est, p.get("locked_regime", "LOW"))
+                    if t.get("tier", 0) > _target_tier
+                ]
+            except Exception as _te:
+                p["dca_targets"] = []
+                print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
+            print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
+                  f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
+            if old_ep > 0:
+                if pos_side == "buy":
+                    _trim_pnl = filled_qty * (avg_price - old_ep) * LEVERAGE
+                else:
+                    _trim_pnl = filled_qty * (old_ep - avg_price) * LEVERAGE
+                _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE)
+                _trim_icon = "✅" if _trim_pnl >= 0 else "🔴"
+                print(f"[TRIM_FILL] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
+                      f"pnl=${_trim_pnl:+.2f} roi={_trim_roi:+.1f}%")
+                try:
+                    from telegram_engine import send_telegram_message
+                    asyncio.ensure_future(send_telegram_message(
+                        f"✂️ TRIM {sym.replace('/USDT','')} T{_old_tier}→T{_target_tier}\n"
+                        f"{_trim_icon} ${_trim_pnl:+.2f} (roi={_trim_roi:+.1f}%)"))
+                except Exception:
+                    pass
+                try:
+                    from v9.logging.logger_csv import log_trade as _lt_trim
+                    _hold = now - float(p.get("time", now) or now)
+                    _lt_trim(
+                        trace_id=f"trim_T{_old_tier}_{sym.replace('/','_')}",
+                        symbol=sym, side=pos_side,
+                        ep=old_ep, exit_price=avg_price, amt=filled_qty,
+                        pnl_usdt=_trim_pnl, roi_pct=_trim_roi,
+                        dca_level=_old_tier,
+                        hold_sec=_hold if _hold > 0 else 0.0,
+                        reason=f"TRIM_T{_old_tier}",
+                        hedge_mode=False, was_hedge=False,
+                        max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
+                        entry_type=str(p.get("entry_type", "MR") or "MR"),
+                        role=str(p.get("role", "") or ""),
+                        source_sym="",
+                    )
+                except Exception as _lt_e:
+                    print(f"[TRIM_FILL] log_trade 실패(무시): {_lt_e}")
+            _trp = p.get("trim_preorders", {})
+            _trp.pop(_old_tier, None)
+            if _target_tier <= 1:
+                p["trim_preorders"] = {}
+
+        elif p["amt"] <= 0:
             # 전량 체결 → 포지션 클리어
             from v9.execution.position_book import clear_position
-            from v9.logging.logger_csv import log_trade  # ★ V10.27 FIX: 올바른 import 경로
+            from v9.logging.logger_csv import log_trade
             _hold = now - float(p.get("time", now) or now)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
             if pos_side == "buy":
@@ -1408,106 +1485,22 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             )
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
+
         else:
-            # ★ V10.28: DCA Trim 체결 → tier 복귀 + 새 게임
-            if info.get("is_trim"):
-                _target_tier = info.get("target_tier", max(1, int(p.get("dca_level", 2)) - 1))
-                _old_tier = int(p.get("dca_level", 1))
-                p["dca_level"] = _target_tier
-                p["worst_roi"] = 0.0
-                p["max_roi_seen"] = 0.0
-                p["pending_dca"] = None
-                p["step"] = 0
-                p["tp1_done"] = False
-                p["trailing_on_time"] = None
-                p["tp1_preorder_id"] = None
-                p["tp1_preorder_price"] = None
-                # trim된 tier들의 entry_price 클리어
-                _ep_keys = {2: "t2_entry_price", 3: "t3_entry_price", 4: "t4_entry_price"}
-                for _t in range(_target_tier + 1, _old_tier + 1):
-                    if _t in _ep_keys:
-                        p[_ep_keys[_t]] = 0.0
-                # DCA targets 재생성
-                try:
-                    from v9.strategy.planners import _build_dca_targets
-                    from v9.config import DCA_WEIGHTS as _TW, GRID_DIVISOR as _TG, LEVERAGE as _TL
-                    _trim_ep = float(p.get("ep", 0) or 0)
-                    # ★ V10.29d FIX: 실제 bal에서 grid_notional 직접 계산 (역추정 제거)
-                    _trim_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
-                    if _trim_bal > 0:
-                        _grid_est = _trim_bal / _TG * _TL
-                    else:
-                        # fallback: 포지션에서 역추정
-                        _trim_amt = float(p.get("amt", 0) or 0)
-                        _cum_w = sum(_TW[:_target_tier])
-                        _total_w = sum(_TW)
-                        _grid_est = (_trim_ep * _trim_amt) / (_cum_w / _total_w) if _cum_w > 0 else _trim_ep * _trim_amt * 5
-                    p["dca_targets"] = [
-                        t for t in _build_dca_targets(_trim_ep, pos_side, _grid_est, p.get("locked_regime", "LOW"))
-                        if t.get("tier", 0) > _target_tier
-                    ]
-                except Exception as _te:
-                    p["dca_targets"] = []
-                    print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
-                print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
-                      f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
-                # ★ V10.29b: Trim PnL 계산 + 텔레그램 + log_trade
-                if old_ep > 0:
-                    if pos_side == "buy":
-                        _trim_pnl = filled_qty * (avg_price - old_ep) * LEVERAGE
-                    else:
-                        _trim_pnl = filled_qty * (old_ep - avg_price) * LEVERAGE
-                    _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE)
-                    _trim_icon = "✅" if _trim_pnl >= 0 else "🔴"
-                    print(f"[TRIM_FILL] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
-                          f"pnl=${_trim_pnl:+.2f} roi={_trim_roi:+.1f}%")
-                    try:
-                        from telegram_engine import send_telegram_message
-                        asyncio.ensure_future(send_telegram_message(
-                            f"✂️ TRIM {sym.replace('/USDT','')} T{_old_tier}→T{_target_tier}\n"
-                            f"{_trim_icon} ${_trim_pnl:+.2f} (roi={_trim_roi:+.1f}%)"))
-                    except Exception:
-                        pass
-                    try:
-                        from v9.logging.logger_csv import log_trade as _lt_trim
-                        _hold = now - float(p.get("time", now) or now)
-                        _lt_trim(
-                            trace_id=f"trim_T{_old_tier}_{sym.replace('/','_')}",
-                            symbol=sym, side=pos_side,
-                            ep=old_ep, exit_price=avg_price, amt=filled_qty,
-                            pnl_usdt=_trim_pnl, roi_pct=_trim_roi,
-                            dca_level=_old_tier,
-                            hold_sec=_hold if _hold > 0 else 0.0,
-                            reason=f"TRIM_T{_old_tier}",
-                            hedge_mode=False, was_hedge=False,
-                            max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
-                            entry_type=str(p.get("entry_type", "MR") or "MR"),
-                            role=str(p.get("role", "") or ""),
-                            source_sym="",
-                        )
-                    except Exception as _lt_e:
-                        print(f"[TRIM_FILL] log_trade 실패(무시): {_lt_e}")
-                # ★ V10.28b: 체결된 tier의 trim_preorders 제거
-                _trp = p.get("trim_preorders", {})
-                _trp.pop(_old_tier, None)
-                if _target_tier <= 1:
-                    p["trim_preorders"] = {}  # T1이면 전부 클리어
-            else:
-                # 부분 체결 → step=1 + trailing 전환
-                p["step"] = 1
-                p["tp1_done"] = True
-                p["tp1_price"] = avg_price
-                p["trailing_on_time"] = now
+            # 부분 체결 → step=1 + trailing 전환
+            p["step"] = 1
+            p["tp1_done"] = True
+            p["tp1_price"] = avg_price
+            p["trailing_on_time"] = now
             dca = int(p.get("dca_level", 1) or 1)
             if pos_side == "buy":
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
-            if not info.get("is_trim"):
-                print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
-                      f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
-                      f"→ trailing(잔량={p['amt']:.1f})")
+            print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
+                  f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
+                  f"→ trailing(잔량={p['amt']:.1f})")
 
 
 

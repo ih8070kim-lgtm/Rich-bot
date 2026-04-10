@@ -364,16 +364,23 @@ def notional_to_qty(target_notional: float, price: float) -> float:
 
 def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0,
                   mark_price: float = 0.0) -> float:
-    """★ V10.29d: Trim 수량 — 순수 노셔널 기반.
+    """★ V10.29d: Trim 수량 — 순수 노셔널 기반 + 안전 캡.
 
     현재 포지션 노셔널에서 목표 tier 노셔널을 빼서 트림할 수량 계산.
-    mark_price가 있으면 실시간 가격 기준, 없으면 ep fallback.
+    ★ 안전장치: tier 비중 기반 최대값 초과 방지 (이중 trim 방어)
     """
     if tier < 1 or total_amt <= 0:
         return 0.0
 
     target_tier = tier - 1
     price = mark_price if mark_price > 0 else ep
+
+    # ★ V10.29d: tier 비중 기반 최대 trim — 절대 이 이상 안 팔림
+    total_w = sum(DCA_WEIGHTS)
+    tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
+    cum_w_current = sum(DCA_WEIGHTS[:min(tier, len(DCA_WEIGHTS))])
+    max_trim_ratio = tier_w / cum_w_current if cum_w_current > 0 else 0.5
+    max_trim_qty = total_amt * max_trim_ratio * 1.1  # 10% 여유
 
     # bal 있으면 절대 노셔널 기준
     if bal > 0 and price > 0:
@@ -382,15 +389,11 @@ def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0
         trim_notional = current_notional - target_notional
         if trim_notional <= 0:
             return 0.0
-        return trim_notional / price
+        qty = trim_notional / price
+        return min(qty, max_trim_qty)  # ★ 안전 캡
 
     # fallback: 비율 방식 (bal 없을 때)
-    total_w = sum(DCA_WEIGHTS)
-    cum_w_current = sum(DCA_WEIGHTS[:min(tier, len(DCA_WEIGHTS))])
-    if cum_w_current <= 0:
-        return 0.0
-    tier_w = DCA_WEIGHTS[tier - 1] if tier <= len(DCA_WEIGHTS) else DCA_WEIGHTS[-1]
-    return total_amt * (tier_w / cum_w_current)
+    return min(total_amt * (tier_w / cum_w_current), max_trim_qty)
 
 
 def calc_tp1_thresh(dca_level: int, worst_roi: float,

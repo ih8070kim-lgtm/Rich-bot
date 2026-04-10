@@ -1052,11 +1052,13 @@ def plan_open(
 
                     _tr_score = _calc_trend_score(_tr_15m)
 
-                    if _tr_opp_side == "sell" and _tr_score < -TREND_MIN_SCORE:
+                    # ★ V10.29d: 상대값 선택 — 최소 0.5 (노이즈 제거), 최고 스코어
+                    _TR_MIN = 0.5
+                    if _tr_opp_side == "sell" and _tr_score < -_TR_MIN:
                         if abs(_tr_score) > _tr_best_score:
                             _tr_best_score = abs(_tr_score)
                             _tr_best_sym = _tr_sym
-                    elif _tr_opp_side == "buy" and _tr_score > TREND_MIN_SCORE:
+                    elif _tr_opp_side == "buy" and _tr_score > _TR_MIN:
                         if _tr_score > _tr_best_score:
                             _tr_best_score = _tr_score
                             _tr_best_sym = _tr_sym
