@@ -1052,7 +1052,9 @@ def plan_open(
 
                     _tr_score = _calc_trend_score(_tr_15m)
 
-                    # ★ V10.29d: 상대값 선택 — 최소 0.5 (노이즈 제거), 최고 스코어
+                    # ★ V10.29d: 브레이크아웃 companion — 추세 방향 진입
+                    # sell → 하락 추세 심볼 (score < -0.5)
+                    # buy  → 상승 추세 심볼 (score > +0.5)
                     _TR_MIN = 0.5
                     if _tr_opp_side == "sell" and _tr_score < -_TR_MIN:
                         if abs(_tr_score) > _tr_best_score:
