@@ -527,6 +527,55 @@ def plan_open(
     # ★ Python UnboundLocalError 방지: 루프 안에서 재할당되는 변수 미리 초기화
     total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
 
+    # ═══ V10.29d: PENDING TREND_COMP 발사 (MR fill 확인 후) ═══
+    _ptc = system_state.get("_pending_trend_comp")
+    if _ptc and isinstance(_ptc, dict):
+        _ptc_age = time.time() - float(_ptc.get("ts", 0) or 0)
+        _ptc_mr_sym = _ptc.get("mr_symbol", "")
+        # MR이 실제 포지션으로 존재하는지 확인
+        _ptc_mr_filled = False
+        if _ptc_mr_sym:
+            _ptc_mr_st = st.get(_ptc_mr_sym, {})
+            for _ptc_s, _ptc_p in iter_positions(_ptc_mr_st):
+                if isinstance(_ptc_p, dict) and float(_ptc_p.get("amt", 0) or 0) > 0:
+                    if _ptc_p.get("role") == "CORE_MR":
+                        _ptc_mr_filled = True
+                        break
+
+        if _ptc_age > 300:
+            # 5분 초과 → 만료
+            system_state.pop("_pending_trend_comp", None)
+        elif _ptc_mr_filled:
+            # MR fill 확인 → companion 발사
+            _ptc_sym = _ptc["symbol"]
+            _ptc_side = _ptc["side"]
+            _ptc_cp = float((snapshot.all_prices or {}).get(_ptc_sym, _ptc.get("price", 0)))
+            _ptc_qty = _ptc.get("qty", 0)
+            if _ptc_cp > 0:
+                _ptc_qty = (_ptc_qty * _ptc.get("price", _ptc_cp)) / _ptc_cp  # 현재가 기준 재계산
+            if _ptc_qty > 0 and _ptc_cp > 0:
+                intents.append(Intent(
+                    trace_id=_tid(),
+                    intent_type=IntentType.OPEN,
+                    symbol=_ptc_sym,
+                    side=_ptc_side,
+                    qty=_ptc_qty,
+                    price=_ptc_cp,
+                    reason=f"TREND_COMP(sig={_ptc_mr_sym},score={_ptc.get('score',0):.1f})",
+                    metadata={
+                        "atr": 0,
+                        "dca_targets": _ptc.get("dca_targets", []),
+                        "positionSide": "LONG" if _ptc_side == "buy" else "SHORT",
+                        "entry_type": "TREND",
+                        "role": "CORE_MR",
+                        "locked_regime": _ptc.get("regime", "LOW"),
+                    },
+                ))
+                print(f"[TREND_FIRE] {_ptc_sym} {_ptc_side} ← MR {_ptc_mr_sym} filled "
+                      f"(delay={_ptc_age:.0f}s)")
+            system_state.pop("_pending_trend_comp", None)
+    # ═══ END PENDING TREND_COMP ═══
+
     # ── stale pending_nextbar 정리 (재시작 후 TTL 초과 엔트리) ────
     pending_map = system_state.setdefault("open_pending_nextbar", {})
     now_ts = time.time()
@@ -1040,35 +1089,24 @@ def plan_open(
                             _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
                         _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
 
-                        intents.append(Intent(
-                            trace_id=_tid(),
-                            intent_type=IntentType.OPEN,
-                            symbol=_tr_best_sym,
-                            side=_tr_opp_side,
-                            qty=_tr_qty,
-                            price=_tr_cp,
-                            reason=f"TREND_COMP(sig={symbol},score={_tr_best_score:.1f})",
-                            metadata={
-                                "atr": 0,
-                                "dca_targets": _tr_dca_targets,
-                                "positionSide": "LONG" if _tr_opp_side == "buy" else "SHORT",
-                                "entry_type": "TREND",
-                                "role": "CORE_MR",
-                                "locked_regime": _btc_regime,
-                            },
-                        ))
-                        if _tr_opp_side == "buy":
-                            _core_long += 1
-                        else:
-                            _core_short += 1
-                        _mr_blocked = not (_mr_long_final or _mr_short_final)
+                        # ★ V10.29d: MR fill 확인 후 발사 — system_state에 저장
+                        # runner._process_pending_fill(OPEN)에서 꺼내서 실행
+                        system_state["_pending_trend_comp"] = {
+                            "symbol": _tr_best_sym,
+                            "side": _tr_opp_side,
+                            "qty": _tr_qty,
+                            "price": _tr_cp,
+                            "score": _tr_best_score,
+                            "mr_symbol": symbol,
+                            "dca_targets": _tr_dca_targets,
+                            "regime": _btc_regime,
+                            "ts": time.time(),
+                        }
                         print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
-                              f"← sig {symbol} {_trend_signal_side}"
-                              f"{' (MR BLOCKED)' if _mr_blocked else ''}")
+                              f"← sig {symbol} {_trend_signal_side} (PENDING→MR fill)")
                         try:
                             from v9.logging.logger_csv import log_system
-                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}"
-                                       f"{' (MR_BLOCKED)' if _mr_blocked else ''}")
+                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol} PENDING")
                         except Exception: pass
 
     return intents
