@@ -35,13 +35,19 @@ import v9.config as CFG
 _hourly_closes: Dict[str, deque] = {}     # {sym: deque(maxlen=250)} 1h close
 _hourly_volumes: Dict[str, deque] = {}    # {sym: deque(maxlen=250)} 1h volume
 _btc_hourly: deque = deque(maxlen=250)
-_armed: Dict[str, dict] = {}              # {sym: {ts, peak_excess, peak_price, beta}}
+_armed: Dict[str, dict] = {}              # {sym: {ts, peak_excess, peak_price, beta, tf}}
 _cooldown_until: Dict[str, float] = {}    # {sym: unix_ts}
 _daily_entry_count: int = 0
 _last_entry_date: str = ""
 _universe: set = set()
 _last_hourly_fetch_ts: float = 0          # 마지막 1h fetch 시각
 _last_bar_ts: Dict[str, float] = {}       # {sym: last_bar_open_ts} 봉 변경 감지
+
+# ★ V10.29d: 일봉 데이터 (OR 조건용)
+_daily_closes: Dict[str, deque] = {}      # {sym: deque(maxlen=90)}
+_daily_volumes: Dict[str, deque] = {}
+_btc_daily: deque = deque(maxlen=90)
+_last_daily_fetch_date: str = ""
 
 _exchange = None
 
@@ -68,6 +74,8 @@ def bc_on_daily_close(snapshot, st: Dict, system_state: Dict) -> List[Intent]:
 
     # 1h 봉 부트스트랩 (전체 후보풀)
     _fetch_hourly_bars(full=True)
+    # ★ V10.29d: 일봉 fetch (OR 조건용)
+    _fetch_daily_bars()
     _update_universe()
 
     return []  # 시그널은 bc_on_tick에서 처리
@@ -89,6 +97,7 @@ def bc_on_tick(snapshot, st: Dict) -> List[Intent]:
     # ── 매 시간 자체 fetch (유니버스 심볼만 refresh) ──
     if time.time() - _last_hourly_fetch_ts > 3900:  # 65분
         _fetch_hourly_bars(full=False)
+        _fetch_daily_bars()  # 하루 1회만 실행됨
         if not _universe:
             _update_universe()
         new_bar_detected = True  # fetch 후 시그널 체크 강제
@@ -99,6 +108,7 @@ def bc_on_tick(snapshot, st: Dict) -> List[Intent]:
         # 60초에 1회만 시도
         if time.time() - _last_hourly_fetch_ts > 60:
             _fetch_hourly_bars(full=True)
+            _fetch_daily_bars()
             _update_universe()
         return _manage_positions(snapshot, st)
 
@@ -142,33 +152,63 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
         if sym in _cooldown_until and time.time() < _cooldown_until[sym]:
             continue
 
-        er = _calc_excess_1h(sym)
-        if not er:
+        # ★ V10.29d: 1h OR 일봉 excess — 둘 중 하나라도 조건 충족 시 발동
+        er_1h = _calc_excess_1h(sym)
+        er_d = _calc_excess_daily(sym)
+
+        excess_1h = er_1h[0] if er_1h else None
+        beta_1h = er_1h[1] if er_1h else None
+        excess_d = er_d[0] if er_d else None
+        beta_d = er_d[1] if er_d else None
+
+        if excess_1h is None and excess_d is None:
             continue
-        excess, beta = er
 
         cur_p = _hourly_closes[sym][-1] if sym in _hourly_closes and _hourly_closes[sym] else 0
         if cur_p <= 0:
             continue
 
-        # ── ARMED ──
-        if excess >= CFG.BC_ARM_THRESH:
+        # ── ARMED (OR: 어느 쪽이든 excess ≥ ARM_THRESH) ──
+        arm_triggered = False
+        arm_excess = 0
+        arm_beta = 0
+        arm_tf = ""
+        if excess_1h is not None and excess_1h >= CFG.BC_ARM_THRESH:
+            arm_triggered = True
+            arm_excess = excess_1h
+            arm_beta = beta_1h or 0
+            arm_tf = "1h"
+        if excess_d is not None and excess_d >= CFG.BC_ARM_THRESH:
+            if not arm_triggered or excess_d > arm_excess:
+                arm_triggered = True
+                arm_excess = excess_d
+                arm_beta = beta_d or 0
+                arm_tf = "1d"
+
+        if arm_triggered:
             if sym not in _armed:
                 _armed[sym] = {
                     "ts": time.time(),
-                    "peak_excess": excess,
+                    "peak_excess": arm_excess,
                     "peak_price": cur_p,
-                    "beta": beta,
+                    "beta": arm_beta,
+                    "tf": arm_tf,
                 }
-                print(f"[BC] 🔔 ARMED {sym} excess={excess:+.1%} β={beta:.2f}")
+                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β={arm_beta:.2f} tf={arm_tf}")
             else:
-                if excess > _armed[sym]["peak_excess"]:
-                    _armed[sym]["peak_excess"] = excess
+                if arm_excess > _armed[sym]["peak_excess"]:
+                    _armed[sym]["peak_excess"] = arm_excess
                 if cur_p > _armed[sym]["peak_price"]:
                     _armed[sym]["peak_price"] = cur_p
 
-        # ── SHORT 진입 — excess가 0~NORM 범위로 정상화 ──
-        if sym in _armed and 0 <= excess <= CFG.BC_NORM_THRESH:
+        # ── SHORT 진입 (OR: 어느 쪽이든 0 ≤ excess ≤ NORM) ──
+        norm_triggered = False
+        if excess_1h is not None and 0 <= excess_1h <= CFG.BC_NORM_THRESH:
+            norm_triggered = True
+        if excess_d is not None and 0 <= excess_d <= CFG.BC_NORM_THRESH:
+            norm_triggered = True
+
+        if sym in _armed and norm_triggered:
             arm = _armed[sym]
 
             pullback = (arm["peak_price"] - cur_p) / arm["peak_price"] if arm["peak_price"] > 0 else 0
@@ -192,6 +232,10 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
             if qty < min_qty or notional < 10:
                 continue
 
+            # 현재 excess (로그용)
+            _ex_1h_str = f"1h={excess_1h:+.1%}" if excess_1h is not None else "1h=N/A"
+            _ex_d_str = f"1d={excess_d:+.1%}" if excess_d is not None else "1d=N/A"
+
             ensure_slot(st, sym)
 
             intent = Intent(
@@ -201,12 +245,12 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                 side="sell",
                 qty=qty,
                 price=None,
-                reason=f"BC_SHORT ex={arm['peak_excess']:+.1%}→{excess:+.1%} pb={pullback:.1%}",
+                reason=f"BC_SHORT peak={arm['peak_excess']:+.1%} {_ex_1h_str} {_ex_d_str} pb={pullback:.1%}",
                 metadata={
                     "positionSide": "SHORT",
                     "role": "BC",
                     "bc_peak_excess": arm["peak_excess"],
-                    "bc_beta": arm["beta"],
+                    "bc_beta": arm.get("beta", 0),
                     "bc_entry_ts": time.time(),
                 },
             )
@@ -216,8 +260,8 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
             bc_count += 1
             held_short_syms.add(sym)
 
-            print(f"[BC] 📉 SHORT {sym} ex_peak={arm['peak_excess']:+.1%}→{excess:+.1%} "
-                  f"pb={pullback:.1%} β={arm['beta']:.2f} "
+            print(f"[BC] 📉 SHORT {sym} peak={arm['peak_excess']:+.1%} {_ex_1h_str} {_ex_d_str} "
+                  f"pb={pullback:.1%} β={arm.get('beta',0):.2f} "
                   f"qty={qty:.4f} ${notional:.0f} [{_daily_entry_count}/{CFG.BC_ENTRY_PER_DAY}]")
 
         # ARMED 만료
@@ -355,6 +399,43 @@ def _update_hourly_from_pool(snapshot) -> bool:
             _hourly_volumes[sym].append(float(last_bar[5]))
 
     return new_bar
+
+
+def _fetch_daily_bars():
+    """★ V10.29d: 1일 1회 일봉 데이터 갱신 (OR 조건용)."""
+    global _last_daily_fetch_date
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    if today == _last_daily_fetch_date:
+        return
+    if _exchange is None:
+        return
+
+    _last_daily_fetch_date = today
+    print(f"[BC] 📥 Fetching daily bars...")
+
+    try:
+        btc_bars = _exchange.fetch_ohlcv("BTC/USDT", "1d", limit=90)
+        _btc_daily.clear()
+        for b in btc_bars:
+            _btc_daily.append(float(b[4]))
+    except Exception as e:
+        print(f"[BC] BTC 1d fetch 실패: {e}")
+        return
+
+    pool = getattr(CFG, 'BC_CANDIDATE_POOL', _DEFAULT_POOL)
+    for sym in pool:
+        try:
+            bars = _exchange.fetch_ohlcv(sym, "1d", limit=90)
+            _daily_closes[sym] = deque(maxlen=90)
+            _daily_volumes[sym] = deque(maxlen=90)
+            for b in bars:
+                _daily_closes[sym].append(float(b[4]))
+                _daily_volumes[sym].append(float(b[5]))
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+    print(f"[BC] ✅ Daily bars: BTC({len(_btc_daily)}) + {len(_daily_closes)} alts")
 
 
 def _fetch_hourly_bars(full: bool = False):
@@ -541,6 +622,44 @@ def _calc_excess_1h(sym) -> Optional[Tuple[float, float]]:
         btc_lr = np.diff(np.log(bc[-(beta_w + 1):]))
         n = min(len(alt_lr), len(btc_lr))
         if n < 20:
+            return None
+        var_b = np.var(btc_lr[-n:])
+        if var_b < 1e-15:
+            return None
+        beta = float(np.cov(alt_lr[-n:], btc_lr[-n:])[0][1] / var_b)
+    except Exception:
+        return None
+
+    excess = alt_ret - (beta * btc_ret)
+    return (excess, beta)
+
+
+def _calc_excess_daily(sym) -> Optional[Tuple[float, float]]:
+    """★ V10.29d: 일봉 버퍼에서 excess return + beta 계산 (OR 조건용)."""
+    RET_W = 7   # 7일 return
+    BETA_W = 30  # 30일 beta
+
+    if sym not in _daily_closes or len(_daily_closes[sym]) < BETA_W + 5:
+        return None
+    if len(_btc_daily) < BETA_W + 5:
+        return None
+
+    ac = list(_daily_closes[sym])
+    bc = list(_btc_daily)
+
+    if len(ac) < RET_W + 1 or len(bc) < RET_W + 1:
+        return None
+    if ac[-1] <= 0 or ac[-(RET_W + 1)] <= 0 or bc[-1] <= 0 or bc[-(RET_W + 1)] <= 0:
+        return None
+
+    alt_ret = (ac[-1] / ac[-(RET_W + 1)]) - 1
+    btc_ret = (bc[-1] / bc[-(RET_W + 1)]) - 1
+
+    try:
+        alt_lr = np.diff(np.log(ac[-(BETA_W + 1):]))
+        btc_lr = np.diff(np.log(bc[-(BETA_W + 1):]))
+        n = min(len(alt_lr), len(btc_lr))
+        if n < 10:
             return None
         var_b = np.var(btc_lr[-n:])
         if var_b < 1e-15:

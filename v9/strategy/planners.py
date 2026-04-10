@@ -1006,6 +1006,10 @@ def plan_open(
                         continue
                     if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                         continue
+                    # ★ V10.29d: corr 선체크 (risk_manager REJECT_CORR_LOW 방지)
+                    _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
+                    if _tr_corr < OPEN_CORR_MIN:
+                        continue
                     _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
                     _tr_15m = _tr_pool.get("15m", [])
                     if len(_tr_15m) < 35:
@@ -1507,9 +1511,15 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ V10.28b FIX: plan_tp1 경로로 배치된 TP1 limit이 pending이면 스킵
         if p.get("tp1_limit_oid"):
             continue
-        # ★ V10.28b: trim 선주문 대기 중 + DCA T2+ → plan_tp1 스킵 (trim이 exit 담당)
-        # trim_to_place도 체크 (DCA 직후 같은 틱)
-        if (p.get("trim_preorders") or p.get("trim_to_place")) and int(p.get("dca_level", 1) or 1) >= 2:
+        # ★ V10.29d: trim_preorders OR 최근 trim_to_place만 스킵
+        # trim_to_place는 60초 TTL — 초과 시 stale로 간주, plan_tp1 DCA_TRIM fallback
+        _ttp = p.get("trim_to_place")
+        if _ttp and isinstance(_ttp, dict):
+            _ttp_age = time.time() - float(_ttp.get("_ts", 0) or 0)
+            if _ttp_age > 60:
+                p.pop("trim_to_place", None)  # stale → 정리
+                _ttp = None
+        if (p.get("trim_preorders") or _ttp) and int(p.get("dca_level", 1) or 1) >= 2:
             continue
         _sym_st_tp1 = st.get(symbol, {})
         if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():

@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from v9.config import (
     ACTIVATION_THRESHOLD, HEARTBEAT_FILE,
     DD_SHUTDOWN_THRESHOLD, DD_SHUTDOWN_HOURS,
-    LEVERAGE,
+    LEVERAGE, FEE_RATE,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
 )
 from v9.types import MarketSnapshot, IntentType
@@ -1054,15 +1054,29 @@ async def _manage_pending_limits(ex, st, snapshot):
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
                 if info.get("is_trim"):
-                    _pl_type = "TRIM_FILL"  # ★ V10.28b: trim 체결 시만 알림
+                    _pl_type = "TRIM_FILL"
+                    # ★ V10.29d: TRIM ROI/PnL 계산
+                    _trim_ep = float(info.get("entry_price", 0) or 0)
+                    _trim_side = info["side"]  # trim side (close 방향)
+                    if _trim_ep > 0 and avg_price > 0:
+                        _raw = (avg_price - _trim_ep) / _trim_ep if _trim_side == "sell" else (_trim_ep - avg_price) / _trim_ep
+                        _fee = (avg_price + _trim_ep) / _trim_ep * FEE_RATE
+                        _trim_roi = (_raw - _fee) * LEVERAGE * 100
+                        _trim_pnl = (_raw - _fee) * avg_price * filled_qty
+                    else:
+                        _trim_roi = _trim_pnl = 0.0
                 elif info["intent_type"] == "TP1":
                     _pl_type = "TP1_LIMIT"
+                    _trim_roi = _trim_pnl = 0.0
                 elif info["intent_type"] == "DCA":
                     _pl_type = "PENDING_DCA"
+                    _trim_roi = _trim_pnl = 0.0
                 else:
                     _pl_type = "PENDING_OPEN"
+                    _trim_roi = _trim_pnl = 0.0
                 asyncio.ensure_future(_notify_async_fill(
                     sym, info["side"], avg_price, filled_qty, _pl_type,
+                    pnl=_trim_pnl, roi=_trim_roi,
                     tier=info.get("tier", 0), role=info.get("role", ""),
                 ))
 
@@ -1346,6 +1360,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 "qty": _trim_qty,
                 "side": "sell" if _pos_side == "buy" else "buy",
                 "entry_price": float(p["ep"]),  # ★ V10.29c FIX: 블렌디드 EP
+                "_ts": time.time(),  # ★ V10.29d: TTL용 타임스탬프
             }
             print(f"[TRIM_PREP] {sym} {_pos_side} T{tier}: "
                   f"선주문 준비 {_trim_qty:.4f}@${_trim_price:.4f} (ep={p['ep']:.4f}, notional-based)")
@@ -1583,6 +1598,7 @@ async def _place_trim_preorders(ex, st, snapshot):
                             "qty": _regen_qty,
                             "side": "sell" if pos_side == "buy" else "buy",
                             "entry_price": _regen_ep,
+                            "_ts": time.time(),
                         }
                         ttp = p["trim_to_place"]
                         print(f"[TRIM_REGEN] {sym} {pos_side} T{_regen_dca}: "

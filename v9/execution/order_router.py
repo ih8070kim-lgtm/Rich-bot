@@ -195,12 +195,13 @@ async def route_order(
             tag=tag,
         )
 
-    # ── set_leverage: LEVERAGE = 3 (정수) ──────────────────────
-
+    # ── set_leverage ──────────────────────
+    # ★ V10.29d: BC는 1x, 나머지 3x
+    _meta_role_lev = (intent.metadata or {}).get("role", "")
+    lev_int = 1 if _meta_role_lev in ("BC", "CB") else int(LEVERAGE)
 
     # 추가: 실패 시 1회 재시도, 그래도 실패 시 OPEN은 에러 반환 (주문 진행 X)
     try:
-        lev_int = int(LEVERAGE)
         await asyncio.to_thread(ex.set_leverage, lev_int, sym)
     except Exception as _lev_err:
         lev_err_str = str(_lev_err)
