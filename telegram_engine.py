@@ -185,13 +185,15 @@ async def report_system_status(snapshot, st: dict):
                 continue
             ep = float(p.get("ep", 0.0) or 0.0)
             cp = float(prices.get(sym, ep) or ep)
-            roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE) if ep > 0 and cp > 0 else 0.0
+            role = p.get("role", "")
+            # ★ V10.29e: BC/CB는 x1 레버리지
+            _dash_lev = 1 if role in ("BC", "CB") else LEVERAGE
+            roi = calc_roi_pct(ep, cp, pos_side, _dash_lev) if ep > 0 and cp > 0 else 0.0
             if ep > 0 and cp > 0:
-                fee_deduct = (ep + cp) / ep * FEE_RATE * LEVERAGE * 100
+                fee_deduct = (ep + cp) / ep * FEE_RATE * _dash_lev * 100
                 roi -= fee_deduct
             dca = int(p.get("dca_level", 1) or 1)
             step = int(p.get("step", 0) or 0)
-            role = p.get("role", "")
             amt = float(p.get("amt", 0.0) or 0.0)
 
             if ep > 0 and cp > 0:
@@ -208,6 +210,10 @@ async def report_system_status(snapshot, st: dict):
                 badge = "🛡"
             elif role == "INSURANCE_SH":
                 badge = "🩹"
+            elif role == "BC":
+                badge = "🌀"
+            elif role == "CB":
+                badge = "⚡"
             else:
                 badge = ""
 
@@ -327,7 +333,10 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
             if ep > 0 and avg_px > 0:
                 raw = (avg_px - ep) / ep if side == "sell" else (ep - avg_px) / ep
                 fee_pct = (ep + avg_px) / ep * FEE_RATE
-                roi = (raw - fee_pct) * LEVERAGE * 100
+                # ★ V10.29e: BC/CB는 x1 레버리지 — ROI 정확 표시
+                _exit_role = (_p or {}).get("role", "")
+                _exit_lev = 1 if _exit_role in ("BC", "CB") else LEVERAGE
+                roi = (raw - fee_pct) * _exit_lev * 100
                 pnl = (raw - fee_pct) * notional
             else:
                 roi = pnl = 0.0

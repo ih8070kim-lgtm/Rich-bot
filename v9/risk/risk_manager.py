@@ -332,7 +332,9 @@ def generate_corrguard_intents(
         # [BUG-1+2 FIX] hedge mode 지원: 포지션별로 독립 판단
         for pos_side, p in iter_positions(sym_st):
             # ★ v10.6: HEDGE role은 CorrGuard 대상 제외 (헷지는 자체 exit 로직 사용)
-            if p.get("role") == "HEDGE":
+            # ★ V10.29e: BC/CB 독립전략도 제외 (x1, 자체 SL/TP 사용)
+            if p.get("role") in ("HEDGE", "CORE_HEDGE", "SOFT_HEDGE",
+                                 "INSURANCE_SH", "BC", "CB"):
                 continue
             ep      = float(p.get("ep", 0.0) or 0.0)
             roi_pct = calc_roi_pct(ep, cp, pos_side, LEVERAGE) if ep > 0 else 0.0

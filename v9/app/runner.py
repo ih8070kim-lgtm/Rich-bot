@@ -198,8 +198,16 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None):
             # ★ v10.24 Fix A: RECOVERED 포지션 role을 무조건 CORE_MR로 강제
             # pending_limit에서 CORE_BREAKOUT을 가져오면 MR 슬롯 카운트에서 빠져
             # 좀비 슬롯이 되는 근본 원인 차단
-            _pl_role = "CORE_MR"
-            _pl_entry_type = "MR"
+            # ★ V10.29e: BC/CB role 보존 — x1 독립전략이 MR HARD_SL에 죽는 버그 방지
+            _bc_cb_map = (system_state or {}).get("_bc_cb_role_map", {})
+            _saved_role = _bc_cb_map.get(f"{sym}:{side}", "")
+            if _saved_role in ("BC", "CB"):
+                _pl_role = _saved_role
+                _pl_entry_type = _saved_role
+                print(f"[SYNC] ★ {sym} {side} RECOVERED → role={_saved_role} 보존 (x1 독립전략)")
+            else:
+                _pl_role = "CORE_MR"
+                _pl_entry_type = "MR"
             set_p(sym_st, side, {
                 "symbol": sym, "side": side,
                 "ep": ex_ep, "original_ep": ex_ep,
@@ -289,6 +297,20 @@ def _save_all(st, cooldowns, system_state):
         cb_save_state(system_state)
     except Exception as _e:
         print(f"[_save_all] BC/CB state save 실패(무시): {_e}")
+    # ★ V10.29e: BC/CB 오픈 포지션 role 맵 저장 (복구 시 role 보존용)
+    try:
+        from v9.execution.position_book import iter_positions
+        _bc_cb_map = {}
+        for _sym, _sym_st in (st or {}).items():
+            if not isinstance(_sym_st, dict):
+                continue
+            for _sd, _p in iter_positions(_sym_st):
+                _rl = (_p or {}).get("role", "")
+                if _rl in ("BC", "CB"):
+                    _bc_cb_map[f"{_sym}:{_sd}"] = _rl
+        system_state["_bc_cb_role_map"] = _bc_cb_map
+    except Exception as _e:
+        print(f"[_save_all] BC/CB role map save 실패(무시): {_e}")
     save_position_book(st, cooldowns, system_state)
 
 
