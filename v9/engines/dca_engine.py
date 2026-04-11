@@ -358,3 +358,8 @@ def restore_counter_state(system_state: dict):
     _bb_cooldowns = system_state.get("_bb_cooldowns", {})
     _bb_active = sum(1 for v in _bb_prev_squeeze_len.values() if v >= _SQ_MIN)
     print(f"[RESTORE] counter: bb_squeeze_ready={_bb_active}syms")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("RESTORE", f"counter bb_ready={_bb_active}")
+    except Exception:
+        pass

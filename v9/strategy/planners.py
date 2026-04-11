@@ -1834,301 +1834,8 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
     return intents
 
 
-# ═════════════════════════════════════════════════════════════════
-# Force Close  (HARD_SL + DD Shutdown + ZOMBIE)
-# ═════════════════════════════════════════════════════════════════
-# ── V10.17: ZOMBIE 재구성 + 배치 익절 ────────────────────────────
-ZOMBIE_ROI_THRESH  = -5.0
-ZOMBIE_COOLDOWN_SEC = 8 * 3600
-ZOMBIE_BATCH_TP_ROI = {1: 4.0, 2: 2.0}
-ZOMBIE_TIME_CUT_SEC = 12 * 3600  # ★ V10.29b: T2+ 12시간 보유 타임컷 (스윙 여유)
-_zombie_cooldown = {"buy": 0.0, "sell": 0.0}
-
-
-def _zombie_exit(p: dict, roi_pct: float, now: float, atr_pct: float = 0.0, snapshot=None) -> tuple:
-    """V10.17 ZOMBIE — BAD 레짐 + 슬롯풀 + T2+ + ROI≤-5%."""
-    _role = p.get("role", "")
-    if _role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
-        return False, ""
-    dca_level = int(p.get("dca_level", 1) or 1)
-    if dca_level < 2:
-        return False, ""
-    if not _bad_regime_active:
-        return False, ""
-    if roi_pct > ZOMBIE_ROI_THRESH:
-        return False, ""
-    _side = p.get("side", "buy")
-    if now < _zombie_cooldown.get(_side, 0.0):
-        return False, ""
-    return True, f"ZOMBIE_T{dca_level}_roi{roi_pct:.1f}%"
-
-
-def plan_force_close(
-    snapshot: MarketSnapshot,
-    st: Dict,
-    system_state: Dict,
-) -> List[Intent]:
-    intents: List[Intent] = []
-    shutdown_active = system_state.get("shutdown_active", False)
-    now = time.time()
-    _closing_set: set = set()  # 이미 청산 intent 생성된 (symbol, side) 추적
-
-    for symbol, p in _pos_items(st):
-
-        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
-        if curr_p <= 0:
-            continue
-
-        is_long = p.get("side", "") == "buy"
-        roi_pct = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
-
-        force  = False
-        reason = ""
-
-        # ★ V10.29b: 잔량 정리 — notional < $20 또는 qty < min_qty
-        _res_amt = float(p.get("amt", 0.0) or 0.0)
-        _res_notional = _res_amt * curr_p
-        _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-        if 0 < _res_notional < 20.0 or (0 < _res_amt < _res_min_qty * 2):
-            force  = True
-            reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
-
-        # ★ v10.10: DD_SHUTDOWN — 출혈 중인 CORE만 청산
-        # HEDGE/INSURANCE_SH: 폭락 방어 중 → 살려야 함
-        # trailing(step>=1): 수익 확정 중 → 살려야 함
-        if shutdown_active:
-            _dd_role = p.get("role", "")
-            _dd_step = int(p.get("step", 0) or 0)
-            if _dd_role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
-                pass  # 보호 포지션 — DD에서 제외
-            elif _dd_step >= 1:
-                pass  # trailing 중 — DD에서 제외
-            else:
-                force  = True
-                reason = "DD_SHUTDOWN_FORCE_CLOSE"
-
-        # ★ v10.8: HEDGE/SOFT_HEDGE → hedge_engine_v2 위임
-        elif p.get("role") in ("HEDGE", "SOFT_HEDGE"):
-            if (symbol, p.get("side", "")) in _closing_set:
-                continue
-            from v9.engines.hedge_engine_v2 import plan_hedge_exit
-            _h_force, _h_reason, _h_extra = plan_hedge_exit(
-                symbol, p, curr_p, roi_pct, st, snapshot, _closing_set
-            )
-            intents.extend(_h_extra)
-            if _h_force:
-                force  = True
-                reason = _h_reason
-
-        # ★ V10.27: INSURANCE_SH — BTC 반전 기반 청산
-        elif p.get("role") == "INSURANCE_SH":
-            _ins_time = float(p.get("time", now) or now)
-            _ins_age = now - _ins_time
-
-            from v9.config import (INSURANCE_TP_ROI, INSURANCE_CUT_ROI,
-                                   INSURANCE_MAX_HOLD_SEC)
-
-            # BTC 반전 감지
-            btc_pool_ins = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
-            btc_1m_ins = btc_pool_ins.get("1m", [])
-            _btc_reversed = False
-            if len(btc_1m_ins) >= 2:
-                _btc_now_ins = float(btc_1m_ins[-1][4])
-                _btc_entry = float(p.get("hedge_entry_price", 0) or _btc_now_ins)
-                _ins_side = p.get("side", "")
-                # sell(crash 대응): BTC 올라가면 reversed
-                if _ins_side == "sell" and _btc_now_ins > _btc_entry * 1.003:
-                    _btc_reversed = True
-                elif _ins_side == "buy" and _btc_now_ins < _btc_entry * 0.997:
-                    _btc_reversed = True
-
-            # (1) 3분 + BTC 반전 + 손실 → 위킹이었음
-            if _ins_age >= 180 and _btc_reversed and roi_pct < 0:
-                force = True
-                reason = f"INSURANCE_SH_REVERSED({_ins_age:.0f}s,roi={roi_pct:+.1f}%)"
-            # (2) 수익 3%+ → trailing
-            elif roi_pct >= INSURANCE_TP_ROI:
-                p["step"] = 1
-                p["tp1_done"] = True
-                p["trailing_on_time"] = now
-                p["max_roi_seen"] = max(float(p.get("max_roi_seen", 0) or 0), roi_pct)
-                print(f"[INSURANCE_SH] {symbol} roi={roi_pct:+.1f}% → trailing")
-                continue
-            # (3) 10분 + 손실 → 컷
-            elif _ins_age >= 600 and roi_pct < INSURANCE_CUT_ROI:
-                force = True
-                reason = f"INSURANCE_SH_TIMECUT(10m,roi={roi_pct:+.1f}%)"
-            # (4) 10분 + 수익 → trailing
-            elif _ins_age >= 600 and roi_pct > 0:
-                p["step"] = 1
-                p["tp1_done"] = True
-                p["trailing_on_time"] = now
-                p["max_roi_seen"] = max(float(p.get("max_roi_seen", 0) or 0), roi_pct)
-                print(f"[INSURANCE_SH] {symbol} 10m roi={roi_pct:+.1f}% → trailing")
-                continue
-            # (5) 20분 절대 상한
-            elif _ins_age >= INSURANCE_MAX_HOLD_SEC:
-                force = True
-                reason = f"INSURANCE_SH_MAXTIME(20m,roi={roi_pct:+.1f}%)"
-
-        # ★ V10.29b-BC: BC/CB 포지션은 자체 SL/TP 사용 → MR HARD_SL 제외
-        elif p.get("role") in ("BC", "CB"):
-            pass
-
-        else:
-            # ── HARD_SL (CORE 포지션 전용) ────────────────────────
-            _dca_lv_sl = int(p.get("dca_level", 1) or 1)
-
-            from v9.config import HARD_SL_BY_TIER
-
-            # ★ V10.29c: T3 방어 모드 — 단계별 갭 축소 약손절
-            # -8% 진입 → TP -3%(갭5) / -9% → TP -5%(갭4) / -10% → TP -7%(갭3)
-            # -11% → TP -9%(갭2) / -12% HARD SL
-            # 공식: TP = 2×worst + 13, 갭 = 13 + worst
-            _T4_ENTRY   = -8.0    # 방어 모드 진입 ROI
-            _T4_HARD_SL = -12.0   # 절대 SL
-
-            if _dca_lv_sl >= 3:
-                _sl_ep = get_sl_entry(p, _dca_lv_sl)
-                _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE) if _sl_ep > 0 else 0
-
-                _t4_active = p.get("t4_defense", False)
-
-                # 방어 모드 진입
-                if not _t4_active and _sl_roi <= _T4_ENTRY:
-                    p["t4_defense"] = True
-                    p["t4_worst_roi"] = _sl_roi
-                    p["t4_defense_ts"] = now
-                    _t4_active = True
-                    _gap = 13.0 + _sl_roi  # -8% → gap 5
-                    _tp = 2.0 * _sl_roi + 13.0  # -8% → TP -3%
-                    _dbg = f"[T3_DEF] ⚡ {symbol} {p.get('side','')} 방어모드 진입 roi={_sl_roi:.1f}% tp={_tp:.1f}%(갭{_gap:.0f})"
-                    print(_dbg)
-                    system_state.setdefault("_counter_tg", []).append(_dbg)
-
-                if _t4_active:
-                    # worst 갱신
-                    _t4_worst = float(p.get("t4_worst_roi", _sl_roi) or _sl_roi)
-                    if _sl_roi < _t4_worst:
-                        p["t4_worst_roi"] = _sl_roi
-                        _t4_worst = _sl_roi
-
-                    # 단계별 TP: 갭 = 13 + worst (5→4→3→2→1)
-                    _t4_tp = 2.0 * _t4_worst + 13.0
-                    _t4_gap = 13.0 + _t4_worst
-
-                    # 반등 TP 히트
-                    if _sl_roi >= _t4_tp:
-                        force = True
-                        reason = f"T3_DEF_TP(worst={_t4_worst:.1f}%,tp={_t4_tp:.1f}%,gap={_t4_gap:.0f},roi={_sl_roi:.1f}%)"
-                        _dbg = f"[T3_DEF] ✅ {symbol} 반등 탈출 roi={_sl_roi:.1f}% worst={_t4_worst:.1f}% gap={_t4_gap:.0f}"
-                        print(_dbg)
-                        system_state.setdefault("_counter_tg", []).append(_dbg)
-
-                    # 절대 SL
-                    elif _sl_roi <= _T4_HARD_SL:
-                        force = True
-                        reason = f"T3_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
-
-                    # 아직 방어 중 → 기존 SL 무시
-                    # ★ V10.29c FIX: pass → 플래그로 정상 HARD_SL 차단
-
-            # ── 기존 HARD_SL (T1/T2 또는 T4_DEFENSE 미활성 T3) ──
-            # ★ V10.29c FIX: 방어 모드 활성 시 정상 HARD_SL 스킵
-            _t4_skip = (_dca_lv_sl >= 3 and p.get("t4_defense", False) and not force)
-            if not force and not _t4_skip:
-                _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
-
-                # ★ V10.29: 공유 함수 — DCA와 동일 기준점
-                _sl_ep = get_sl_entry(p, _dca_lv_sl)
-
-                if _sl_ep > 0:
-                    _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
-                    if _sl_roi <= _sl_thresh:
-                        force  = True
-                        reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
-                        # ★ v10.21: HARD_SL 발생 기록
-                        _hsl = system_state.setdefault("_hard_sl_history", [])
-                        _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
-
-            # ★ V10.17: ZOMBIE — BAD + 슬롯풀 + T2+ + ROI≤-5%
-            # ★ V10.29b: T3 제외 — 스윙은 SL -10% 단독 관리
-            if not force:
-                _z_side = p.get("side", "buy")
-                _z_dca = int(p.get("dca_level", 1) or 1)
-                _z_slots = count_slots(st)
-                _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
-                if _z_full and _z_dca < 3:
-                    _zf, _zr = _zombie_exit(p, roi_pct, now, snapshot=snapshot)
-                    if _zf:
-                        force  = True
-                        reason = _zr
-                        _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
-
-            # ★ V10.29b: T2 only 타임컷 — T3 스윙은 SL 단독 관리
-            if not force:
-                _tc_dca = int(p.get("dca_level", 1) or 1)
-                _tc_hold = now - float(p.get("time", now) or now)
-                if (_tc_dca == 2
-                        and _tc_hold >= ZOMBIE_TIME_CUT_SEC
-                        and roi_pct < 0
-                        and p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE")):
-                    force = True
-                    reason = f"ZOMBIE_TIMECUT_{_tc_hold/3600:.1f}h_T{_tc_dca}(roi={roi_pct:.1f}%)"
-
-        if force:
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.FORCE_CLOSE,
-                symbol=symbol,
-                side="sell" if is_long else "buy",
-                qty=float(p.get("amt", 0.0)),
-                price=curr_p,
-                reason=reason,
-                metadata={"roi_pct": roi_pct, "_expected_role": p.get("role", "")},
-            ))
-            # ★ V10.17: 배치 익절 — 좀비킬 시 같은 방향 수익 동반 청산
-            if "ZOMBIE" in reason and "TIMECUT" not in reason:
-                _batch_side = p.get("side", "buy")
-                _batch_best = None
-                _batch_best_roi = -999.0
-                prices_b = snapshot.all_prices or {}
-                for _b_sym, _b_st in st.items():
-                    if not isinstance(_b_st, dict) or _b_sym == symbol:
-                        continue
-                    _b_p = get_p(_b_st, _batch_side)
-                    if not isinstance(_b_p, dict):
-                        continue
-                    if _b_p.get("step", 0) >= 1:
-                        continue
-                    if _b_p.get("role", "") in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
-                        continue
-                    _b_dca = int(_b_p.get("dca_level", 1) or 1)
-                    _b_cp = float(prices_b.get(_b_sym, 0) or 0)
-                    _b_ep = float(_b_p.get("ep", 0) or 0)
-                    if _b_cp <= 0 or _b_ep <= 0:
-                        continue
-                    _b_roi = calc_roi_pct(_b_ep, _b_cp, _batch_side, LEVERAGE)
-                    _b_thresh = ZOMBIE_BATCH_TP_ROI.get(_b_dca, 999.0)
-                    if _b_roi >= _b_thresh and _b_roi > _batch_best_roi:
-                        _batch_best = (_b_sym, _b_p, _b_roi, _b_cp)
-                        _batch_best_roi = _b_roi
-                if _batch_best:
-                    _bs, _bp, _br, _bcp = _batch_best
-                    _b_close_side = "sell" if _batch_side == "buy" else "buy"
-                    intents.append(Intent(
-                        trace_id=_tid(),
-                        intent_type=IntentType.FORCE_CLOSE,
-                        symbol=_bs, side=_b_close_side,
-                        qty=float(_bp.get("amt", 0.0)), price=_bcp,
-                        reason=f"ZOMBIE_BATCH_TP(roi={_br:+.1f}%)",
-                        metadata={"roi_pct": _br, "_expected_role": _bp.get("role", "")},
-                    ))
-                    print(f"[ZOMBIE_BATCH] {_bs} 동반 익절 roi={_br:+.1f}%")
-
-    return intents
-
-
+# ★ V10.29e: plan_force_close → v9/engines/hedge_engine.py 분리 (데드파일 재활용)
+from v9.engines.hedge_engine import plan_force_close, save_exit_state, restore_exit_state
 # ═════════════════════════════════════════════════════════════════
 # 전체 Intent 생성
 # ═════════════════════════════════════════════════════════════════
@@ -2167,7 +1874,7 @@ def generate_all_intents(
                   f"heavy={_urg_log['heavy_side']}")
             generate_all_intents._last_urg = _urg_log["urgency"]
 
-    _fc_intents = plan_force_close(snapshot, st, system_state)
+    _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
     # ★ V10.26: 페어 컷 (force_close 직후, tp1 전)
@@ -2197,23 +1904,22 @@ def generate_all_intents(
 # ═════════════════════════════════════════════════════════════════
 def save_strategy_state(system_state: dict):
     """모듈 글로벌 → system_state (save_position_book 직전 호출)."""
-    system_state["_zombie_cooldown"] = _zombie_cooldown
     system_state["_open_dir_cd"] = _open_dir_cd
     system_state["_bad_regime_active"] = _bad_regime_active
-    # ★ V10.29e: counter 상태 위임
+    # ★ V10.29e: 분리 모듈 위임
+    save_exit_state(system_state)
     save_counter_state(system_state)
 
 
 def restore_strategy_state(system_state: dict):
     """system_state → 모듈 글로벌 (부팅 시 호출)."""
-    global _zombie_cooldown, _open_dir_cd, _bad_regime_active
-    _zombie_cooldown = system_state.get("_zombie_cooldown", {"buy": 0.0, "sell": 0.0})
+    global _open_dir_cd, _bad_regime_active
     _open_dir_cd = system_state.get("_open_dir_cd", {"buy": 0.0, "sell": 0.0})
     _bad_regime_active = system_state.get("_bad_regime_active", False)
-    # ★ V10.29e: counter 상태 위임
+    # ★ V10.29e: 분리 모듈 위임
+    restore_exit_state(system_state)
     restore_counter_state(system_state)
-    print(f"[RESTORE] strategy state: zombie_cd={_zombie_cooldown}, "
-          f"bad_regime={_bad_regime_active}")
+    print(f"[RESTORE] strategy state: bad_regime={_bad_regime_active}")
     try:
         from v9.logging.logger_csv import log_system
         log_system("RESTORE", f"strategy bad_regime={_bad_regime_active}")

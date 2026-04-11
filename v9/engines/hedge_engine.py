@@ -1,313 +1,322 @@
 """
-[DEPRECATED — NOT USED]
-V9 Hedge Engine  (v9.1 — 무한 헷지)
-이 파일은 v9.6에서 hedge 전략 제거로 인해 더 이상 import되지 않음.
-참조 보존 목적으로 유지.
-=====================================
-
-작동 원리 (무한 사이클):
-  1) T4 진입 즉시 → planners.plan_hedge() 가 HEDGE intent 생성
-     - 반대방향 기존 포지션 → mark_only (플래그)
-     - 반대방향 비어있으면 → 유니버스 1순위 신규 오픈
-  2) 이 엔진이 매 틱 수행하는 작업:
-     A) 익절 감시: 헷지 포지션 roi ≥ +2.5%
-        → 소스 CLOSE + 헷지 CLOSE (동시)
-     B) Stage 2 격상: 헷지 포지션 자체가 T4 물림
-        → hedge_stage=2, 목표 2.4x
-     C) top-up DCA: 목표 배수 미달 시 기존 헷지 포지션 증량
-     D) 전환: 목표 달성 + roi≥1% → HEDGE_TO_NORMAL
-
-설계 원칙:
-  - 소스 + 헷지는 항상 쌍 (source_sym 으로 연결)
-  - 익절 시 반드시 양쪽 동시 청산 (orphan 방지)
-  - CorrGuard 면제: get_active_hedge_sources() 제공
-  - DCA: 헷지 포지션도 일반 DCA 타겟 적용 (dca_engine에서 처리)
+★ V10.29e: plan_force_close — HARD_SL / ZOMBIE / T3방어 / DD_SHUTDOWN.
+planners.py에서 분리. hedge_engine.py(데드파일) 재활용.
 """
+import time
 import uuid
-from typing import List, Dict, Set
+from typing import List, Dict
 
 from v9.types import Intent, IntentType, MarketSnapshot
-from v9.execution.position_book import iter_positions, is_active
-from v9.config import (
-    DCA_WEIGHTS,
-    LEVERAGE,
-    HEDGE_STAGE1_MULTIPLIER,
-    HEDGE_STAGE2_MULTIPLIER,
-    HEDGE_MAX_MULTIPLIER,
-    HEDGE_PROFIT_CLOSE_PCT,
-    HEDGE_OPEN_CORR_MIN,
-)
+from v9.execution.position_book import iter_positions, get_p
+from v9.risk.slot_manager import count_slots
 from v9.utils.utils_math import calc_roi_pct
+from v9.config import (
+    LEVERAGE, MAX_LONG, MAX_SHORT,
+    SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
+    get_sl_entry,
+)
+
+
+# ═════════════════════════════════════════════════════════════════
+# ZOMBIE 상수 + 모듈 상태
+# ═════════════════════════════════════════════════════════════════
+ZOMBIE_ROI_THRESH   = -5.0
+ZOMBIE_COOLDOWN_SEC = 8 * 3600
+ZOMBIE_BATCH_TP_ROI = {1: 4.0, 2: 2.0}
+ZOMBIE_TIME_CUT_SEC = 12 * 3600
+_zombie_cooldown = {"buy": 0.0, "sell": 0.0}
 
 
 def _tid() -> str:
     return str(uuid.uuid4())[:8]
 
 
-def _get_hedge_stage(p: dict) -> int:
-    """포지션의 hedge_stage (기본 1)."""
-    return int(p.get("hedge_stage", 1) or 1)
-
-
-def _target_multiplier(stage: int) -> float:
-    """stage별 목표 배수."""
-    if stage >= 2:
-        return HEDGE_STAGE2_MULTIPLIER   # 2.4x
-    return HEDGE_STAGE1_MULTIPLIER       # 1.4x
+def _zombie_exit(p: dict, roi_pct: float, now: float,
+                 bad_regime_active: bool = False,
+                 atr_pct: float = 0.0, snapshot=None) -> tuple:
+    """V10.17 ZOMBIE — BAD 레짐 + 슬롯풀 + T2+ + ROI≤-5%."""
+    _role = p.get("role", "")
+    if _role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
+        return False, ""
+    dca_level = int(p.get("dca_level", 1) or 1)
+    if dca_level < 2:
+        return False, ""
+    if not bad_regime_active:
+        return False, ""
+    if roi_pct > ZOMBIE_ROI_THRESH:
+        return False, ""
+    _side = p.get("side", "buy")
+    if now < _zombie_cooldown.get(_side, 0.0):
+        return False, ""
+    return True, f"ZOMBIE_T{dca_level}_roi{roi_pct:.1f}%"
 
 
 # ═════════════════════════════════════════════════════════════════
-# 메인 함수
+# plan_force_close
 # ═════════════════════════════════════════════════════════════════
-def generate_hedge_intents(
+def plan_force_close(
     snapshot: MarketSnapshot,
     st: Dict,
+    system_state: Dict,
+    bad_regime_active: bool = False,
 ) -> List[Intent]:
-    """
-    매 틱 호출.  소스-헷지 그룹별로 A/B/C/D 처리.
-    """
     intents: List[Intent] = []
-    prices   = getattr(snapshot, "all_prices", {}) or {}
-    corr_map = getattr(snapshot, "correlations", {}) or {}
+    shutdown_active = system_state.get("shutdown_active", False)
+    now = time.time()
+    _closing_set: set = set()
 
-    # ── 소스별 헷지 포지션 그룹핑 ────────────────────────────────
-    #   source_map[source_sym] = {
-    #     "hpos":      [{"sym","p","px","amt"}, ...],
-    #     "h_exp":     float (헷지 exposure 합산),
-    #     "h_side":    str,
-    #     "max_stage": int,
-    #     "s_not":     float (소스 notional),
-    #     "s_p":       dict  (소스 포지션),
-    #     "s_px":      float,
-    #     "s_amt":     float,
-    #   }
-    source_map: Dict[str, dict] = {}
-
-    for sym, sym_st in (st or {}).items():
-        if not (isinstance(sym_st, dict) and is_active(sym_st)):
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
             continue
-        for _, p in iter_positions(sym_st):
-         p = p or {}
-
-        if p.get("hedge_mode"):
-            # ── 헷지 포지션 ──
-            src = p.get("source_sym", "")
-            if not src:
+        for pos_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
                 continue
-            if src not in source_map:
-                source_map[src] = {
-                    "hpos": [], "h_exp": 0.0,
-                    "h_side": p.get("side", "sell"),
-                    "max_stage": 1,
-                }
-            px  = float(prices.get(sym, 0.0) or 0.0)
-            amt = float(p.get("amt", 0.0) or 0.0)
-            source_map[src]["h_exp"] += amt * px
-            source_map[src]["hpos"].append(
-                {"sym": sym, "p": p, "px": px, "amt": amt}
-            )
-            stg = _get_hedge_stage(p)
-            if stg > source_map[src]["max_stage"]:
-                source_map[src]["max_stage"] = stg
+            p["side"] = pos_side
+            symbol = sym
 
-        else:
-            # ── 소스 포지션 ──
-            if sym not in source_map:
-                source_map[sym] = {
-                    "hpos": [], "h_exp": 0.0,
-                    "h_side": "sell" if p.get("side") == "buy" else "buy",
-                    "max_stage": 1,
-                }
-            px  = float(prices.get(sym, 0.0) or 0.0)
-            amt = float(p.get("amt", 0.0) or 0.0)
-            source_map[sym]["s_not"] = amt * px
-            source_map[sym]["s_p"]   = p
-            source_map[sym]["s_px"]  = px
-            source_map[sym]["s_amt"] = amt
-
-    # ── 소스별 A/B/C/D 처리 ──────────────────────────────────────
-    for source_sym, info in source_map.items():
-        s_not    = info.get("s_not", 0.0)
-        h_exp    = info.get("h_exp", 0.0)
-        hpos     = info.get("hpos", [])
-        h_side   = info.get("h_side", "sell")
-        s_p      = info.get("s_p", {})
-        s_px     = info.get("s_px", 0.0)
-        s_amt    = info.get("s_amt", 0.0)
-        max_stg  = info.get("max_stage", 1)
-
-        # 소스가 없거나 헷지가 없으면 스킵
-        if s_not <= 0 or not hpos:
-            continue
-
-        # ────────────────────────────────────────────────────────
-        # A) 익절 감시:  헷지 roi ≥ HEDGE_PROFIT_CLOSE_PCT
-        #    → 소스 CLOSE + 헷지 CLOSE (동시)
-        # ────────────────────────────────────────────────────────
-        profit_triggered = False
-        for hp_info in hpos:
-            hsym = hp_info["sym"]
-            hp   = hp_info["p"]
-            hpx  = hp_info["px"]
-            if hpx <= 0:
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+            if curr_p <= 0:
                 continue
 
-            h_roi = calc_roi_pct(
-                hp.get("ep", 0.0), hpx,
-                hp.get("side", "sell"), LEVERAGE,
-            )
+            is_long = p.get("side", "") == "buy"
+            roi_pct = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
-            if h_roi >= HEDGE_PROFIT_CLOSE_PCT:
-                profit_triggered = True
+            force  = False
+            reason = ""
 
-                # 헷지 CLOSE
+            # 잔량 정리
+            _res_amt = float(p.get("amt", 0.0) or 0.0)
+            _res_notional = _res_amt * curr_p
+            _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+            if 0 < _res_notional < 20.0 or (0 < _res_amt < _res_min_qty * 2):
+                force  = True
+                reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
+
+            # DD_SHUTDOWN
+            if shutdown_active:
+                _dd_role = p.get("role", "")
+                _dd_step = int(p.get("step", 0) or 0)
+                if _dd_role in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
+                    pass
+                elif _dd_step >= 1:
+                    pass
+                else:
+                    force  = True
+                    reason = "DD_SHUTDOWN_FORCE_CLOSE"
+
+            # HEDGE/SOFT_HEDGE → hedge_engine_v2 위임
+            elif p.get("role") in ("HEDGE", "SOFT_HEDGE"):
+                if (symbol, p.get("side", "")) in _closing_set:
+                    continue
+                from v9.engines.hedge_engine_v2 import plan_hedge_exit
+                _h_force, _h_reason, _h_extra = plan_hedge_exit(
+                    symbol, p, curr_p, roi_pct, st, snapshot, _closing_set
+                )
+                intents.extend(_h_extra)
+                if _h_force:
+                    force  = True
+                    reason = _h_reason
+
+            # INSURANCE_SH — BTC 반전 기반 청산
+            elif p.get("role") == "INSURANCE_SH":
+                _ins_time = float(p.get("time", now) or now)
+                _ins_age = now - _ins_time
+
+                from v9.config import (INSURANCE_TP_ROI, INSURANCE_CUT_ROI,
+                                       INSURANCE_MAX_HOLD_SEC)
+
+                btc_pool_ins = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
+                btc_1m_ins = btc_pool_ins.get("1m", [])
+                _btc_reversed = False
+                if len(btc_1m_ins) >= 2:
+                    _btc_now_ins = float(btc_1m_ins[-1][4])
+                    _btc_entry = float(p.get("hedge_entry_price", 0) or _btc_now_ins)
+                    _ins_side = p.get("side", "")
+                    if _ins_side == "sell" and _btc_now_ins > _btc_entry * 1.003:
+                        _btc_reversed = True
+                    elif _ins_side == "buy" and _btc_now_ins < _btc_entry * 0.997:
+                        _btc_reversed = True
+
+                if _ins_age >= 180 and _btc_reversed and roi_pct < 0:
+                    force = True
+                    reason = f"INSURANCE_SH_REVERSED({_ins_age:.0f}s,roi={roi_pct:+.1f}%)"
+                elif roi_pct >= INSURANCE_TP_ROI:
+                    p["step"] = 1
+                    p["tp1_done"] = True
+                    p["trailing_on_time"] = now
+                    p["max_roi_seen"] = max(float(p.get("max_roi_seen", 0) or 0), roi_pct)
+                    print(f"[INSURANCE_SH] {symbol} roi={roi_pct:+.1f}% → trailing")
+                    continue
+                elif _ins_age >= 600 and roi_pct < INSURANCE_CUT_ROI:
+                    force = True
+                    reason = f"INSURANCE_SH_TIMECUT(10m,roi={roi_pct:+.1f}%)"
+                elif _ins_age >= 600 and roi_pct > 0:
+                    p["step"] = 1
+                    p["tp1_done"] = True
+                    p["trailing_on_time"] = now
+                    p["max_roi_seen"] = max(float(p.get("max_roi_seen", 0) or 0), roi_pct)
+                    print(f"[INSURANCE_SH] {symbol} 10m roi={roi_pct:+.1f}% → trailing")
+                    continue
+                elif _ins_age >= INSURANCE_MAX_HOLD_SEC:
+                    force = True
+                    reason = f"INSURANCE_SH_MAXTIME(20m,roi={roi_pct:+.1f}%)"
+
+            # BC/CB — 자체 SL/TP 사용
+            elif p.get("role") in ("BC", "CB"):
+                pass
+
+            else:
+                # ── HARD_SL (CORE 포지션 전용) ────────────────────────
+                _dca_lv_sl = int(p.get("dca_level", 1) or 1)
+
+                from v9.config import HARD_SL_BY_TIER
+
+                _T4_ENTRY   = -8.0
+                _T4_HARD_SL = -12.0
+
+                if _dca_lv_sl >= 3:
+                    _sl_ep = get_sl_entry(p, _dca_lv_sl)
+                    _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE) if _sl_ep > 0 else 0
+
+                    _t4_active = p.get("t4_defense", False)
+
+                    if not _t4_active and _sl_roi <= _T4_ENTRY:
+                        p["t4_defense"] = True
+                        p["t4_worst_roi"] = _sl_roi
+                        p["t4_defense_ts"] = now
+                        _t4_active = True
+                        _gap = 13.0 + _sl_roi
+                        _tp = 2.0 * _sl_roi + 13.0
+                        _dbg = f"[T3_DEF] ⚡ {symbol} {p.get('side','')} 방어모드 진입 roi={_sl_roi:.1f}% tp={_tp:.1f}%(갭{_gap:.0f})"
+                        print(_dbg)
+                        system_state.setdefault("_counter_tg", []).append(_dbg)
+
+                    if _t4_active:
+                        _t4_worst = float(p.get("t4_worst_roi", _sl_roi) or _sl_roi)
+                        if _sl_roi < _t4_worst:
+                            p["t4_worst_roi"] = _sl_roi
+                            _t4_worst = _sl_roi
+
+                        _t4_tp = 2.0 * _t4_worst + 13.0
+                        _t4_gap = 13.0 + _t4_worst
+
+                        if _sl_roi >= _t4_tp:
+                            force = True
+                            reason = f"T3_DEF_TP(worst={_t4_worst:.1f}%,tp={_t4_tp:.1f}%,gap={_t4_gap:.0f},roi={_sl_roi:.1f}%)"
+                            _dbg = f"[T3_DEF] ✅ {symbol} 반등 탈출 roi={_sl_roi:.1f}% worst={_t4_worst:.1f}% gap={_t4_gap:.0f}"
+                            print(_dbg)
+                            system_state.setdefault("_counter_tg", []).append(_dbg)
+
+                        elif _sl_roi <= _T4_HARD_SL:
+                            force = True
+                            reason = f"T3_DEF_SL(worst={_t4_worst:.1f}%,roi={_sl_roi:.1f}%)"
+
+                # ── 기존 HARD_SL ──
+                _t4_skip = (_dca_lv_sl >= 3 and p.get("t4_defense", False) and not force)
+                if not force and not _t4_skip:
+                    _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
+                    _sl_ep = get_sl_entry(p, _dca_lv_sl)
+
+                    if _sl_ep > 0:
+                        _sl_roi = calc_roi_pct(_sl_ep, curr_p, p.get("side", ""), LEVERAGE)
+                        if _sl_roi <= _sl_thresh:
+                            force  = True
+                            reason = f"HARD_SL_T{_dca_lv_sl}({_sl_thresh}%,roi={_sl_roi:.1f}%)"
+                            _hsl = system_state.setdefault("_hard_sl_history", [])
+                            _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
+
+                # ZOMBIE
+                if not force:
+                    _z_side = p.get("side", "buy")
+                    _z_dca = int(p.get("dca_level", 1) or 1)
+                    _z_slots = count_slots(st)
+                    _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
+                    if _z_full and _z_dca < 3:
+                        _zf, _zr = _zombie_exit(p, roi_pct, now,
+                                                bad_regime_active=bad_regime_active,
+                                                snapshot=snapshot)
+                        if _zf:
+                            force  = True
+                            reason = _zr
+                            _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
+
+                # TIMECUT
+                if not force:
+                    _tc_dca = int(p.get("dca_level", 1) or 1)
+                    _tc_hold = now - float(p.get("time", now) or now)
+                    if (_tc_dca == 2
+                            and _tc_hold >= ZOMBIE_TIME_CUT_SEC
+                            and roi_pct < 0
+                            and p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE")):
+                        force = True
+                        reason = f"ZOMBIE_TIMECUT_{_tc_hold/3600:.1f}h_T{_tc_dca}(roi={roi_pct:.1f}%)"
+
+            if force:
                 intents.append(Intent(
                     trace_id=_tid(),
-                    intent_type=IntentType.CLOSE,
-                    symbol=hsym,
-                    side="sell" if hp.get("side") == "buy" else "buy",
-                    qty=float(hp.get("amt", 0.0)),
-                    price=hpx,
-                    reason=f"HEDGE_PROFIT_{h_roi:.1f}pct_CLOSE_HEDGE",
-                    metadata={
-                        "source_sym": source_sym,
-                        "hedge_profit_close": True,
-                    },
+                    intent_type=IntentType.FORCE_CLOSE,
+                    symbol=symbol,
+                    side="sell" if is_long else "buy",
+                    qty=float(p.get("amt", 0.0)),
+                    price=curr_p,
+                    reason=reason,
+                    metadata={"roi_pct": roi_pct, "_expected_role": p.get("role", "")},
                 ))
-                # 소스 CLOSE
-                if s_px > 0 and s_amt > 0:
-                    intents.append(Intent(
-                        trace_id=_tid(),
-                        intent_type=IntentType.CLOSE,
-                        symbol=source_sym,
-                        side="sell" if s_p.get("side") == "buy" else "buy",
-                        qty=s_amt,
-                        price=s_px,
-                        reason=f"HEDGE_PROFIT_{h_roi:.1f}pct_CLOSE_SOURCE",
-                        metadata={
-                            "triggered_by": hsym,
-                            "hedge_profit_close": True,
-                        },
-                    ))
-                break  # 이 소스 그룹 처리 완료
-
-        if profit_triggered:
-            # 같은 소스의 다른 헷지 포지션은 orphan으로 정리됨
-            continue
-
-        # ────────────────────────────────────────────────────────
-        # B) Stage 2 격상:  헷지 포지션 dca_level ≥ 4 + stage < 2
-        # ────────────────────────────────────────────────────────
-        for hp_info in hpos:
-            hp = hp_info["p"]
-            hp_dca   = int(hp.get("dca_level", 1) or 1)
-            hp_stage = _get_hedge_stage(hp)
-
-            if hp_dca >= 4 and hp_stage < 2:
-                # ★ in-place 직접 수정 (qty=0 Intent 대신)
-                hp["hedge_stage"] = 2
-                print(f"[HedgeEngine] Stage2 격상: {hp_info['sym']}")
-                if max_stg < 2:
-                    max_stg = 2
-
-        # ────────────────────────────────────────────────────────
-        # 목표 배수 계산
-        # ────────────────────────────────────────────────────────
-        target_mult = _target_multiplier(max_stg)
-        want = s_not * target_mult
-
-        # ────────────────────────────────────────────────────────
-        # D) 목표 달성 + roi ≥ 1% → HEDGE_TO_NORMAL
-        # ────────────────────────────────────────────────────────
-        if h_exp >= want:
-            for hp_info in hpos:
-                hp  = hp_info["p"]
-                hpx = hp_info["px"]
-                if hpx <= 0:
-                    continue
-                h_roi = calc_roi_pct(
-                    hp.get("ep", 0.0), hpx,
-                    hp.get("side", "sell"), LEVERAGE,
-                )
-                if h_roi >= 1.0:
-                    # ★ in-place 직접 수정 (qty=0 Intent 대신)
-                    hp["hedge_mode"]  = False
-                    hp["was_hedge"]   = True
-                    hp["source_sym"]  = ""
-                    hp["hedge_stage"] = 1
-                    hp["tp1_done"]    = False
-                    hp["step"]        = 0
-                    hp["dca_targets"] = []   # 헷지용 타겟 제거
-                    print(f"[HedgeEngine] HEDGE_TO_NORMAL: {hp_info['sym']} roi={h_roi:.2f}%")
-            continue  # 이 소스 그룹 처리 완료
-
-        # ────────────────────────────────────────────────────────
-        # C) 목표 미달 → top-up DCA
-        # ────────────────────────────────────────────────────────
-        if float(corr_map.get(source_sym, 1.0)) < HEDGE_OPEN_CORR_MIN:
-            continue
-
-        need = want - h_exp
-        if need <= 0:
-            continue
-
-        n_syms = len(hpos)
-        if n_syms <= 0:
-            continue
-
-        dca_w   = DCA_WEIGHTS
-        total_w = sum(dca_w)
-
-        for hp_info in hpos:
-            hp  = hp_info["p"]
-            hpx = hp_info["px"]
-            if hpx <= 0:
-                continue
-            cur_level  = int(hp.get("dca_level", 1) or 1)
-            next_level = min(cur_level + 1, len(dca_w))
-            # 단계별 notional 비중
-            step_notional = (s_not / n_syms) * (dca_w[next_level - 1] / total_w)
-            add_notional  = min(need / n_syms, step_notional)
-            if add_notional <= 0:
-                continue
-            add_qty = add_notional / hpx
-            if add_qty <= 0:
-                continue
-            intents.append(Intent(
-                trace_id=_tid(),
-                symbol=hp_info["sym"],
-                side=h_side,
-                intent_type=IntentType.DCA,
-                qty=add_qty,
-                price=None,
-                reason=f"HEDGE_TOPUP_T{next_level}_stg{max_stg}",
-                metadata={
-                    "hedge_mode": True,
-                    "source_sym": source_sym,
-                    "tier": next_level,
-                    "reason": "HEDGE_TOPUP",
-                },
-            ))
+                # 배치 익절
+                if "ZOMBIE" in reason and "TIMECUT" not in reason:
+                    _batch_side = p.get("side", "buy")
+                    _batch_best = None
+                    _batch_best_roi = -999.0
+                    prices_b = snapshot.all_prices or {}
+                    for _b_sym, _b_st in st.items():
+                        if not isinstance(_b_st, dict) or _b_sym == symbol:
+                            continue
+                        _b_p = get_p(_b_st, _batch_side)
+                        if not isinstance(_b_p, dict):
+                            continue
+                        if _b_p.get("step", 0) >= 1:
+                            continue
+                        if _b_p.get("role", "") in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
+                            continue
+                        _b_dca = int(_b_p.get("dca_level", 1) or 1)
+                        _b_cp = float(prices_b.get(_b_sym, 0) or 0)
+                        _b_ep = float(_b_p.get("ep", 0) or 0)
+                        if _b_cp <= 0 or _b_ep <= 0:
+                            continue
+                        _b_roi = calc_roi_pct(_b_ep, _b_cp, _batch_side, LEVERAGE)
+                        _b_thresh = ZOMBIE_BATCH_TP_ROI.get(_b_dca, 999.0)
+                        if _b_roi >= _b_thresh and _b_roi > _batch_best_roi:
+                            _batch_best = (_b_sym, _b_p, _b_roi, _b_cp)
+                            _batch_best_roi = _b_roi
+                    if _batch_best:
+                        _bs, _bp, _br, _bcp = _batch_best
+                        _b_close_side = "sell" if _batch_side == "buy" else "buy"
+                        intents.append(Intent(
+                            trace_id=_tid(),
+                            intent_type=IntentType.FORCE_CLOSE,
+                            symbol=_bs, side=_b_close_side,
+                            qty=float(_bp.get("amt", 0.0)), price=_bcp,
+                            reason=f"ZOMBIE_BATCH_TP(roi={_br:+.1f}%)",
+                            metadata={"roi_pct": _br, "_expected_role": _bp.get("role", "")},
+                        ))
+                        print(f"[ZOMBIE_BATCH] {_bs} 동반 익절 roi={_br:+.1f}%")
 
     return intents
 
 
 # ═════════════════════════════════════════════════════════════════
-# CorrGuard 면제용 유틸리티
+# 상태 영속화
 # ═════════════════════════════════════════════════════════════════
-def get_active_hedge_sources(st: Dict) -> Set[str]:
-    """
-    현재 헷지 연결이 활성화된 소스 심볼 집합을 반환.
-    CorrGuard에서 이 심볼들을 면제하기 위해 사용.
-    """
-    sources: Set[str] = set()
-    for sym, sym_st in (st or {}).items():
-        if not (isinstance(sym_st, dict) and is_active(sym_st)):
-            continue
-        for _, p in iter_positions(sym_st):
-         p = p or {}
-        if p.get("hedge_mode"):
-            src = p.get("source_sym", "")
-            if src:
-                sources.add(src)
-    return sources
+def save_exit_state(system_state: dict):
+    system_state["_zombie_cooldown"] = _zombie_cooldown
+
+
+def restore_exit_state(system_state: dict):
+    global _zombie_cooldown
+    _zombie_cooldown = system_state.get("_zombie_cooldown", {"buy": 0.0, "sell": 0.0})
+    print(f"[RESTORE] exit_engine: zombie_cd={_zombie_cooldown}")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("RESTORE", f"exit_engine zombie_cd_buy={_zombie_cooldown['buy']:.0f}")
+    except Exception:
+        pass
