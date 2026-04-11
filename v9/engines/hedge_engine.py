@@ -171,7 +171,7 @@ def plan_force_close(
 
                 from v9.config import HARD_SL_BY_TIER
 
-                _T4_ENTRY   = -8.0
+                _T4_ENTRY   = -7.0    # ★ V10.29e: -7% 터치 → TP -1% (공식: 2×-7+13=-1)
                 _T4_HARD_SL = -12.0
 
                 if _dca_lv_sl >= 3:

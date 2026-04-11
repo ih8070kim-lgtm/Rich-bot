@@ -183,6 +183,18 @@ def apply_order_results(
                 p["dca_targets"]   = [
                     t for t in p.get("dca_targets", []) if t.get("tier") != tier
                 ]
+                # ★ V10.29e FIX: DCA 시 stale TP1/trim 상태 클리어
+                # T1 TP1 limit이 남아있으면 T2/T3 trim 영구 차단
+                _stale_tp1_oid = p.pop("tp1_limit_oid", None)
+                p.pop("tp1_preorder_id", None)
+                p.pop("tp1_done", None)
+                p["step"] = 0
+                p["trailing_on_time"] = None
+                p["max_roi_seen"] = 0.0
+                p["worst_roi"] = 0.0
+                if _stale_tp1_oid:
+                    _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _stale_tp1_oid})
+                    print(f"[DCA_FIX] {sym} stale tp1_limit_oid={_stale_tp1_oid} 취소큐 추가")
                 if tier == 5:
                     p["t5_entry_price"] = avg_px
                     p["max_dca_reached"] = True

@@ -1012,7 +1012,7 @@ def plan_open(
 
             if _tr_opp_slots >= MAX_MR_PER_SIDE:
                 print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
-            elif True:  # 스캔 진입
+            else:
                 _tr_best_sym = None
                 _tr_best_score = 0
                 _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
@@ -1771,7 +1771,7 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             trail_reason       = "TRAILING_STOP"
 
             # ★ V10.27: FIXED gap trail 0.3→0.5 (noise 위킹 방지)
-            FIXED_TRAIL_GAP = 0.5
+            FIXED_TRAIL_GAP = 0.3  # ★ V10.29e: 0.5→0.3 (트레일 밀착)
             _stop = max_roi - FIXED_TRAIL_GAP
             if roi_pct <= _stop:
                 trailing_triggered = True
