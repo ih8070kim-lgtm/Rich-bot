@@ -32,12 +32,44 @@ def _tid() -> str:
     return str(uuid.uuid4())[:8]
 
 
+def _check_hedge_sim_exit(sym: str, pos_side: str, exit_price: float,
+                          system_state: dict, roi_pct: float = 0.0):
+    """★ V10.29e: 동일심볼 헷지 시뮬레이션 — MR 청산 시 시뮬 PnL 비교."""
+    if not system_state:
+        return
+    _hsim = system_state.get("_hedge_sim", {})
+    _key = f"{sym}:{pos_side}"
+    _sim = _hsim.pop(_key, None)
+    if not _sim:
+        return
+    _sim_ep = _sim["ep"]
+    _sim_side = _sim["side"]
+    from v9.config import LEVERAGE
+    if _sim_side == "buy":
+        _sim_roi = (exit_price - _sim_ep) / _sim_ep * LEVERAGE * 100
+    else:
+        _sim_roi = (_sim_ep - exit_price) / _sim_ep * LEVERAGE * 100
+    _hold_h = (time.time() - _sim.get("ts", time.time())) / 3600
+    _tr_sym = _sim.get("trend_sym", "?")
+    _tr_side = _sim.get("trend_side", "?")
+    print(f"[HEDGE_SIM_EXIT] 📊 {sym} sim_{_sim_side} ep={_sim_ep:.4f} exit={exit_price:.4f} "
+          f"sim_roi={_sim_roi:+.1f}% mr_roi={roi_pct:+.1f}% hold={_hold_h:.1f}h "
+          f"(vs TREND {_tr_sym} {_tr_side})")
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("HEDGE_SIM_EXIT", f"{sym} sim={_sim_roi:+.1f}% mr={roi_pct:+.1f}% "
+                   f"vs_trend={_tr_sym} hold={_hold_h:.1f}h")
+    except Exception:
+        pass
+
+
 def apply_order_results(
     results: list[OrderResult],
     intents_map: dict,
     st: dict,
     cooldowns: dict,
     snapshot: MarketSnapshot,
+    system_state: dict = None,
 ) -> None:
     """주문 결과를 포지션 북에 반영."""
     now = time.time()
@@ -281,6 +313,9 @@ def apply_order_results(
                                 _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _oid})
                     except Exception: pass
                     cooldowns[sym] = now + 900
+                    # ★ V10.29e: 헷지 시뮬 종료 체크
+                    _check_hedge_sim_exit(sym, pos_side, avg_px, system_state,
+                                         roi_pct=meta.get("roi_gross", 0.0))
                     clear_position(st, sym, pos_side)
                     _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
                     continue
@@ -419,6 +454,9 @@ def apply_order_results(
                     print(f"[PENDING_CANCEL_Q] {sym} {pos_side} pending {_dca_cancel_count}건 취소 대기")
             except Exception as _pc_e:
                 print(f"[PENDING_CANCEL_Q] {sym} 스캔 실패(무시): {_pc_e}")
+            # ★ V10.29e: 헷지 시뮬 종료 체크
+            _check_hedge_sim_exit(sym, pos_side, avg_px, system_state,
+                                 roi_pct=float(meta.get("roi_pct", 0.0) or 0.0))
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 

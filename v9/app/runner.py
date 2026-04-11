@@ -2123,7 +2123,7 @@ async def _main_loop(ex_init, dry_run: bool):
                 if _close_intents:
                     _cr = await execute_intents(ex, _close_intents, dry_run=dry_run, st=st)
                     _cm = {i.trace_id: i for i in _close_intents}
-                    apply_order_results(_cr, _cm, st, cooldowns, snapshot)
+                    apply_order_results(_cr, _cm, st, cooldowns, snapshot, system_state=system_state)
                     _save_all(st, cooldowns, system_state)
                     print(f"[V9] 텔레그램 전체 청산: {len(_close_intents)}건 ({_close_mode})")
                     continue
@@ -2200,7 +2200,7 @@ async def _main_loop(ex_init, dry_run: bool):
                     ex, _recovered_close_intents, dry_run=dry_run, st=st
                 )
                 _rc_map = {i.trace_id: i for i in _recovered_close_intents}
-                apply_order_results(_rc_results, _rc_map, st, cooldowns, snapshot)
+                apply_order_results(_rc_results, _rc_map, st, cooldowns, snapshot, system_state=system_state)
                 _save_all(st, cooldowns, system_state)
 
             # ── Intent 생성 ──────────────────────────────────────
@@ -2285,7 +2285,7 @@ async def _main_loop(ex_init, dry_run: bool):
                             _pre_pos_snaps[(_s, _side)] = _snap
                             _pre_pos_snaps[_s] = _snap  # 레거시 호환
 
-            apply_order_results(results, intents_map, st, cooldowns, snapshot)
+            apply_order_results(results, intents_map, st, cooldowns, snapshot, system_state=system_state)
 
             # ── v10.15b: 바이낸스 sync 매틱 복원 ──────────────────
             # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)

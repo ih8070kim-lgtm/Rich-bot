@@ -405,6 +405,10 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # 레거시 호환: _build_dca_targets 사이징용으로만 사용
 DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ V10.29b: 블렌디드 EP 기준 (바이낸스 ROI 그대로)
 
+def _wider_regime(a: str, b: str) -> str:
+    """호환용 stub — DCA 거리 통일로 항상 LOW."""
+    return "LOW"
+
 def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
@@ -1079,6 +1083,20 @@ def plan_open(
                             "regime": _btc_regime,
                             "ts": time.time(),
                         }
+                        # ★ V10.29e: 동일심볼 헷지 시뮬레이션 — TREND_COMP와 비교용
+                        _hsim = system_state.setdefault("_hedge_sim", {})
+                        _hsim_opp = "buy" if trigger_side == "sell" else "sell"
+                        _hsim[f"{symbol}:{trigger_side}"] = {
+                            "ep": curr_p, "side": _hsim_opp,
+                            "ts": time.time(), "mr_side": trigger_side,
+                            "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
+                            "trend_ep": _tr_cp,
+                        }
+                        print(f"[HEDGE_SIM] 📊 {symbol} {_hsim_opp} ep={curr_p:.4f} "
+                              f"(vs TREND {_tr_best_sym} {_tr_opp_side} ep={_tr_cp:.4f})")
+                        try:
+                            log_system("HEDGE_SIM", f"{symbol} {_hsim_opp} ep={curr_p:.4f} vs {_tr_best_sym} {_tr_opp_side}")
+                        except Exception: pass
                         print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
                               f"← sig {symbol} {_trend_signal_side} (PENDING→MR fill)")
                         try:
