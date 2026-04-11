@@ -35,8 +35,8 @@ FEE_RATE  = 0.0002   # ★ v10.9: 바이낸스 VIP0 maker 0.02%
 # Kill-Switch
 # ═══════════════════════════════════════════════════════════════════
 KILLSWITCH_FREEZE_ALL_MR = 0.9   # MR≥0.9 → 동결 (청산 계열만 허용)
-KILLSWITCH_BLOCK_ALL_MR  = 0.8   # MR≥0.8 → OPEN/DCA 금지
-KILLSWITCH_BLOCK_NEW_MR  = 0.7   # MR≥0.7 → OPEN 금지
+KILLSWITCH_BLOCK_ALL_MR  = 0.85  # ★ V10.29d: 0.8→0.85 OPEN/DCA 금지
+KILLSWITCH_BLOCK_NEW_MR  = 0.80  # ★ V10.29d: 0.7→0.80 OPEN 금지 (T3 다수 보유 시 여유 확보)
 
 # ═══════════════════════════════════════════════════════════════════
 # HARD_SL
