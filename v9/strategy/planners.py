@@ -1010,7 +1010,9 @@ def plan_open(
             _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
             _tr_entered = {i.symbol for i in intents}
 
-            if _tr_opp_slots < MAX_MR_PER_SIDE:
+            if _tr_opp_slots >= MAX_MR_PER_SIDE:
+                print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
+            elif True:  # 스캔 진입
                 _tr_best_sym = None
                 _tr_best_score = 0
                 _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
@@ -1083,6 +1085,17 @@ def plan_open(
                             from v9.logging.logger_csv import log_system
                             log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol} PENDING")
                         except Exception: pass
+                else:
+                    print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 후보없음(score미달/보유중/corr)")
+        elif TREND_ENABLED:
+            # ★ V10.29e: TREND 시그널 미감지 사유 로그
+            _ts_reasons = []
+            if not _trend_signal_long and not _trend_signal_short:
+                if not _mr_vs_ok: _ts_reasons.append("VS")
+                if not _mr_mtf_ok: _ts_reasons.append("MTF")
+                if not long_trig and not short_trig: _ts_reasons.append("ATR")
+                if not micro_long_ok and not micro_short_ok: _ts_reasons.append("MICRO")
+            print(f"[TREND_SKIP] {symbol} {trigger_side} → 시그널없음({','.join(_ts_reasons) or 'N/A'})")
 
     return intents
 
