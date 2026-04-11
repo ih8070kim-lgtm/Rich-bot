@@ -24,7 +24,7 @@ from v9.execution.position_book import (
     get_pending_entry, set_pending_entry,
 )
 from v9.engines.hedge_core import (
-    calc_skew, plan_hedge_core_entry, plan_hedge_core_manage, is_hedge_dca_blocked,
+    calc_skew, is_hedge_dca_blocked,
 )
 
 
@@ -405,11 +405,6 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # 레거시 호환: _build_dca_targets 사이징용으로만 사용
 DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ V10.29b: 블렌디드 EP 기준 (바이낸스 ROI 그대로)
 
-# ★ V10.29d: REGIME_HARD_SL 제거 (미사용 데드코드)
-# ★ V10.29d: _wider_regime — DCA 거리 통일로 무의미, 호환용 stub 유지
-def _wider_regime(a: str, b: str) -> str:
-    return "LOW"  # 모든 레짐 동일 거리 → 항상 LOW
-
 def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
@@ -616,13 +611,6 @@ def plan_open(
             if _fb_side=="buy": _core_long+=1
             else: _core_short+=1
 
-    _slhc_count = 0
-
-    # ════════════════════════════════════════════════════════════
-    # [2순위] FORCE_BALANCE — ★ v10.12: 비활성화
-    # 11건 $+1.38 (10승 +$12, 1패 -$11) — 실질 제로
-    # CORE_HEDGE만으로 스큐 관리 충분, 이상한 타이밍 진입 방지
-    # ════════════════════════════════════════════════════════════
 
     # ── 일반 OPEN 루프 ────────────────────────────────────────────
     # ★ v10.15: MR 슬롯은 CORE_MR만 카운트 (HEDGE는 별도 관리)
@@ -1850,15 +1838,13 @@ def generate_all_intents(
     system_state: Dict,
 ) -> List[Intent]:
     """
-    ★ V10.26 실행 순서:
-      1. plan_force_close       → HARD_SL / ZOMBIE / INSURANCE_TIMECUT
-      2. plan_pair_cut          → ★ 스큐 페어 컷 (heavy 최악 + light 최선)
-      3. plan_hedge_core_manage → CORE_HEDGE 소스 연동
-      4. plan_tp1               → TP1 Skew-Aware 부분익절
-      5. plan_trail_on          → 트레일링 스탑
-      6. plan_dca               → DCA 4단 진입
-      7. plan_insurance_sh      → DCA 차단 보험
-      8. plan_open              → MR 신규 진입 + HEDGE_CORE + BALANCE
+    ★ V10.29e 실행 순서:
+      1. plan_force_close       → HARD_SL / ZOMBIE / TIMECUT
+      2. plan_tp1               → TP1 Skew-Aware 부분익절
+      3. plan_trail_on          → 트레일링 스탑
+      4. plan_dca               → DCA 4단 진입
+      5. plan_counter           → BB Squeeze 브레이크아웃
+      6. plan_open              → MR 신규 진입
     """
     import time as _time
     _snap_ts = _time.time()
@@ -1877,15 +1863,7 @@ def generate_all_intents(
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
-    # ★ V10.26: 페어 컷 (force_close 직후, tp1 전)
-    # ★ V10.29b: PAIR_CUT 비활성화 — 스윙 DCA 구조와 충돌
-    # _pc_intents = plan_pair_cut(snapshot, st, system_state)
-    # intents += _pc_intents
-    # _fc_syms.update(i.symbol for i in _pc_intents)
-    _pc_intents = []
 
-    # ★ V10.29b: CORE_HEDGE 제거 — plan_hedge_core_manage 비활성화
-    # intents += plan_hedge_core_manage(snapshot, st)
     intents += plan_tp1(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_trail_on(snapshot, st)
     intents += plan_dca(snapshot, st, cooldowns, system_state)
