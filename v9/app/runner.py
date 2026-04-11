@@ -2043,6 +2043,19 @@ async def _main_loop(ex_init, dry_run: bool):
                 _leverage_set = True
                 print(f"[V9 Runner] 레버리지 {LEVERAGE}x 세팅 완료 ({_lev_ok}/{len(_MU)} 심볼)")
 
+                # ★ V10.29e: BC/CB 심볼은 x1로 재설정 (일괄 x3 덮어쓰기 복원)
+                _bc_cb_map = (system_state or {}).get("_bc_cb_role_map", {})
+                _bc_cb_syms = set()
+                for _k, _v in _bc_cb_map.items():
+                    if _v in ("BC", "CB"):
+                        _bc_cb_syms.add(_k.split(":")[0])
+                for _bcsym in _bc_cb_syms:
+                    try:
+                        await asyncio.to_thread(ex.set_leverage, 1, _bcsym)
+                        print(f"[V9 Runner] ★ {_bcsym} 레버리지 x1 복원 (BC/CB)")
+                    except Exception as _e:
+                        print(f"[V9 Runner] {_bcsym} x1 복원 실패: {_e}")
+
             # ── 시작 후 3분 워밍업 ───────────────────────────────
             if now - start_ts < 180:
                 await asyncio.sleep(1)
