@@ -610,7 +610,7 @@ def plan_open(
     for _fb_s, _fb_ss in st.items():
         for _fb_side, _fb_pp in iter_positions(_fb_ss):
             if not isinstance(_fb_pp, dict): continue
-            if _fb_pp.get("role") in ("HEDGE","SOFT_HEDGE","INSURANCE_SH","CORE_HEDGE"): continue
+            if _fb_pp.get("role") in ("HEDGE","SOFT_HEDGE","INSURANCE_SH","CORE_HEDGE","BC","CB"): continue
             if _fb_pp.get("step",0)>=1: continue
             if _fb_side=="buy": _core_long+=1
             else: _core_short+=1
@@ -932,6 +932,9 @@ def plan_open(
             # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → 최고 score 1개만 진입
             if _trend_signal_side:
                 _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
+                # ★ 방향 쿨다운 체크 (이전 NOSLOT/MR 연타 방지)
+                if now_ts < _open_dir_cd.get(_tr_opp_side, 0.0):
+                    continue
                 _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
                 if _tr_opp_slots < MAX_MR_PER_SIDE:
                     _tr_best_sym = None
@@ -1197,6 +1200,8 @@ def plan_open(
                 ))
                 print(f"[TREND_NOSLOT] ⚡ {_ns['sym']} {_ns['side']} score={_ns['score']:.1f} "
                       f"← {_ns['sig_sym']} (최고score 발사)")
+                # ★ V10.29e: MR과 동일 방향 쿨다운 — 같은 시그널 연타 방지
+                _open_dir_cd[_ns["side"]] = time.time() + OPEN_DIR_COOLDOWN_SEC
                 try:
                     from v9.logging.logger_csv import log_system
                     log_system("TREND_NOSLOT", f"{_ns['sym']} {_ns['side']} score={_ns['score']:.1f} FIRE")
