@@ -1,0 +1,63 @@
+# OPEN — 신규 진입 (MR)
+
+## 진입 조건 (AND)
+```
+1. 5m RSI ≤ OS(과매도) 또는 ≥ OB(과매수)  — ATR 연동 동적 임계값
+2. 5m ATR boost 트리거 (가격 ≥ EMA10 ± ATR×배수)
+3. micro RSI 확인 (15m RSI 일치 방향)
+4. VS (Volume Surge) ≥ 1.0 — 최근 5봉/30봉 거래량 비율
+5. 상관계수 ≥ OPEN_CORR_MIN (0.60)
+6. Falling Knife 아님 (최근 3봉 누적 -2% 이상이면 차단)
+7. 방향별 쿨다운 10분 (_open_dir_cd)
+8. 심볼별 open_fail_cooldown 통과
+```
+
+## 포지션 사이징
+```
+grid_notional = equity / GRID_DIVISOR(8) × LEVERAGE(3)
+T1_notional = grid_notional × DCA_WEIGHTS[0] / sum(DCA_WEIGHTS)
+            = grid_notional × 25/100 = 25%
+qty = T1_notional / price
+```
+예: equity=$3,500 → grid=$1,312 → T1=$328 → ETH@$2300 → 0.142개
+
+## Entry Type
+```
+MR        — EMA10 기반 평균회귀
+15mE30    — EMA30 기반 (MR 미충족 시 보조, MAX_E30_SLOTS=2)
+TREND     — TREND_COMP 시그널 기반 (MR 슬롯 여유 시)
+TREND_NOSLOT — MR 슬롯 풀 시 즉시 발사
+COUNTER   — BB Squeeze 브레이크아웃 (dca_engine.py)
+```
+
+## TREND_COMP vs TREND_NOSLOT
+```
+MR 슬롯 여유 있음:
+  MR 시그널 → _pending_trend_comp 저장 → MR fill 후 발사 → TREND_COMP
+
+MR 슬롯 풀:
+  MR 시그널 → 전체 심볼 score 스캔 → 최고 1개 즉시 발사 → TREND_NOSLOT
+  쿨다운: _open_dir_cd 10분 (연타 방지)
+  제한: 틱당 1개 (상대평가 1위만)
+```
+
+### TREND score 계산
+```
+score = EMA이격(ATR단위) × 거래량서지(5봉/30봉) × (1 + |RSI극단|)
+양수 = 상승추세, 음수 = 하락추세
+자격기준: |score| > 0.5 (후보 풀 진입)
+선택기준: 상대평가 1위
+```
+
+## 주문 방식
+```
+MR/E30/COUNTER → limit (OPEN_WAIT_NEXT_BAR=False면 market)
+TREND          → market (즉시 체결)
+BC/CB          → market
+```
+
+## 수정 시 체크
+- [ ] _core_long/_core_short 카운팅에 새 role 제외 추가했는지
+- [ ] can_long/can_short 조건에 영향 없는지
+- [ ] _open_dir_cd 쿨다운 적용했는지
+- [ ] TREND_NOSLOT에서 intents.append 사용했는지 (pending 아님)

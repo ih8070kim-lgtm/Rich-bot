@@ -18,7 +18,9 @@ import subprocess
 import sys
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+KST = timezone(timedelta(hours=9))
 from pathlib import Path
 from typing import Optional
 
@@ -115,7 +117,7 @@ DOWNLOAD_BLOCKED_FILENAMES = {
     "api.env", "deploy_api.env",
 }
 
-ALLOWED_DEPLOY_SUFFIXES = {".py", ".zip"}
+ALLOWED_DEPLOY_SUFFIXES = {".py", ".zip", ".md"}
 ALLOWED_DOWNLOAD_SUFFIXES = {".py", ".log", ".json", ".txt", ".md", ".csv", ".env"}
 
 # =========================================================
@@ -123,7 +125,7 @@ ALLOWED_DOWNLOAD_SUFFIXES = {".py", ".log", ".json", ".txt", ".md", ".csv", ".en
 # =========================================================
 
 def now_str() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 def log(msg: str) -> None:
     print(f"[{now_str()}] {msg}", flush=True)
@@ -229,9 +231,9 @@ def btn(text: str, data: str) -> dict:
 def main_menu_buttons() -> list:
     return [
         [btn("📊 상태", "status"), btn("🔄 재시작", "restart")],
-        [btn("📋 로그 200줄", "log_200"), btn("📋 로그 500줄", "log_500")],
-        [btn("🚨 에러 로그", "log_err"), btn("📂 로그 파일 목록", "log_list")],
-        [btn("📁 파일 받기", "get_menu"), btn("💾 백업 목록", "backup_list")],
+        [btn("📋 로그 200", "log_200"), btn("📋 로그 500", "log_500"), btn("🖥 시스템", "log_sys")],
+        [btn("🚨 에러만", "log_err"), btn("📂 로그목록", "log_list")],
+        [btn("📁 파일받기", "get_menu"), btn("💾 백업", "backup_list")],
     ]
 
 
@@ -280,21 +282,21 @@ def save_offset(offset: int):
 
 def move_file(src: Path, dst_dir: Path) -> Path:
     dst_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     dst = dst_dir / f"{ts}__{src.name}"
     shutil.move(str(src), str(dst))
     return dst
 
 
 def create_backup_root() -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     root = DEPLOY_BACKUP_ROOT / ts
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def create_report(report: dict) -> Path:
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     path = DEPLOY_REPORT_DIR / f"deploy_report_{ts}.json"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -426,7 +428,7 @@ def git_sync_target_file(target: Path, original_filename: str) -> tuple:
         return False, f"git add 오류: {e}"
 
     # 3) commit
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
     commit_msg = f"deploybot: {original_filename} {ts}"
     try:
         r = subprocess.run(
@@ -713,7 +715,7 @@ def build_log_extract(line_count: int = 200, error_only: bool = False) -> tuple:
         if not files:
             return False, "로그 파일 없음 (v9_logs 비어있음)", None
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     mode = "errors" if error_only else f"tail{line_count}"
     out_path = TG_TMP_DIR / f"log_{mode}_{ts}.txt"
     TG_TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -765,6 +767,32 @@ def build_log_extract(line_count: int = 200, error_only: bool = False) -> tuple:
         return False, f"로그 추출 실패: {e}", None
 
 
+def build_systemd_log(line_count: int = 500) -> tuple:
+    """★ V10.29e: systemd journal에서 trinity 로그 추출.
+    print() 출력 (TREND_NOSLOT, DCA_FIX, BC 등) 포함.
+    """
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
+    out_path = TG_TMP_DIR / f"log_sys_{ts}.txt"
+    TG_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            ["journalctl", "-u", "trinity", "--no-pager", "-n", str(line_count)],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return False, f"journalctl 실패: {r.stderr[:200]}", None
+        lines = r.stdout.strip()
+        if not lines:
+            return False, "systemd 로그 없음", None
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(f"[SYSTEMD LOG] {now_str()} | last {line_count} lines\n")
+            f.write("=" * 80 + "\n")
+            f.write(lines)
+        n = lines.count("\n") + 1
+        return True, f"systemd {n}줄 추출", out_path
+    except Exception as e:
+        return False, f"systemd 로그 추출 실패: {e}", None
+
+
 def send_single_log_file(chat_id: int, filename: str, line_count: int = 500):
     """개별 로그 파일의 tail N줄을 전송."""
     path = V9_LOG_DIR / filename
@@ -779,7 +807,7 @@ def send_single_log_file(chat_id: int, filename: str, line_count: int = 500):
         send_msg(chat_id, f"빈 파일: {filename}")
         return
 
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
     out = TG_TMP_DIR / f"{filename}_{ts}.txt"
     TG_TMP_DIR.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8", errors="ignore") as f:
@@ -807,7 +835,7 @@ def request_restart(reason: str = "deploy") -> bool:
         with open(RESTART_SIGNAL_FILE, "w", encoding="utf-8") as f:
             json.dump({
                 "reason": reason,
-                "requested_at": datetime.now().isoformat(),
+                "requested_at": datetime.now(KST).isoformat(),
                 "requested_by_pid": os.getpid(),
             }, f)
         log(f"Restart signal created: {reason}")
@@ -857,10 +885,10 @@ def deploy_zip(zip_path: Path) -> tuple:
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             py_files = [n for n in zf.namelist()
-                        if n.endswith(".py") and not n.endswith("/")]
+                        if (n.endswith(".py") or n.endswith(".md")) and not n.endswith("/")]
 
         if not py_files:
-            return False, "zip 안에 .py 파일 없음"
+            return False, "zip 안에 .py/.md 파일 없음"
 
         backup_root = create_backup_root()
         results = {"ok": [], "skip": [], "fail": []}
@@ -907,7 +935,7 @@ def deploy_zip(zip_path: Path) -> tuple:
                         rel = matches[0].relative_to(PROJECT_DIR)
                         subprocess.run(["git", "add", "--", str(rel)],
                                        cwd=str(PROJECT_DIR), capture_output=True, timeout=10)
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ts = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
                 r = subprocess.run(
                     ["git", "commit", "-m", f"deploybot: {zip_path.name} {ts}"],
                     cwd=str(PROJECT_DIR), capture_output=True, text=True, timeout=15)
@@ -941,7 +969,7 @@ def deploy_file(incoming: Path) -> tuple:
     if filename.lower() in DEPLOY_BLOCKED_FILENAMES:
         return False, f"차단 파일: {filename}"
     if incoming.suffix.lower() not in ALLOWED_DEPLOY_SUFFIXES:
-        return False, f".py만 배포 가능"
+        return False, f".py/.md만 배포 가능"
 
     # ★ v10.13: deploy lock
     if not acquire_deploy_lock():
@@ -975,7 +1003,7 @@ def deploy_file(incoming: Path) -> tuple:
             "restart_signaled": restart_ok,
             "git_sync_ok": git_ok,
             "git_message": git_msg,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(KST).isoformat(),
         })
 
         return True, (
@@ -1067,6 +1095,16 @@ def handle_callback(chat_id: int, message_id: int, cb_id: str, data: str):
         send_msg(chat_id, "완료", [[btn("⬅️ 메뉴", "menu")]])
         return
 
+    if data == "log_sys":
+        edit_msg(chat_id, message_id, "🖥 시스템 로그 추출 중...", [])
+        ok, msg, path = build_systemd_log(500)
+        if ok and path:
+            send_document(chat_id, path, caption=f"systemd ({msg})")
+        else:
+            send_msg(chat_id, f"❌ {msg}")
+        send_msg(chat_id, "완료", [[btn("⬅️ 메뉴", "menu")]])
+        return
+
     # ── 로그 파일 목록
     if data == "log_list":
         files = get_v9_log_files()
@@ -1115,7 +1153,7 @@ def handle_callback(chat_id: int, message_id: int, cb_id: str, data: str):
         send_msg(chat_id, "완료", [[btn("📁 파일", "get_menu"), btn("⬅️ 메뉴", "menu")]])
         return
 
-    # ── 백업 목록
+    # ── 백업 목록 (날짜별 버튼)
     if data == "backup_list":
         if not DEPLOY_BACKUP_ROOT.exists():
             edit_msg(chat_id, message_id, "백업 폴더 없음",
@@ -1127,10 +1165,75 @@ def handle_callback(chat_id: int, message_id: int, cb_id: str, data: str):
             edit_msg(chat_id, message_id, "백업 없음",
                      [[btn("⬅️ 메뉴", "menu")]])
             return
-        text = "💾 최근 백업:\n" + "\n".join(f"  📁 {d.name}" for d in dirs)
-        text += "\n\n채팅에 파일명 입력: 예) planners.py"
-        edit_msg(chat_id, message_id, text,
-                 [[btn("⬅️ 메뉴", "menu")]])
+        # ★ V10.29e: 날짜별 버튼 — 클릭 시 파일 목록
+        rows = []
+        for d in dirs:
+            name = d.name  # 20260412_041530
+            try:
+                dt = datetime.strptime(name, "%Y%m%d_%H%M%S")
+                label = dt.strftime("%m/%d %H:%M")
+            except ValueError:
+                label = name[:11]
+            n_files = sum(1 for _ in d.rglob("*.py")) + sum(1 for _ in d.rglob("*.md"))
+            rows.append([btn(f"📁 {label} ({n_files}건)", f"bk_detail:{name}")])
+        rows.append([btn("⬅️ 메뉴", "menu")])
+        edit_msg(chat_id, message_id, "💾 최근 백업 (클릭→파일 목록→롤백)", rows)
+        return
+
+    # ── 백업 상세 (파일 목록 + 롤백 버튼)
+    if data.startswith("bk_detail:"):
+        bk_name = data.split(":", 1)[1]
+        bk_dir = DEPLOY_BACKUP_ROOT / bk_name
+        if not bk_dir.exists():
+            send_msg(chat_id, f"백업 폴더 없음: {bk_name}", [[btn("⬅️ 메뉴", "menu")]])
+            return
+        files = sorted(bk_dir.rglob("*"))
+        files = [f for f in files if f.is_file() and f.suffix in (".py", ".md")]
+        if not files:
+            send_msg(chat_id, f"파일 없음: {bk_name}", [[btn("⬅️ 백업목록", "backup_list")]])
+            return
+        rows = []
+        for f in files[:15]:
+            rel = f.relative_to(bk_dir)
+            rows.append([btn(f"🔄 {rel}", f"bk_roll:{bk_name}:{rel}")])
+        rows.append([btn("⬅️ 백업목록", "backup_list")])
+        try:
+            dt = datetime.strptime(bk_name, "%Y%m%d_%H%M%S")
+            title = dt.strftime("%m/%d %H:%M:%S")
+        except ValueError:
+            title = bk_name
+        edit_msg(chat_id, message_id, f"📁 {title} 백업 파일\n클릭 → 해당 파일 롤백", rows)
+        return
+
+    # ── 롤백 실행
+    if data.startswith("bk_roll:"):
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            send_msg(chat_id, "잘못된 롤백 요청", [[btn("⬅️ 메뉴", "menu")]])
+            return
+        bk_name, rel_str = parts[1], parts[2]
+        bk_file = DEPLOY_BACKUP_ROOT / bk_name / rel_str
+        target = PROJECT_DIR / rel_str
+        if not bk_file.exists():
+            send_msg(chat_id, f"백업 파일 없음: {rel_str}", [[btn("⬅️ 메뉴", "menu")]])
+            return
+        try:
+            # 현재 파일 백업 후 롤백
+            if target.exists():
+                rb_backup = create_backup_root()
+                backup_file(target, rb_backup)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bk_file, target)
+            git_ok, git_msg = git_sync_target_file(target, target.name)
+            restart_ok = request_restart(f"rollback:{rel_str}")
+            send_msg(chat_id,
+                     f"✅ 롤백 완료\n"
+                     f"📄 {rel_str}\n"
+                     f"📁 ← {bk_name}\n"
+                     f"🔄 재시작: {'✅' if restart_ok else '❌'}",
+                     [[btn("⬅️ 백업목록", "backup_list"), btn("⬅️ 메뉴", "menu")]])
+        except Exception as e:
+            send_msg(chat_id, f"❌ 롤백 실패: {e}", [[btn("⬅️ 메뉴", "menu")]])
         return
 
     # fallback
