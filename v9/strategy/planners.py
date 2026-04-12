@@ -308,7 +308,6 @@ def _count_active_by_side(st: Dict) -> tuple:
 # 내 사이드에 T3(-3% 이하)가 있으면 반대편 출구를 제한.
 #   T1: TP ×1.5/2.0 또는 블록(-7%)
 # ★ V10.29d: T3 방어 — 블록/배수 전면 제거
-# URGENCY_DCA가 opp_t3_roi로 1슬롯 DCA→trim 사이클 판단
 # ═════════════════════════════════════════════════════════════════
 
 def _t3_defense(pos_side: str, dca_level: int, st: Dict, snapshot) -> dict:
@@ -1499,130 +1498,6 @@ def plan_dca(
                 print(f"[ML_LOG] DCA 피처 기록 오류(무시): {_ml_e}")
             break
 
-    # ═════════════════════════════════════════════════════════════
-    # ★ V10.29d: URGENCY_DCA — urgency 기반 light side T1→T2 강제 DCA
-    # urgency ≥ 12: 1슬롯 / urgency ≥ 17: 2슬롯
-    # T2 trim(+1.5%) → T1 복귀 → 반복 = 신규진입 없이 수익 추출
-    # ═════════════════════════════════════════════════════════════
-    _urg_score = _urg_dca["urgency"]
-    _urg_light_side = _urg_dca.get("light_side", "")
-
-    if _urg_score >= 17:
-        _URG_DCA_CAP = 2
-    elif _urg_score >= 12:
-        _URG_DCA_CAP = 1
-    else:
-        _URG_DCA_CAP = 0
-
-    # ★ V10.29d: light side 기존 T2+ 수 차감 → 이미 T2 있으면 추가 안 함
-    # pending DCA limit 조회 (스팸 방지 + T2 카운트 겸용)
-    try:
-        from v9.execution.order_router import get_pending_limits as _gpl_urg
-        _urg_pending_syms = {v["sym"] for v in _gpl_urg().values()
-                            if v.get("intent_type") == "DCA"}
-    except Exception:
-        _urg_pending_syms = set()
-
-    if _URG_DCA_CAP > 0 and _urg_light_side:
-        _existing_t2 = 0
-        for _ct_s, _ct_p in _pos_items(st):
-            if _ct_p.get("side") == _urg_light_side \
-               and _ct_p.get("role", "") not in _HEDGE_ROLES_SLOT \
-               and int(_ct_p.get("dca_level", 1) or 1) >= 2:
-                _existing_t2 += 1
-        # pending DCA limit도 T2 예정으로 카운트
-        _existing_t2 += len(_urg_pending_syms)
-        _URG_DCA_MAX = max(0, _URG_DCA_CAP - _existing_t2)
-    else:
-        _URG_DCA_MAX = 0
-
-    if _URG_DCA_MAX > 0 and _urg_light_side:
-        _urg_candidates = []
-        _urg_prices = snapshot.all_prices or {}
-        _urg_dca_syms = {i.symbol for i in intents if i.intent_type == IntentType.DCA}
-
-        for _us, _up in _pos_items(st):
-            if _up.get("role", "") in _HEDGE_ROLES_SLOT:
-                continue
-            _u_dca_lv = int(_up.get("dca_level", 1) or 1)
-            if _u_dca_lv != 1:
-                continue
-            if _up.get("max_dca_reached") or _up.get("pending_dca"):
-                continue
-            if _us in _urg_dca_syms or _us in _urg_pending_syms:
-                continue
-
-            _u_side = _up.get("side", "")
-            if _u_side != _urg_light_side:
-                continue  # light side만
-
-            # ★ V10.29d: 최소 5분 보유 후에만 URGENCY_DCA (신규 진입 즉시 DCA 방지)
-            _u_entry_time = float(_up.get("time", 0) or 0)
-            if time.time() - _u_entry_time < 300:
-                continue
-
-            _u_last_dca = _up.get("last_dca_time", _up.get("time", 0))
-            _u_cd = DCA_COOLDOWN_BY_TIER.get(2, DCA_COOLDOWN_SEC)
-            if time.time() - _u_last_dca < _u_cd:
-                continue
-
-            _u_cp = float(_urg_prices.get(_us, 0))
-            _u_ep = float(_up.get("ep", 0))
-            if _u_cp <= 0 or _u_ep <= 0:
-                continue
-
-            _u_roi = calc_roi_pct(_u_ep, _u_cp, _u_side, LEVERAGE)
-
-            # ★ V10.29d: ROI ≤ -1% 일 때만 DCA — trim 후 재진입 스프레드 확보
-            # trim +1.5% → T1 복귀 → 가격 -0.33% 하락 → ROI -1% → DCA → 사이클
-            if _u_roi > -1.0:
-                continue
-
-            _urg_candidates.append((_us, _up, _u_cp, _u_roi, _u_side))
-
-        # ROI 높은 순 (trim에서 가장 빨리 수익)
-        _urg_candidates.sort(key=lambda x: -x[3])
-        _urg_filled = 0
-
-        for _us, _up, _u_cp, _u_roi, _u_side in _urg_candidates:
-            if _urg_filled >= _URG_DCA_MAX:
-                break
-            _u_next_tier = 2
-            # ★ V10.29d: 노셔널 기반 — T2 목표까지 부족분만
-            from v9.config import calc_tier_notional
-            _u_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-            _u_target = calc_tier_notional(2, _u_bal)
-            _u_current = float(_up.get("amt", 0) or 0) * _u_cp
-            _u_dca_notional = _u_target - _u_current
-            if _u_dca_notional < 10:
-                _u_dca_notional = 10
-            _u_qty = _u_dca_notional / _u_cp if _u_cp > 0 else 0
-            if _u_qty <= 0:
-                continue
-
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.DCA,
-                symbol=_us,
-                side=_u_side,
-                qty=_u_qty,
-                price=_u_cp,
-                reason=f"URGENCY_DCA(urg={_urg_score:.0f},roi={_u_roi:+.1f}%)_T{_u_next_tier}",
-                metadata={
-                    "tier": _u_next_tier,
-                    "roi_now": _u_roi,
-                    "_expected_role": _up.get("role", ""),
-                    "locked_regime": _up.get("locked_regime", "LOW"),
-                },
-            ))
-            _urg_filled += 1
-            # ★ V10.29d: pending_dca 세팅 → 다음 틱에서 재발사 방지
-            _up["pending_dca"] = "URGENCY"
-            # ★ V10.29d: TP 블록 — trim 사이클 보호 (urgency 해제 시 클리어)
-            _up["urgency_tp_block"] = True
-            print(f"[URGENCY_DCA] {_us} {_u_side} T1→T2 "
-                  f"urg={_urg_score:.0f} roi={_u_roi:+.1f}% [{_urg_filled}/{_URG_DCA_MAX}] TP_BLOCKED")
-
     return intents
 
 
@@ -1655,13 +1530,6 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # ★ V10.29d: BC/CB는 자체 SL/TP — MR TP1 제외
         if p.get("role") in ("BC", "CB"):
             continue
-        # ★ V10.29d: URGENCY_DCA 슬롯 TP 블록 — trim 사이클 보호
-        # T1일 때만 블록 (T2 trim은 허용 — 수익 추출 경로)
-        if p.get("urgency_tp_block"):
-            if _urg["urgency"] >= 12 and int(p.get("dca_level", 1) or 1) <= 1:
-                continue  # T1 TP 차단 → DCA→trim 사이클 유지
-            elif _urg["urgency"] < 12:
-                p.pop("urgency_tp_block", None); p.pop("original_ep", None)  # urgency 해제 → 블록+고정EP 해제
         # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
         if p.get("tp1_preorder_id"):
             continue
@@ -1818,12 +1686,6 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             # ★ V10.29d: BC/CB는 자체 trail — MR trail 제외
             if (p or {}).get("role") in ("BC", "CB"):
                 continue
-            # ★ V10.29d: URGENCY_DCA 슬롯 trail 블록 — trim 사이클 보호
-            if (p or {}).get("urgency_tp_block"):
-                if _urg["urgency"] >= 12 and int((p or {}).get("dca_level", 1) or 1) <= 1:
-                    continue
-                elif _urg["urgency"] < 12:
-                    p.pop("urgency_tp_block", None); p.pop("original_ep", None)
             curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
             if curr_p <= 0:
                 continue
