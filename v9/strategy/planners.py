@@ -808,6 +808,15 @@ def plan_open(
         _trend_signal_long  = _mr_signal_long  and long_trig  and micro_long_ok  and _mr_vs_ok and _mr_mtf_ok
         _trend_signal_short = _mr_signal_short and short_trig and micro_short_ok and _mr_vs_ok and _mr_mtf_ok
 
+        # ★ V10.29e: TREND 시그널 방향 — MR 슬롯 블록이어도 사용
+        from v9.config import TREND_ENABLED, TREND_MIN_SCORE, TREND_COOLDOWN_SEC
+        _trend_signal_side = None
+        if TREND_ENABLED:
+            if _trend_signal_long:
+                _trend_signal_side = "buy"
+            elif _trend_signal_short:
+                _trend_signal_side = "sell"
+
         # E30: EMA10 미충족 + EMA30 충족 + 같은 RSI/micro 조건 + 슬롯 여유
         _e30_long_final  = mr_e30_long_ok  and long_trig  and micro_long_ok  and _active_e30 < MAX_E30_SLOTS
         _e30_short_final = mr_e30_short_ok and short_trig and micro_short_ok and _active_e30 < MAX_E30_SLOTS
@@ -919,6 +928,82 @@ def plan_open(
                     reason = f"HF_{_e30_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})"
 
         if trigger_side is None:
+            # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → TREND_COMP 발동
+            if _trend_signal_side:
+                _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
+                _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
+                if _tr_opp_slots < MAX_MR_PER_SIDE:
+                    _tr_best_sym = None
+                    _tr_best_score = 0
+                    _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
+                    _tr_prices = snapshot.all_prices or {}
+                    _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
+                                for _, p in iter_positions(ss)
+                                if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
+                    _tr_entered = {i.symbol for i in intents}
+                    for _tr_sym in _tr_ohlcv_pool:
+                        if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
+                            continue
+                        if _tr_sym == "BTC/USDT":
+                            continue
+                        if _trend_cooldown.get(_tr_sym, 0) > now_ts:
+                            continue
+                        _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
+                        if _tr_corr < OPEN_CORR_MIN:
+                            continue
+                        _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
+                        _tr_15m = _tr_pool.get("15m", [])
+                        if len(_tr_15m) < 35:
+                            continue
+                        _tr_cp = float(_tr_prices.get(_tr_sym, 0))
+                        if _tr_cp <= 0:
+                            continue
+                        _tr_score = _calc_trend_score(_tr_15m)
+                        _TR_MIN = 0.5
+                        if _tr_opp_side == "sell" and _tr_score < -_TR_MIN:
+                            if abs(_tr_score) > _tr_best_score:
+                                _tr_best_score = abs(_tr_score)
+                                _tr_best_sym = _tr_sym
+                        elif _tr_opp_side == "buy" and _tr_score > _TR_MIN:
+                            if _tr_score > _tr_best_score:
+                                _tr_best_score = _tr_score
+                                _tr_best_sym = _tr_sym
+                    if _tr_best_sym:
+                        _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
+                        _tr_total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+                        _tr_grid = _tr_total_cap / GRID_DIVISOR * LEVERAGE
+                        _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                        _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
+                        if _tr_qty > 0:
+                            _tr_dca_targets = _build_dca_targets(
+                                _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
+                            _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
+                            system_state["_pending_trend_comp"] = {
+                                "symbol": _tr_best_sym, "side": _tr_opp_side,
+                                "qty": _tr_qty, "price": _tr_cp,
+                                "score": _tr_best_score, "mr_symbol": symbol,
+                                "dca_targets": _tr_dca_targets,
+                                "regime": _btc_regime, "ts": time.time(),
+                            }
+                            # 헷지 시뮬
+                            _hsim = system_state.setdefault("_hedge_sim", {})
+                            _hsim_opp = "buy" if _trend_signal_side == "sell" else "sell"
+                            _hsim[f"{symbol}:{_trend_signal_side}"] = {
+                                "ep": curr_p, "side": _hsim_opp, "ts": time.time(),
+                                "mr_side": _trend_signal_side,
+                                "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
+                                "trend_ep": _tr_cp,
+                            }
+                            print(f"[TREND_NOSLOT] ⚡ {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
+                                  f"← {symbol} {_trend_signal_side} (MR슬롯블록→TREND단독)")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("TREND_NOSLOT", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}")
+                            except Exception: pass
+                    else:
+                        print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 후보없음")
+                else:
+                    print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
             continue
 
         # ★ V10.27: 방향별 글로벌 진입 쿨다운 (연타 방지)
@@ -999,15 +1084,8 @@ def plan_open(
         if entry_type_tag == "15mE30":
             _active_e30 += 1
 
-        # ★ V10.29c: TREND COMPANION — MR 시그널 감지 시 반대 방향 추세 심볼 진입
-        # MR이 슬롯 블록으로 진입 못 해도, 시그널 자체가 "추세 존재"를 의미 → TREND 발동
-        from v9.config import TREND_ENABLED, TREND_MIN_SCORE, TREND_COOLDOWN_SEC
-        _trend_signal_side = None
-        if TREND_ENABLED:
-            if _trend_signal_long:
-                _trend_signal_side = "buy"  # 롱 시그널 → 시장 하방 → TREND 숏
-            elif _trend_signal_short:
-                _trend_signal_side = "sell"  # 숏 시그널 → 시장 상방 → TREND 롱
+        # ★ V10.29e: TREND COMPANION — MR 진입 성공 시 추세 심볼 동시 진입
+        # (_trend_signal_side는 루프 상단에서 이미 계산됨)
 
         if _trend_signal_side:
             _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
@@ -1854,6 +1932,137 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
 
 
 # ★ V10.29e: plan_force_close → v9/engines/hedge_engine.py 분리 (데드파일 재활용)
+# ═════════════════════════════════════════════════════════════════
+# ★ V10.29e: Insurance SH 복원 — BTC 급변 시 피해측 반대 헷지
+# ═════════════════════════════════════════════════════════════════
+def plan_insurance_sh(
+    snapshot: MarketSnapshot,
+    st: Dict,
+    system_state: Dict,
+) -> List[Intent]:
+    """BTC 급변 직접 감지 → 피해측 최약 포지션 50% 반대 헷지."""
+    intents: List[Intent] = []
+    now = time.time()
+
+    _boot_ts = float(system_state.get("_boot_ts", 0.0) or 0.0)
+    if _boot_ts > 0 and (now - _boot_ts) < 300:
+        return intents
+
+    from v9.config import INSURANCE_COOLDOWN_SEC, INSURANCE_SIZE_RATIO, INSURANCE_MIN_AFFECTED
+    _last_ins = float(system_state.get("_insurance_last_ts", 0.0) or 0.0)
+    if now - _last_ins < INSURANCE_COOLDOWN_SEC:
+        return intents
+
+    for _s, _ss in st.items():
+        if not isinstance(_ss, dict): continue
+        for _, _pp in iter_positions(_ss):
+            if isinstance(_pp, dict) and _pp.get("role") == "INSURANCE_SH":
+                return intents
+
+    btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
+    btc_1m = btc_pool.get("1m", [])
+    if len(btc_1m) < 6:
+        return intents
+
+    now_p = float(btc_1m[-1][4])
+    if now_p <= 0:
+        return intents
+
+    from v9.config import (INSURANCE_BTC_1M_THRESH, INSURANCE_BTC_3M_THRESH,
+                           INSURANCE_BTC_5M_THRESH)
+    checks = [
+        (1, INSURANCE_BTC_1M_THRESH),
+        (3, INSURANCE_BTC_3M_THRESH),
+        (5, INSURANCE_BTC_5M_THRESH),
+    ]
+
+    event_detected = False
+    affected_side = ""
+    event_mag = 0.0
+    event_bars = 0
+
+    for bars, threshold in checks:
+        if len(btc_1m) < bars + 1: continue
+        ref_p = float(btc_1m[-(bars + 1)][4])
+        if ref_p <= 0: continue
+        ret = (now_p - ref_p) / ref_p
+        if ret <= -threshold:
+            event_detected = True
+            affected_side = "buy"
+            event_mag = abs(ret)
+            event_bars = bars
+            break
+        elif ret >= threshold:
+            event_detected = True
+            affected_side = "sell"
+            event_mag = abs(ret)
+            event_bars = bars
+            break
+
+    if not event_detected:
+        return intents
+
+    affected_positions = []
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict): continue
+        p = get_p(sym_st, affected_side)
+        if not isinstance(p, dict): continue
+        if p.get("role", "") in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"): continue
+        cp = float((snapshot.all_prices or {}).get(sym, 0.0))
+        if cp <= 0: continue
+        ep = float(p.get("ep", 0.0) or 0.0)
+        if ep <= 0: continue
+        roi = calc_roi_pct(ep, cp, affected_side, LEVERAGE)
+        affected_positions.append((sym, p, cp, roi))
+
+    if len(affected_positions) < INSURANCE_MIN_AFFECTED:
+        return intents
+
+    affected_positions.sort(key=lambda x: x[3])
+    worst_sym, worst_p, worst_cp, worst_roi = affected_positions[0]
+
+    if int(worst_p.get("step", 0) or 0) >= 1:
+        return intents
+
+    hedge_side = "sell" if affected_side == "buy" else "buy"
+    opp = get_p(st.get(worst_sym, {}), hedge_side)
+    if isinstance(opp, dict):
+        return intents
+
+    _mr_ins = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0)
+    if _mr_ins >= 0.90:
+        return intents
+
+    src_amt = float(worst_p.get("amt", 0.0))
+    qty = src_amt * INSURANCE_SIZE_RATIO
+    if qty <= 0:
+        return intents
+
+    intents.append(Intent(
+        trace_id=_tid(),
+        intent_type=IntentType.OPEN,
+        symbol=worst_sym,
+        side=hedge_side,
+        qty=qty,
+        price=worst_cp,
+        reason=f"INSURANCE_SH(BTC_{event_bars}m_{event_mag*100:.1f}%,"
+               f"src={worst_sym},roi={worst_roi:+.1f}%)",
+        metadata={
+            "atr": 0.0, "dca_targets": [],
+            "role": "INSURANCE_SH", "entry_type": "INSURANCE_SH",
+            "source_sym": worst_sym, "hedge_entry_price": now_p,
+            "insurance_timecut": 0,
+            "positionSide": "LONG" if hedge_side == "buy" else "SHORT",
+            "locked_regime": "LOW",
+        },
+    ))
+    system_state["_insurance_last_ts"] = now
+    print(f"[INSURANCE_SH] BTC {event_bars}m {event_mag*100:.1f}% → "
+          f"{worst_sym} {hedge_side} (src_roi={worst_roi:+.1f}%, "
+          f"qty={qty:.4f}, btc={now_p:.0f})")
+    return intents
+
+
 from v9.engines.hedge_engine import plan_force_close, save_exit_state, restore_exit_state
 # ═════════════════════════════════════════════════════════════════
 # 전체 Intent 생성
@@ -1899,7 +2108,7 @@ def generate_all_intents(
     intents += plan_trail_on(snapshot, st)
     intents += plan_dca(snapshot, st, cooldowns, system_state)
     intents += plan_counter(snapshot, st, system_state)  # ★ V10.29: MR ROI- 반대 사이드 진입
-    # ★ V10.29e: plan_insurance_sh 제거
+    intents += plan_insurance_sh(snapshot, st, system_state)
     intents += plan_open(snapshot, st, cooldowns, system_state)
     for _i in intents:
         if _i.metadata is None:
