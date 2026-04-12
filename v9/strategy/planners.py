@@ -641,6 +641,7 @@ def plan_open(
     # ★ V10.27e: EMA30 활성 슬롯 카운트 (step 무관 — 보유 중이면 카운트)
     from v9.config import MAX_E30_SLOTS
     _active_e30 = 0
+    _noslot_best = None  # ★ V10.29e: TREND_NOSLOT 최고 score 후보
     for _e30_sym, _e30_p in _pos_items(st):
         if _e30_p.get("entry_type") == "15mE30":
             _active_e30 += 1
@@ -928,7 +929,7 @@ def plan_open(
                     reason = f"HF_{_e30_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})"
 
         if trigger_side is None:
-            # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → TREND_COMP 발동
+            # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → 최고 score 1개만 진입
             if _trend_signal_side:
                 _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
                 _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
@@ -968,40 +969,13 @@ def plan_open(
                             if _tr_score > _tr_best_score:
                                 _tr_best_score = _tr_score
                                 _tr_best_sym = _tr_sym
-                    if _tr_best_sym:
-                        _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
-                        _tr_total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-                        _tr_grid = _tr_total_cap / GRID_DIVISOR * LEVERAGE
-                        _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
-                        _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
-                        if _tr_qty > 0:
-                            _tr_dca_targets = _build_dca_targets(
-                                _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
-                            _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
-                            system_state["_pending_trend_comp"] = {
-                                "symbol": _tr_best_sym, "side": _tr_opp_side,
-                                "qty": _tr_qty, "price": _tr_cp,
-                                "score": _tr_best_score, "mr_symbol": symbol,
-                                "dca_targets": _tr_dca_targets,
-                                "regime": _btc_regime, "ts": time.time(),
-                            }
-                            # 헷지 시뮬
-                            _hsim = system_state.setdefault("_hedge_sim", {})
-                            _hsim_opp = "buy" if _trend_signal_side == "sell" else "sell"
-                            _hsim[f"{symbol}:{_trend_signal_side}"] = {
-                                "ep": curr_p, "side": _hsim_opp, "ts": time.time(),
-                                "mr_side": _trend_signal_side,
-                                "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
-                                "trend_ep": _tr_cp,
-                            }
-                            print(f"[TREND_NOSLOT] ⚡ {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
-                                  f"← {symbol} {_trend_signal_side} (MR슬롯블록→TREND단독)")
-                            try:
-                                from v9.logging.logger_csv import log_system
-                                log_system("TREND_NOSLOT", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol}")
-                            except Exception: pass
-                    else:
-                        print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 후보없음")
+                    # ★ 글로벌 최고 score 비교 — 이전 심볼의 후보보다 높을 때만 갱신
+                    if _tr_best_sym and (_noslot_best is None or _tr_best_score > _noslot_best["score"]):
+                        _noslot_best = {
+                            "sym": _tr_best_sym, "side": _tr_opp_side,
+                            "score": _tr_best_score, "sig_sym": symbol,
+                            "sig_side": _trend_signal_side,
+                        }
                 else:
                     print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
             continue
@@ -1192,6 +1166,41 @@ def plan_open(
                 if not long_trig and not short_trig: _ts_reasons.append("ATR")
                 if not micro_long_ok and not micro_short_ok: _ts_reasons.append("MICRO")
             print(f"[TREND_SKIP] {symbol} {trigger_side} → 시그널없음({','.join(_ts_reasons) or 'N/A'})")
+
+    # ★ V10.29e: TREND_NOSLOT — 루프 종료 후 최고 score 1개만 발사
+    if _noslot_best:
+        _ns = _noslot_best
+        _ns_prices = snapshot.all_prices or {}
+        _ns_cp = float(_ns_prices.get(_ns["sym"], 0))
+        if _ns_cp > 0:
+            _ns_total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+            _ns_grid = _ns_total_cap / GRID_DIVISOR * LEVERAGE
+            _ns_notional = _ns_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+            _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
+            if _ns_qty > 0:
+                _ns_dca = _build_dca_targets(_ns_cp, _ns["side"], _ns_grid, regime=_btc_regime)
+                _trend_cooldown[_ns["sym"]] = time.time() + TREND_COOLDOWN_SEC
+                intents.append(Intent(
+                    trace_id=_tid(),
+                    intent_type=IntentType.OPEN,
+                    symbol=_ns["sym"],
+                    side=_ns["side"],
+                    qty=_ns_qty,
+                    price=None,
+                    reason=f"TREND_NOSLOT(sig={_ns['sig_sym']},score={_ns['score']:.1f})",
+                    metadata={
+                        "atr": 0.0, "dca_targets": _ns_dca,
+                        "role": "CORE_MR", "entry_type": "TREND",
+                        "positionSide": "LONG" if _ns["side"] == "buy" else "SHORT",
+                        "locked_regime": _btc_regime,
+                    },
+                ))
+                print(f"[TREND_NOSLOT] ⚡ {_ns['sym']} {_ns['side']} score={_ns['score']:.1f} "
+                      f"← {_ns['sig_sym']} (최고score 발사)")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("TREND_NOSLOT", f"{_ns['sym']} {_ns['side']} score={_ns['score']:.1f} FIRE")
+                except Exception: pass
 
     return intents
 

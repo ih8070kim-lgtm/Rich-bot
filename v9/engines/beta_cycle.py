@@ -186,6 +186,20 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                 arm_tf = "1d"
 
         if arm_triggered:
+            # ★ V10.29e: 볼륨 확인 — 스파이크에 거래량 동반 필수
+            _vol_ok = False
+            if sym in _hourly_volumes and len(_hourly_volumes[sym]) >= 48:
+                _vols = list(_hourly_volumes[sym])
+                _v_recent = sum(_vols[-6:]) / 6 if len(_vols) >= 6 else 0
+                _v_avg = sum(_vols[-168:]) / min(168, len(_vols))  # 7일 평균
+                _vol_ratio = _v_recent / _v_avg if _v_avg > 0 else 0
+                _vol_ok = _vol_ratio >= 1.5  # 최근 6h 볼륨 ≥ 1.5배
+            else:
+                _vol_ok = True  # 데이터 부족 시 패스
+
+            if not _vol_ok:
+                continue  # 볼륨 없는 스파이크 → 무시
+
             if sym not in _armed:
                 _armed[sym] = {
                     "ts": time.time(),
@@ -194,12 +208,16 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                     "beta": arm_beta,
                     "tf": arm_tf,
                 }
-                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β={arm_beta:.2f} tf={arm_tf}")
+                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β↑={arm_beta:.2f} tf={arm_tf}")
             else:
                 if arm_excess > _armed[sym]["peak_excess"]:
                     _armed[sym]["peak_excess"] = arm_excess
                 if cur_p > _armed[sym]["peak_price"]:
                     _armed[sym]["peak_price"] = cur_p
+                # ★ V10.29e: 1d가 나중에 트리거되면 tf 승격 + 만료 연장
+                if arm_tf == "1d" and _armed[sym].get("tf") == "1h":
+                    _armed[sym]["tf"] = "1d"
+                    _armed[sym]["ts"] = time.time()
 
         # ── SHORT 진입 (OR: 어느 쪽이든 0 ≤ excess ≤ NORM) ──
         norm_triggered = False
@@ -207,6 +225,18 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
             norm_triggered = True
         if excess_d is not None and 0 <= excess_d <= CFG.BC_NORM_THRESH:
             norm_triggered = True
+
+        # ★ V10.29e: excess 완전 되돌림(≤0) → ARMED 해제 (기회 소멸)
+        if sym in _armed:
+            _all_exhausted = True
+            if excess_1h is not None and excess_1h > 0:
+                _all_exhausted = False
+            if excess_d is not None and excess_d > 0:
+                _all_exhausted = False
+            if _all_exhausted and (excess_1h is not None or excess_d is not None):
+                print(f"[BC] ❌ DISARM {sym} excess 완전 되돌림 (1h={excess_1h}, 1d={excess_d})")
+                _armed.pop(sym, None)
+                continue
 
         if sym in _armed and norm_triggered:
             arm = _armed[sym]
@@ -261,13 +291,14 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
             held_short_syms.add(sym)
 
             print(f"[BC] 📉 SHORT {sym} peak={arm['peak_excess']:+.1%} {_ex_1h_str} {_ex_d_str} "
-                  f"pb={pullback:.1%} β={arm.get('beta',0):.2f} "
+                  f"pb={pullback:.1%} β↑={arm.get('beta',0):.2f} "
                   f"qty={qty:.4f} ${notional:.0f} [{_daily_entry_count}/{CFG.BC_ENTRY_PER_DAY}]")
 
-        # ARMED 만료
+        # ARMED 만료 — ★ V10.29e: 1h/1d 별도 만료
         if sym in _armed:
             age_h = (time.time() - _armed[sym]["ts"]) / 3600
-            expiry_h = getattr(CFG, 'BC_ARMED_EXPIRY_H', 720)
+            _tf = _armed[sym].get("tf", "1h")
+            expiry_h = 48 if _tf == "1h" else 168  # 1h→2일, 1d→7일
             if age_h > expiry_h:
                 _armed.pop(sym, None)
 
@@ -332,6 +363,12 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
                 reason = "BC_TRAIL"
         elif hold_hours >= CFG.BC_MAX_HOLD_HOURS:
             reason = "BC_TIMEOUT"
+
+        # ★ V10.29e: excess 재상승 → thesis 실패 손절
+        if not reason:
+            _er = _calc_excess_1h(sym)
+            if _er and _er[0] >= CFG.BC_ARM_THRESH:
+                reason = f"BC_REHEAT(ex={_er[0]:+.1%})"
 
         if reason:
             amt = float(p.get("amt", 0) or 0)
@@ -623,10 +660,16 @@ def _calc_excess_1h(sym) -> Optional[Tuple[float, float]]:
         n = min(len(alt_lr), len(btc_lr))
         if n < 20:
             return None
-        var_b = np.var(btc_lr[-n:])
+        # ★ V10.29e: 상방 베타 — BTC 상승 봉만 사용 (하락 반등 숏 방지)
+        _up_mask = btc_lr[-n:] > 0
+        if np.sum(_up_mask) < 10:
+            return None
+        _alt_up = alt_lr[-n:][_up_mask]
+        _btc_up = btc_lr[-n:][_up_mask]
+        var_b = np.var(_btc_up)
         if var_b < 1e-15:
             return None
-        beta = float(np.cov(alt_lr[-n:], btc_lr[-n:])[0][1] / var_b)
+        beta = float(np.cov(_alt_up, _btc_up)[0][1] / var_b)
     except Exception:
         return None
 
@@ -661,10 +704,16 @@ def _calc_excess_daily(sym) -> Optional[Tuple[float, float]]:
         n = min(len(alt_lr), len(btc_lr))
         if n < 10:
             return None
-        var_b = np.var(btc_lr[-n:])
+        # ★ V10.29e: 상방 베타 — BTC 상승 봉만 사용
+        _up_mask = btc_lr[-n:] > 0
+        if np.sum(_up_mask) < 5:
+            return None
+        _alt_up = alt_lr[-n:][_up_mask]
+        _btc_up = btc_lr[-n:][_up_mask]
+        var_b = np.var(_btc_up)
         if var_b < 1e-15:
             return None
-        beta = float(np.cov(alt_lr[-n:], btc_lr[-n:])[0][1] / var_b)
+        beta = float(np.cov(_alt_up, _btc_up)[0][1] / var_b)
     except Exception:
         return None
 
