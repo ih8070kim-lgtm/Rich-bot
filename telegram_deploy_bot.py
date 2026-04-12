@@ -776,7 +776,7 @@ def build_systemd_log(line_count: int = 500) -> tuple:
     TG_TMP_DIR.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            ["journalctl", "-u", "trinity", "--no-pager", "-n", str(line_count)],
+            ["journalctl", "-u", "rich-bot", "--no-pager", "-n", str(line_count)],
             capture_output=True, text=True, timeout=15)
         if r.returncode != 0:
             return False, f"journalctl 실패: {r.stderr[:200]}", None
