@@ -77,7 +77,7 @@ except Exception as _cb_err:
 _last_sync_ts = 0.0
 _SYNC_INTERVAL = 30  # 초
 
-async def _sync_positions_with_exchange(ex, st, snapshot=None):
+async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None):
     """바이낸스 실제 포지션과 포지션북 비교, 불일치 시 바이낸스 기준 반영.
     ★ v10.14: snapshot 파라미터 추가 (dca_level 역추정 정확도 개선)
     """
@@ -709,10 +709,8 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
     """
     from v9.config import LEVERAGE, TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
     from v9.utils.utils_math import calc_roi_pct
-    from v9.strategy.planners import _t3_defense, _calc_urgency
 
     prices = snapshot.all_prices or {}
-    _urg = _calc_urgency(st, snapshot)  # ★ V10.27f
 
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
@@ -751,22 +749,10 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             # ★ V10.29b: 최소 슬롯 유지 제거
             p.pop("min_slot_hold", None)
 
-            # ★ V10.29b: T3 방어 블록 체크
-            _def = _t3_defense(pos_side, dca_level, st, snapshot)
-            if _def["blocked"]:
-                if p.get("tp1_preorder_id"):
-                    await _cancel_tp1_preorder(ex, p, sym)
-                continue
-
-            # TP1 target 계산
-            # ★ V10.27b: T1~T2 고정값, T3~T4 worst_roi 탈출
-            _worst = 0.0
-            # ★ V10.29: TP1 threshold — 공유 함수 사용
+            # ★ V10.29e: TP1 threshold — 고정값 (urgency/defense 제거)
             from v9.config import calc_tp1_thresh
             _worst = float(p.get("worst_roi", 0.0) or 0.0)
-            _is_heavy_tp = (_urg["heavy_side"] == pos_side)
-            # ★ V10.29b: T3 방어 배수 적용
-            tp1_thresh = calc_tp1_thresh(dca_level, _worst, _urg["urgency"], _is_heavy_tp) * _def["tp_mult"]
+            tp1_thresh = calc_tp1_thresh(dca_level, _worst)
 
             # ROI → price 변환
             if is_long:
@@ -1051,7 +1037,7 @@ async def _manage_pending_limits(ex, st, snapshot):
         if status.startswith("_"):
             # 타임아웃 체크 — 등록 후 5분 경과
             # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim"):
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre"):
                 cancel_list.append((oid, info))
             continue
 
@@ -1075,21 +1061,59 @@ async def _manage_pending_limits(ex, st, snapshot):
                   f"{filled_qty}@{avg_price:.4f}")
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
+                # ★ V10.29e: 바이낸스 realizedPnl 추출 (limit fill)
+                _rpnl = 0.0
+                _rcomm = 0.0
+                try:
+                    _ftrades = fetch_result.get("trades") or []
+                    if _ftrades:
+                        for _ft in _ftrades:
+                            _fi = _ft.get("info", {}) if isinstance(_ft, dict) else {}
+                            _rpnl += float(_fi.get("realizedPnl", 0) or 0)
+                            _rcomm += float(_fi.get("commission", 0) or 0)
+                    else:
+                        _fi = fetch_result.get("info", {})
+                        _rpnl = float(_fi.get("realizedPnl", 0) or 0)
+                        _rcomm = float(_fi.get("commission", 0) or 0)
+                    if _rcomm == 0:
+                        _ffee = fetch_result.get("fee") or {}
+                        if isinstance(_ffee, dict):
+                            _rcomm = float(_ffee.get("cost", 0) or 0)
+                except Exception:
+                    pass
+
                 if info.get("is_trim"):
                     _pl_type = "TRIM_FILL"
-                    # ★ V10.29d: TRIM ROI/PnL 계산
-                    _trim_ep = float(info.get("entry_price", 0) or 0)
-                    _trim_side = info["side"]  # trim side (close 방향)
-                    if _trim_ep > 0 and avg_price > 0:
-                        _raw = (avg_price - _trim_ep) / _trim_ep if _trim_side == "sell" else (_trim_ep - avg_price) / _trim_ep
-                        _fee = (avg_price + _trim_ep) / _trim_ep * FEE_RATE
-                        _trim_roi = (_raw - _fee) * LEVERAGE * 100
-                        _trim_pnl = (_raw - _fee) * avg_price * filled_qty
+                    if _rpnl != 0.0:
+                        _trim_pnl = _rpnl
+                        _trim_roi = _rpnl / (avg_price * filled_qty / LEVERAGE) * 100 if filled_qty > 0 and avg_price > 0 else 0.0
                     else:
-                        _trim_roi = _trim_pnl = 0.0
+                        _trim_ep = float(info.get("entry_price", 0) or 0)
+                        _trim_side = info["side"]
+                        if _trim_ep > 0 and avg_price > 0:
+                            _raw = (avg_price - _trim_ep) / _trim_ep if _trim_side == "sell" else (_trim_ep - avg_price) / _trim_ep
+                            _fee = (avg_price + _trim_ep) / _trim_ep * FEE_RATE
+                            _trim_roi = (_raw - _fee) * LEVERAGE * 100
+                            _trim_pnl = (_raw - _fee) * avg_price * filled_qty
+                        else:
+                            _trim_roi = _trim_pnl = 0.0
                 elif info["intent_type"] == "TP1":
                     _pl_type = "TP1_LIMIT"
-                    _trim_roi = _trim_pnl = 0.0
+                    if _rpnl != 0.0:
+                        _trim_pnl = _rpnl
+                        _trim_roi = _rpnl / (avg_price * filled_qty / LEVERAGE) * 100 if filled_qty > 0 and avg_price > 0 else 0.0
+                    else:
+                        # ★ V10.29e: position book에서 EP 조회
+                        _tp1_pos_side = "sell" if info["side"] == "buy" else "buy"
+                        _tp1_p = get_p(st.get(sym, {}), _tp1_pos_side) if st else None
+                        _tp1_ep = float(_tp1_p.get("ep", 0) or 0) if isinstance(_tp1_p, dict) else 0.0
+                        if _tp1_ep > 0 and avg_price > 0:
+                            _raw = (avg_price - _tp1_ep) / _tp1_ep if info["side"] == "sell" else (_tp1_ep - avg_price) / _tp1_ep
+                            _fee = (avg_price + _tp1_ep) / _tp1_ep * FEE_RATE
+                            _trim_roi = (_raw - _fee) * LEVERAGE * 100
+                            _trim_pnl = (_raw - _fee) * avg_price * filled_qty
+                        else:
+                            _trim_roi = _trim_pnl = 0.0
                 elif info["intent_type"] == "DCA":
                     _pl_type = "PENDING_DCA"
                     _trim_roi = _trim_pnl = 0.0
@@ -1132,7 +1156,7 @@ async def _manage_pending_limits(ex, st, snapshot):
         elif status == "open":
             # 타임아웃 체크
             # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim"):
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre"):
                 cancel_list.append((oid, info))
 
     # ── Phase 3: 타임아웃 취소 (병렬) ──
@@ -1350,14 +1374,36 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 pass
 
         p["pending_dca"] = None
+        # ★ V10.29e: DCA 선주문 정리 (체결된 tier 제거)
+        _dca_pre = p.get("dca_preorders", {})
+        _removed_dca = _dca_pre.pop(tier, None)
+        if _removed_dca and _removed_dca.get("oid"):
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _removed_dca["oid"]})
+        # EP 변경으로 기존 DCA 선주문 무효 → 전부 취소 (다음 틱에 재배치)
+        for _dt, _di in list(_dca_pre.items()):
+            if _di.get("oid"):
+                from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _di["oid"]})
+        p["dca_preorders"] = {}
         # ★ v10.15: DCA 체결 → insurance trigger 클리어
         p["insurance_sh_trigger"] = None
+        # ★ V10.30 FIX: strategy_core DCA 경로와 동일하게 전체 클리어
+        _stale_tp1_oid = p.pop("tp1_limit_oid", None)
         p["tp1_preorder_id"] = None
         p["tp1_preorder_price"] = None
-        # ★ V10.26: DCA 새 출발 — worst_roi/max_roi 0 리셋
+        p["tp1_done"] = False
+        p["step"] = 0
+        p["trailing_on_time"] = None
         p["worst_roi"] = 0.0
         p["max_roi_seen"] = 0.0
+        if _stale_tp1_oid:
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _stale_tp1_oid})
+            print(f"[DCA_FIX] {sym} stale tp1_limit_oid={_stale_tp1_oid} 취소큐 추가")
         p["t4_defense"] = False  # ★ V10.29b: DCA 시 방어모드 리셋
+        p["trim_trail_active"] = False  # ★ V10.30: DCA 시 trim trail 리셋
+        p["trim_trail_max"] = 0.0
         p["t4_worst_roi"] = 0.0
         p["last_dca_qty"] = filled_qty
         p.setdefault("dca_qty_by_tier", {})
@@ -1481,6 +1527,12 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             _trp.pop(_old_tier, None)
             if _target_tier <= 1:
                 p["trim_preorders"] = {}
+            # ★ V10.29e: trim 후 DCA 선주문 전부 취소 → 다음 틱 재배치
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE as _TCQ2
+            for _dpt3, _dpi3 in list(p.get("dca_preorders", {}).items()):
+                if _dpi3.get("oid"):
+                    _TCQ2.append({"sym": sym, "oid": _dpi3["oid"]})
+            p["dca_preorders"] = {}
 
         elif p["amt"] <= 0:
             # 전량 체결 → 포지션 클리어
@@ -1524,6 +1576,143 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                   f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                   f"→ trailing(잔량={p['amt']:.1f})")
 
+
+
+# ═════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════
+async def _place_dca_preorders(ex, st, snapshot):
+    """★ V10.30: DCA 선주문 — 스마트 활성화/비활성화.
+    
+    흐름:
+    1. ROI ≤ -0.8% (activation) → LIMIT 배치 @-1.8%
+    2. ROI > -0.3% (deactivation) → LIMIT 취소 (가격 반등, 마진 회수)
+    3. ROI < -2.8% (blowthrough) → LIMIT 취소 (가격 관통, plan_dca 시장가 대응)
+    4. 체결 → maker 수수료
+    """
+    from v9.execution.position_book import iter_positions
+    from v9.execution.order_router import _PENDING_LIMITS
+    from v9.config import (SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT, LEVERAGE,
+                           DCA_WEIGHTS, GRID_DIVISOR, DCA_ENTRY_ROI_BY_TIER,
+                           calc_dca_trigger_price)
+    from v9.utils.utils_math import calc_roi_pct
+    import asyncio
+
+    bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+    prices = (snapshot.all_prices or {}) if snapshot else {}
+    if bal <= 0:
+        return
+
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for pos_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            if p.get("role", "") in ("BC", "CB", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
+                continue
+            if p.get("pending_dca") or int(p.get("step", 0) or 0) >= 1:
+                continue
+
+            dca_level = int(p.get("dca_level", 1) or 1)
+            next_tier = dca_level + 1
+            if next_tier > len(DCA_WEIGHTS):
+                continue
+
+            ep = float(p.get("ep", 0) or 0)
+            cp = float(prices.get(sym, 0) or 0)
+            if ep <= 0 or cp <= 0:
+                continue
+
+            roi = calc_roi_pct(ep, cp, pos_side, LEVERAGE)
+            dca_roi = DCA_ENTRY_ROI_BY_TIER.get(next_tier, -3.6)    # -1.8 or -3.6
+            activation_roi = dca_roi + 1.0                            # -0.8 or -2.6
+            deactivation_roi = dca_roi + 1.5                          # -0.3 or -2.1
+
+            _dca_pre = p.get("dca_preorders", {})
+            _existing = _dca_pre.get(next_tier)
+
+            # ── 이미 LIMIT 있음: 비활성화 조건 체크 ──
+            if _existing and _existing.get("oid"):
+                _oid = _existing["oid"]
+
+                # stale 체크
+                if _oid not in _PENDING_LIMITS:
+                    _dca_pre.pop(next_tier, None)
+                    continue
+
+                # 가격 반등 → 취소 (마진 회수)
+                if roi > deactivation_roi:
+                    try:
+                        await asyncio.to_thread(ex.cancel_order, _oid, sym)
+                        print(f"[DCA_PRE_CANCEL] {sym} T{next_tier}: roi={roi:.1f}%>{deactivation_roi:.1f}% 반등 취소")
+                    except Exception:
+                        pass
+                    _PENDING_LIMITS.pop(_oid, None)
+                    _dca_pre.pop(next_tier, None)
+                    continue
+
+                continue  # LIMIT 정상 대기 중
+
+            # ── LIMIT 없음: 활성화 조건 체크 ──
+            if roi > activation_roi:
+                continue  # 아직 멀음
+
+            # ── 활성화! LIMIT 배치 ──
+            limit_price = calc_dca_trigger_price(ep, pos_side, next_tier)
+            if limit_price <= 0:
+                continue
+
+            # ★ V10.30: 목표 노셔널 대비 부족분만 주문 (과주문 방지)
+            from v9.config import calc_tier_notional
+            _target_notional = calc_tier_notional(next_tier, bal)
+            _current_notional = float(p.get("amt", 0) or 0) * limit_price
+            dca_notional = _target_notional - _current_notional
+            if dca_notional <= 0:
+                print(f"[DCA_PRE_GUARD] {sym} T{next_tier} 이미 목표 도달 "
+                      f"(보유${_current_notional:.0f} ≥ 목표${_target_notional:.0f}) → skip")
+                continue
+            dca_qty = dca_notional / limit_price
+
+            min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
+            if dca_qty < min_qty or dca_qty * limit_price < 20.0:
+                continue
+
+            ps = "LONG" if pos_side == "buy" else "SHORT"
+
+            try:
+                safe_qty = float(ex.amount_to_precision(sym, dca_qty))
+                safe_price = float(ex.price_to_precision(sym, limit_price))
+                if safe_qty <= 0 or safe_price <= 0:
+                    continue
+
+                order = await asyncio.to_thread(
+                    ex.create_order,
+                    sym, "limit", pos_side, safe_qty, safe_price,
+                    params={"positionSide": ps}
+                )
+                oid = str(order.get("id", ""))
+                if oid:
+                    _PENDING_LIMITS[oid] = {
+                        "sym": sym, "side": pos_side,
+                        "qty": safe_qty, "price": safe_price,
+                        "trace_id": f"dca_pre_T{next_tier}_{sym}",
+                        "tag": f"V9_DCA_PRE_{sym}",
+                        "placed_at": __import__("time").time(),
+                        "intent_type": "DCA",
+                        "positionSide": ps,
+                        "role": p.get("role", "CORE_MR"),
+                        "tier": next_tier,
+                        "is_dca_pre": True,
+                        "_expected_role": p.get("role", ""),
+                        "locked_regime": p.get("locked_regime", "LOW"),
+                    }
+                    p.setdefault("dca_preorders", {})[next_tier] = {
+                        "oid": oid, "price": safe_price, "qty": safe_qty,
+                    }
+                    print(f"[DCA_PRE] {sym} {pos_side} T{next_tier}: "
+                          f"roi={roi:.1f}% → LIMIT @${safe_price:.4f}")
+            except Exception as e:
+                print(f"[DCA_PRE_ERR] {sym} T{next_tier}: {str(e)[:80]}")
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1818,7 +2007,16 @@ async def _main_loop(ex_init, dry_run: bool):
 
     # ★ FIX-1: 부팅 시 pending_entry + tp1_preorder_id 전부 클리어
     # 이전 세션의 limit 주문은 위에서 전부 취소했으므로, state에 남은 건 전부 유령
+    # ★ V10.30: dca_preorders도 클리어 (DCA 선주문 데드락 방지)
     _startup_clear_count = 0
+    for _s, _ss in st.items():
+        if not isinstance(_ss, dict):
+            continue
+        from v9.execution.position_book import iter_positions as _ip_boot
+        for _side, _p in _ip_boot(_ss):
+            if isinstance(_p, dict) and _p.get("dca_preorders"):
+                print(f"[STARTUP] {_s} {_side} dca_preorders 클리어: {_p['dca_preorders']}")
+                _p["dca_preorders"] = {}
     for _sc_sym, _sc_ss in st.items():
         if not isinstance(_sc_ss, dict):
             continue
@@ -2220,8 +2418,9 @@ async def _main_loop(ex_init, dry_run: bool):
                         print(f"[BC] on_daily_close 오류(무시): {_bc_e}")
 
                 # 매 틱 포지션 관리
+                # ★ V10.29e: to_thread로 감싸서 메인 루프 블로킹 방지
                 try:
-                    _bc_tick_intents = bc_on_tick(snapshot, st)
+                    _bc_tick_intents = await asyncio.to_thread(bc_on_tick, snapshot, st)
                     intents += _bc_tick_intents
                 except Exception as _bc_e2:
                     print(f"[BC] on_tick 오류(무시): {_bc_e2}")
@@ -2229,7 +2428,7 @@ async def _main_loop(ex_init, dry_run: bool):
             # ★ Crash Bounce 매 틱
             if _CB_ENABLED:
                 try:
-                    _cb_intents = cb_on_tick(snapshot, st)
+                    _cb_intents = await asyncio.to_thread(cb_on_tick, snapshot, st)
                     intents += _cb_intents
                 except Exception as _cb_e:
                     print(f"[CB] on_tick 오류(무시): {_cb_e}")
@@ -2281,7 +2480,7 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ── v10.15b: 바이낸스 sync 매틱 복원 ──────────────────
             # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)
-            await _sync_positions_with_exchange(ex, st, snapshot)
+            await _sync_positions_with_exchange(ex, st, snapshot, system_state=system_state)
 
             # ★ v10.24 Fix B: _manage_pending_limits 호출 추가
             # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
@@ -2290,8 +2489,11 @@ async def _main_loop(ex_init, dry_run: bool):
             # ★ V10.25: TP1 선주문 관리 (매 틱)
             await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
 
-            # ★ V10.28b: Trim 선주문 — DCA 체결 후 즉시 배치
-            await _place_trim_preorders(ex, st, snapshot)
+            # ★ V10.30: Trim 선주문 제거 — trail로 대체 (시장가, 동적 트리거)
+            # await _place_trim_preorders(ex, st, snapshot)
+
+            # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
+            await _place_dca_preorders(ex, st, snapshot)
 
             # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
             try:
@@ -2307,6 +2509,39 @@ async def _main_loop(ex_init, dry_run: bool):
                         except Exception as _tce:
                             print(f"[TRIM_CANCEL] {_tc_sym} oid={_tc_oid}: {_tce}")
                         remove_pending_limit(_tc_oid)
+            except Exception:
+                pass
+
+            # ★ V10.30: FC 후 거래소 잔존 주문 전수 취소 (DCA_PRE 좀비 방지)
+            try:
+                from v9.strategy.strategy_core import get_fc_exchange_cancel
+                from v9.execution.order_router import _PENDING_LIMITS
+                for _fcc in get_fc_exchange_cancel():
+                    _fc_sym = _fcc.get("sym", "")
+                    _fc_ps = _fcc.get("positionSide", "")
+                    if not _fc_sym:
+                        continue
+                    try:
+                        _open_orders = await asyncio.to_thread(
+                            ex.fetch_open_orders, _fc_sym)
+                        _fc_count = 0
+                        for _oo in (_open_orders or []):
+                            _oo_ps = (_oo.get("info", {}).get("positionSide", "")
+                                      or _oo.get("positionSide", ""))
+                            if _oo_ps == _fc_ps or not _fc_ps:
+                                _oo_id = str(_oo.get("id", ""))
+                                try:
+                                    await asyncio.to_thread(
+                                        ex.cancel_order, _oo_id, _fc_sym)
+                                    _fc_count += 1
+                                except Exception:
+                                    pass
+                                _PENDING_LIMITS.pop(_oo_id, None)
+                        if _fc_count:
+                            print(f"[FC_CANCEL] {_fc_sym} {_fc_ps} "
+                                  f"거래소 잔존 {_fc_count}건 즉시 취소")
+                    except Exception as _fce:
+                        print(f"[FC_CANCEL] {_fc_sym} fetch_open_orders 실패: {_fce}")
             except Exception:
                 pass
 
@@ -2517,6 +2752,12 @@ async def _main_loop(ex_init, dry_run: bool):
 
         # ── 루프 주기 조절 (1초) ─────────────────────────────────
         system_state['_consecutive_errors'] = 0   # 정상 완료 시 카운터 리셋
+        # ★ V10.29e: 라이브 대시보드용 상태 JSON
+        try:
+            from v9.app.status_writer import write_status
+            write_status(st, snapshot, system_state, cooldowns)
+        except Exception:
+            pass
         elapsed = time.time() - loop_start
         sleep_t = max(0.1, 1.0 - elapsed)
         await asyncio.sleep(sleep_t)

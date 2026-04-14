@@ -19,12 +19,21 @@ from v9.types import IntentType, MarketSnapshot, OrderResult
 
 # ★ V10.28b: Trim 선주문 취소 큐 (포지션 청산 시 runner가 처리)
 _TRIM_CANCEL_QUEUE = []
+# ★ V10.30: FC 시 거래소 전체 주문 취소 큐 (DCA_PRE 좀비 방지)
+_FC_EXCHANGE_CANCEL = []
 
 def get_trim_cancel_queue():
     """runner.py에서 호출 — 취소 대상 반환 후 클리어."""
     global _TRIM_CANCEL_QUEUE
     q = list(_TRIM_CANCEL_QUEUE)
     _TRIM_CANCEL_QUEUE.clear()
+    return q
+
+def get_fc_exchange_cancel():
+    """★ V10.30: FC 후 거래소 전체 주문 취소 대상 반환 후 클리어."""
+    global _FC_EXCHANGE_CANCEL
+    q = list(_FC_EXCHANGE_CANCEL)
+    _FC_EXCHANGE_CANCEL.clear()
     return q
 
 
@@ -266,6 +275,11 @@ def apply_order_results(
                 if tier == 4:
                     p["t4_entry_price"] = avg_px
                 p["pending_dca"] = None
+                # ★ V10.29e: DCA 선주문 정리 (EP 변경 → 전부 취소, 다음 틱 재배치)
+                for _dpt, _dpi in list(p.get("dca_preorders", {}).items()):
+                    if _dpi.get("oid"):
+                        _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _dpi["oid"]})
+                p["dca_preorders"] = {}
                 # ★ v10.15: DCA 체결 → insurance trigger 클리어 (정상 경로 도달)
                 p["insurance_sh_trigger"] = None
                 _cur_regime = meta.get("locked_regime", "")
@@ -282,9 +296,36 @@ def apply_order_results(
                 # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
                 p["worst_roi"] = 0.0
                 p["max_roi_seen"] = 0.0
-                # ★ V10.29d: trim_to_place는 runner._process_pending_fill에서 단독 처리
-                # (strategy_core는 limit DCA에 filled_qty=0 → 여기 도달 안함)
-                # 만약 도달하더라도 runner가 노셔널 기반으로 재세팅하므로 여기서 안 건드림
+                # ★ V10.29e FIX: market DCA도 trim_to_place 세팅
+                # limit DCA는 runner._apply_pending_fill에서 처리하지만
+                # market DCA(HIGH 레짐)는 여기 도달 → 여기서도 세팅 필요
+                if tier >= 2 and tier <= 4:
+                    from v9.config import calc_trim_price, calc_trim_qty
+                    import time as _time_mod
+                    _sc_trim_price = calc_trim_price(float(p["ep"]), pos_side, tier)
+                    _sc_trim_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                    _sc_trim_mark = float((snapshot.all_prices or {}).get(sym, 0) or 0)
+                    _sc_trim_qty = calc_trim_qty(
+                        float(p["amt"]), tier,
+                        ep=float(p["ep"]), bal=_sc_trim_bal,
+                        mark_price=_sc_trim_mark)
+                    if _sc_trim_qty <= 0:
+                        _sc_trim_qty = filled
+                    # 구 tier trim 선주문 취소
+                    for _old_t, _old_info in list(p.get("trim_preorders", {}).items()):
+                        if _old_info.get("oid"):
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _old_info["oid"]})
+                    p["trim_preorders"] = {}
+                    p["trim_to_place"] = {
+                        "tier": tier,
+                        "price": round(_sc_trim_price, 8),
+                        "qty": _sc_trim_qty,
+                        "side": "sell" if pos_side == "buy" else "buy",
+                        "entry_price": float(p["ep"]),
+                        "_ts": _time_mod.time(),
+                    }
+                    print(f"[TRIM_PREP_SC] {sym} {pos_side} T{tier}: "
+                          f"trim 준비 {_sc_trim_qty:.4f}@${_sc_trim_price:.4f} (ep={p['ep']:.4f})")
                 print(f"[DCA_RESET] {sym} {pos_side} T{tier}: "
                       f"worst_roi=0 max_roi=0 (새 ep={p['ep']:.4f})")
                 # ★ v10.10: sh_trigger 제거 — DCA_BLOCKED_INSURANCE로 대체
@@ -363,6 +404,11 @@ def apply_order_results(
                             if _ri.get("oid"):
                                 _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _ri["oid"]})
                         p["trim_preorders"] = {}
+                    # ★ V10.29e: trim 후 DCA 선주문 전부 취소 → 다음 틱 재배치
+                    for _dpt2, _dpi2 in list(p.get("dca_preorders", {}).items()):
+                        if _dpi2.get("oid"):
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _dpi2["oid"]})
+                    p["dca_preorders"] = {}
                     _log_pos(result.trace_id, sym, p, snapshot)
                     continue
                 if meta.get("is_tp2"):
@@ -373,11 +419,13 @@ def apply_order_results(
                     p["tp1_done"]         = True
                     p["tp1_price"]        = avg_px if avg_px > 0 else snapshot.all_prices.get(sym, 0.0)
                     p["trailing_on_time"] = now
-                    # ★ V10.29: TP1 후 trail 기준점을 현재 ROI로 리셋 (stale max_roi 즉사 방지)
+                    # ★ V10.29e FIX: TP1 체결 시 max_roi 보존
+                    # 기존: snapshot 시점 ROI로 덮어씀 → 가격 하락 시 max 손실
+                    # 수정: 기존 tracked max와 현재 중 큰 값 유지
                     _tp1_roi = calc_roi_pct(p.get("ep", 0.0),
                                             snapshot.all_prices.get(sym, 0.0),
                                             p.get("side", ""), LEVERAGE)
-                    p["max_roi_seen"] = _tp1_roi
+                    p["max_roi_seen"] = max(_tp1_roi, float(p.get("max_roi_seen", 0.0)))
                     _log_pos(result.trace_id, sym, p, snapshot)
 
         # ── TRAIL_ON / FORCE_CLOSE / CLOSE ──────────────────────
@@ -411,8 +459,13 @@ def apply_order_results(
                     _side = p.get("side", pos_side)
                     _cpx  = float(avg_px if avg_px > 0 else (snapshot.all_prices or {}).get(sym, _ep))
                     _roi  = calc_roi_pct(_ep, _cpx, _side, _LEV) if _ep > 0 and _cpx > 0 else 0.0
-                    _raw  = (_cpx - _ep) / _ep if _side == "buy" else (_ep - _cpx) / _ep
-                    _pnl  = _raw * _amt * _cpx
+                    # ★ V10.29e: 바이낸스 realizedPnl 우선 사용 (수수료 포함 정확한 PnL)
+                    _rpnl = getattr(result, 'realized_pnl', 0.0) or 0.0
+                    if _rpnl != 0.0:
+                        _pnl = _rpnl
+                    else:
+                        _raw = (_cpx - _ep) / _ep if _side == "buy" else (_ep - _cpx) / _ep
+                        _pnl = _raw * _amt * _cpx
                     log_trade(
                         trace_id=result.trace_id,
                         symbol=sym,
@@ -454,6 +507,10 @@ def apply_order_results(
                     print(f"[PENDING_CANCEL_Q] {sym} {pos_side} pending {_dca_cancel_count}건 취소 대기")
             except Exception as _pc_e:
                 print(f"[PENDING_CANCEL_Q] {sym} 스캔 실패(무시): {_pc_e}")
+            # ★ V10.30: 거래소 잔존 주문 전수 취소 (DCA_PRE 좀비 방지)
+            # _PENDING_LIMITS만으로는 불완전 (재시작 시 유실)
+            _ps_fc = "LONG" if pos_side == "buy" else "SHORT"
+            _FC_EXCHANGE_CANCEL.append({"sym": sym, "positionSide": _ps_fc})
             # ★ V10.29e: 헷지 시뮬 종료 체크
             _check_hedge_sim_exit(sym, pos_side, avg_px, system_state,
                                  roi_pct=float(meta.get("roi_pct", 0.0) or 0.0))

@@ -1,4 +1,4 @@
-# Trinity V10.29e — AI 제어 규칙
+# Trinity V10.30 — AI 제어 규칙
 
 ## 필수 작업 규칙
 - 함수 삭제/이동 전 `grep -rn "함수명" --include="*.py"` 실행하여 외부 참조 확인
@@ -8,6 +8,10 @@
 - DCA 처리 시 stale tp1_limit_oid/tp1_preorder_id 반드시 클리어
 - trail close는 p["amt"] 전량 — 잔량 남으면 바이낸스 유령 포지션 발생
 - pending 구조는 fill 이벤트 없으면 영원히 발사 안 됨 → 즉시 발사 필요 시 intents.append
+- **★ V10.30: .md 파일 읽고 수정 후 반드시 업데이트**
+- **★ V10.30: DCA는 단일 경로(_place_dca_preorders LIMIT만). plan_dca 호출 금지**
+- **★ V10.30: DCA 주문 전 calc_tier_notional - 현재보유 검증 필수 (과주문 방지)**
+- **★ V10.30: FC/TRAIL_ON 시 거래소 잔존 주문 즉시 취소 (_FC_EXCHANGE_CANCEL)**
 
 ## 모듈별 상세 문서 (관련 수정 시 반드시 참조)
 - 슬롯/리스크 수정 → `docs/SLOTS.md`
@@ -34,3 +38,18 @@
 | 04-12 | BC가 MR 슬롯 점유 | _core_short에 BC 미제외 | planners.py line 613 |
 | 04-12 | _wider_regime 크래시 | 함수 삭제 후 외부 import 미확인 | strategy_core.py DCA import |
 | 04-12 | TREND 3개 동시 진입 | NOSLOT 쿨다운 누락 | _open_dir_cd 적용 |
+| 04-13 | T3 market DCA trim 미배치 | strategy_core에 trim_to_place 미세팅 (HIGH 레짐 market DCA만 발생) | strategy_core.py DCA 블록 |
+| 04-13 | 죽은 코드 정리 | TP2_PCT/TP2_PARTIAL_RATIO/TRIM_PREORDER_ROI 미사용 | config.py, planners.py import |
+| 04-13 | trail max_roi 2.0 미만 발동 | TP1 체결 시 max_roi_seen을 snapshot ROI로 덮어씀 | strategy_core.py TP1 블록 |
+| 04-13 | 스큐 로직 전면 제거 | TREND 진입이 스큐 해소 담당. heavy TP인하/DCA가속/T3방어/SKEW_E30 삭제 | planners/config/runner |
+| 04-13 | 429 Rate Limit | balance 3초/ticker 2초 캐시 + OHLCV 15초 + sem6 + 429 백오프 | market_snapshot.py |
+| 04-13 | BC/CB 동기 fetch 블로킹 | bc_on_tick/cb_on_tick을 asyncio.to_thread로 감싸기 | runner.py |
+| 04-13 | DCA 선주문 도입 | T1 진입 시 T2 limit 선배치, DCA fill 시 다음 tier 배치 (maker 수수료) | runner/planners/strategy_core |
+| 04-14 | side=None crash | trigger_side=None 시 continue 누락 → ccxt crash | planners.py NOSLOT 블록 |
+| 04-14 | DCA 후 ghost trailing | runner DCA fill 시 step/tp1_done 미리셋 → 트레일+TRIM 차단 | runner.py DCA fill handler |
+| 04-14 | RESIDUAL 무한루프 | float epsilon(2.84e-14) + reduce_fail_cooldown 무시 | hedge_engine.py |
+| 04-14 | FC 후 DCA 좀비 | FC 시 거래소 LIMIT 미취소 → 빈 슬롯에 DCA 체결 | strategy_core.py + runner.py |
+| 04-14 | BC 즉사 | 1h excess 뜨거운데 1d 정규화만 보고 진입 → REHEAT 즉사 | beta_cycle.py baseline 도입 |
+| 04-14 | T2 정규 TP1 빠짐 | T2+에서 trim 미발동 시 정규 TP1 fallback → 전량 사망 | planners.py continue 추가 |
+| 04-14 | DCA 과주문 (AAVE 3배) | 목표 노셔널 검증 없이 개별 weight 기반 주문 | planners.py + runner.py 가드 |
+| 04-14 | DCA 이중 경로 | plan_dca(시장가) + DCA_PRE(LIMIT) 동시 발동 | plan_dca 제거, 단일 경로 |

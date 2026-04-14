@@ -1,64 +1,39 @@
-# DCA — 물타기 구조
+# DCA — 체크리스트
 
-## DCA Tier 구조
-```
-T1 → T2: ROI ≤ -1.8%  (DCA_ENTRY_ROI_BY_TIER)
-T2 → T3: ROI ≤ -3.6%
-T3 이후: DCA 없음 (T4 제거됨)
-```
+## 함정
+- DCA 체결 시 tp1_limit_oid / tp1_preorder_id 미클리어 → trim 영구 차단 (04-12 버그)
+- ★ V10.30: plan_dca(시장가) 제거 — _place_dca_preorders(LIMIT)로 단일화
+- ★ V10.30: DCA 주문 전 목표 노셔널 대비 부족분만 주문 (과주문 방지)
+- T4/T5 코드 잔존하나 DCA_WEIGHTS=[25,25,50] 3티어라 도달 불가 (죽은 코드, 무해)
 
-## DCA 비중 (DCA_WEIGHTS = [25, 25, 50])
+## DCA 경로 (V10.30)
 ```
-T1: 25% (스캘핑)
-T2: 25% (버퍼)
-T3: 50% (스윙)
-합계: 100% = grid_notional = equity/8 × 3
-```
-예: equity=$3,500 → grid=$1,312 → T1=$328, T2=$328, T3=$656
-
-## DCA 처리 시 필수 클리어 (strategy_core.py)
-```python
-# DCA 체결 후 반드시:
-p.pop("tp1_limit_oid", None)      # ★ stale TP1 limit 제거
-p.pop("tp1_preorder_id", None)    # stale preorder ID 제거
-p.pop("tp1_done", None)           # TP1 완료 플래그 리셋
-p["step"] = 0                     # trail step 리셋
-p["trailing_on_time"] = None      # trail 시간 리셋
-p["max_roi_seen"] = 0.0           # max ROI 리셋
-p["worst_roi"] = 0.0              # worst ROI 리셋
-# stale limit 바이낸스 취소큐 추가
-_TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": stale_oid})
+단일 경로: runner._place_dca_preorders → LIMIT 주문
+  - activation ROI 도달 시만 LIMIT 배치
+  - deactivation ROI 초과 시 LIMIT 취소 (반등)
+  - 목표 노셔널 = calc_tier_notional(tier, bal)
+  - 주문 qty = (목표 노셔널 - 현재 보유 노셔널) / price
+  - 부족분 ≤ 0 → SKIP (과주문 방지)
 ```
 
-### 버그 사례
-- **2026-04-12**: DCA 시 tp1_limit_oid 미클리어
-  → T1에서 TP1 limit 걸림 → T2/T3 DCA → stale limit이 trim 영구 차단
-  → LINK +1.4%인데 trim 안 됨
-
-## EP 계산 (블렌디드)
+## DCA 체결 시 필수 클리어 (runner._apply_pending_fill)
 ```
-total_cost = (기존_amt × 기존_ep) + (신규_amt × 체결가)
-new_ep = total_cost / new_amt
+tp1_limit_oid → pop + 취소큐
+tp1_preorder_id → None
+tp1_preorder_price → None
+tp1_done → False
+step → 0
+trailing_on_time → None
+max_roi_seen → 0.0
+worst_roi → 0.0
+trim_trail_active → False
+trim_trail_max → 0.0
 ```
-DCA_ENTRY_BASED = False → 블렌디드 EP 기준 (바이낸스 ROI = 봇 ROI)
-
-## DCA 쿨다운
-```
-DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # 전면 제거
-```
-
-## DCA 차단 조건
-- CORR_GUARD 발동 중
-- Killswitch MR ≥ 0.85
-- role이 HEDGE/SOFT_HEDGE/INSURANCE_SH/BC/CB
-- pending_dca 이미 설정됨
-
-## locked_regime
-DCA 시 regime을 기록하여 이후 DCA에서 wider regime 적용.
-`_wider_regime()` 함수 — planners.py에 존재 필수 (strategy_core.py에서 import).
 
 ## 수정 시 체크
-- [ ] tp1_limit_oid 클리어 코드 유지되는지
-- [ ] _wider_regime 함수가 planners.py에 존재하는지
+- [ ] 위 필드 클리어가 runner DCA fill 핸들러에 유지되는지
+- [ ] DCA 주문 전 calc_tier_notional - 현재보유 검증 (양쪽 경로)
 - [ ] ep 계산이 블렌디드 방식 유지되는지
-- [ ] DCA 처리 후 max_roi/worst_roi 리셋되는지
+- [ ] **DCA 선주문(dca_preorders)이 DCA fill/trim fill 시 전부 취소되는지**
+- [ ] **DCA 선주문이 타임아웃 면제(is_dca_pre)되는지**
+- [ ] **plan_dca 호출이 제거되었는지 (generate_all_intents)**

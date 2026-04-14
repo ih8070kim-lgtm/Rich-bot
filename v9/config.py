@@ -90,8 +90,8 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
 # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
-TRIM_PREORDER_ROI = 1.0    # 레거시 호환
 TRIM_BLENDED_ROI_BY_TIER = {3: 1.0, 2: 1.5}  # ★ V10.29b: 왕복 수익 확보 (0.5/1.0 → 1.0/1.5)
+TRIM_TRAIL_FLOOR = 0.5   # ★ V10.30: TRIM 안전 하한
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거
@@ -137,8 +137,7 @@ TP_ATR_MIN_MULT = 0.7
 TP_ATR_MAX_MULT = 1.5
 
 TP1_PARTIAL_RATIO  = 0.40
-TP2_PCT            = 4.0
-TP2_PARTIAL_RATIO  = 0.30
+# ★ V10.29e: TP2 제거 — planners에서 TP2 미생성, 죽은 코드
 TRAILING_TIMEOUT_MIN = 45
 
 # ★ V10.27e: 심볼별 최소 주문 수량 (하드코딩 통합)
@@ -396,24 +395,13 @@ def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0
     return min(total_amt * (tier_w / cum_w_current), max_trim_qty)
 
 
-def calc_tp1_thresh(dca_level: int, worst_roi: float,
-                    urgency: float, is_heavy: bool) -> float:
-    """TP1 임계값 (ROI %) — urgency 보정 포함."""
+def calc_tp1_thresh(dca_level: int, worst_roi: float) -> float:
+    """TP1 임계값 (ROI %) — 고정값. V10.29e: urgency/heavy 로직 제거."""
     if dca_level <= 2:
-        tp1_base = TP1_FIXED.get(dca_level, 2.0)
+        return TP1_FIXED.get(dca_level, 2.0)
     else:
         _rebound = TP1_FIXED.get(dca_level, 2.0)
-        tp1_base = max(worst_roi + _rebound, _rebound)
-
-    if urgency < 3:
-        return tp1_base
-    elif is_heavy:
-        return tp1_base * max(0.5, 1.0 - urgency * 0.03)
-    else:
-        # ★ V10.29c: light side TP 증가 제거 — 정상 TP로 빠르게 나가서 슬롯 회전 극대화
-        # 기존: tp1_base * min(1.5, 1.0 + urgency * 0.025) → T1이 +3%까지 잠김
-        # trim 건당 $3~6 >> T1 TP 연장 수익 $0.5~1
-        return tp1_base
+        return max(worst_roi + _rebound, _rebound)
 
 
 def get_sl_entry(p: dict, tier: int) -> float:
@@ -421,20 +409,33 @@ def get_sl_entry(p: dict, tier: int) -> float:
     return float(p.get("ep", 0.0) or 0.0)
 
 
+def calc_dca_trigger_price(ep: float, side: str, tier: int) -> float:
+    """★ V10.29e: DCA 선주문 트리거 가격.
+    T2: EP × (1 ± 1.8/LEV/100), T3: EP × (1 ± 3.6/LEV/100)
+    """
+    roi_trig = DCA_ENTRY_ROI_BY_TIER.get(tier, -3.6)
+    dist = abs(roi_trig) / 100 / LEVERAGE
+    if side == "buy":
+        return ep * (1.0 - dist)   # long: 가격 하락 시 DCA
+    return ep * (1.0 + dist)       # short: 가격 상승 시 DCA
+
+
 # ═══════════════════════════════════════════════════════════════
 # TREND COMPANION (v10.29c — MR 진입 시 반대 방향 추세 심볼 동시 진입)
 # ═══════════════════════════════════════════════════════════════
 TREND_ENABLED        = True
 TREND_MIN_SCORE      = 1.5     # 추세 점수 최소값 (EMA이격 × VS × RSI가중)
-TREND_COOLDOWN_SEC   = 300     # 동일 심볼 재진입 쿨다운 5분
+TREND_MAX_SCORE      = 5.0     # ★ V10.30: score 상한 (과열 역전 방지)
+TREND_COOLDOWN_SEC   = 0       # ★ V10.30: 쿨다운 제거 (_open_dir_cd 10분이 제약)
 
 # ═══════════════════════════════════════════════════════════════
 # Beta Cycle (v10.29d — 1h Signal, Short-Only)
 # ═══════════════════════════════════════════════════════════════
 BC_ENABLED          = True
 CB_ENABLED          = True    # ★ V10.29b: Crash Bounce 알파
-BC_ARM_THRESH       = 0.05      # excess return ≥ 5% → ARMED
-BC_NORM_THRESH      = 0.04      # excess ≤ 4% → 정상화 진입
+BC_ARM_THRESH       = 0.05      # excess return ≥ 5% → ARMED (절대 최소)
+BC_BASELINE_WINDOW  = 72        # ★ V10.30: baseline 계산 구간 (72h)
+BC_BASELINE_SKIP    = 24        # ★ V10.30: 최근 24h 제외 (스파이크 오염 방지)
 BC_SHORT_SL         = 8.0       # SL 8%
 BC_SHORT_TP         = 6.0       # TP 6%
 BC_TRAIL_ACTIVATION = 0.03      # 3% 수익 시 트레일 시작

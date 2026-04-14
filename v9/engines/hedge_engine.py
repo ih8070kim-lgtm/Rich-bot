@@ -88,9 +88,12 @@ def plan_force_close(
             _res_amt = float(p.get("amt", 0.0) or 0.0)
             _res_notional = _res_amt * curr_p
             _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-            if 0 < _res_notional < 20.0 or (0 < _res_amt < _res_min_qty * 2):
-                force  = True
-                reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
+            # ★ V10.30 FIX: float epsilon(2.84e-14) 차단 + reduce_fail 쿨다운 존중
+            _res_cd = float(sym_st.get("reduce_fail_cooldown_until", 0) or 0)
+            if _res_amt > _res_min_qty * 0.01 and _res_cd < now:
+                if _res_notional < 20.0 or _res_amt < _res_min_qty * 2:
+                    force  = True
+                    reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
 
             # DD_SHUTDOWN
             if shutdown_active:
@@ -240,16 +243,9 @@ def plan_force_close(
                             reason = _zr
                             _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
 
-                # TIMECUT
-                if not force:
-                    _tc_dca = int(p.get("dca_level", 1) or 1)
-                    _tc_hold = now - float(p.get("time", now) or now)
-                    if (_tc_dca == 2
-                            and _tc_hold >= ZOMBIE_TIME_CUT_SEC
-                            and roi_pct < 0
-                            and p.get("role", "") not in ("HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE")):
-                        force = True
-                        reason = f"ZOMBIE_TIMECUT_{_tc_hold/3600:.1f}h_T{_tc_dca}(roi={roi_pct:.1f}%)"
+                # ★ V10.30: ZOMBIE_TIMECUT 제거 — T2 회복 허용
+                # 기존: T2 + 12h + ROI < 0 → 강제청산. BNB -1.4%에서 -$3 손절됨.
+                # trim이 T2→T1 복귀 담당하므로 시간 기반 강제청산 불필요.
 
             if force:
                 intents.append(Intent(

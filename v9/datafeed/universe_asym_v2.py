@@ -230,8 +230,14 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
             cands = cands[:UNIVERSE_TOP_N]
             selected = [x["sym"] for x in cands[:target_n]]
 
+            # ★ V10.30: 선발 심볼 beta/corr 로그
+            _sel_info = " ".join(
+                f"{x['sym'].replace('/USDT','')}(β={x['beta']:.2f},c={x['corr_24h']:.2f})"
+                for x in cands[:target_n]
+            )
             print(f"[Universe V10.15] {pool_name}: pool={len(pool_syms)} "
                   f"vol={len(active_syms)} filter={len(cands)} → {len(selected)}선발")
+            print(f"[Universe V10.15] {pool_name} beta: {_sel_info}")
             return selected
 
         # ── Long / Short 파이프라인 실행 ──

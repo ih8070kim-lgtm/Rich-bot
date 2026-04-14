@@ -35,7 +35,7 @@ import v9.config as CFG
 _hourly_closes: Dict[str, deque] = {}     # {sym: deque(maxlen=250)} 1h close
 _hourly_volumes: Dict[str, deque] = {}    # {sym: deque(maxlen=250)} 1h volume
 _btc_hourly: deque = deque(maxlen=250)
-_armed: Dict[str, dict] = {}              # {sym: {ts, peak_excess, peak_price, beta, tf}}
+_armed: Dict[str, dict] = {}              # {sym: {ts, peak_excess, peak_price, beta, tf, baseline}}
 _cooldown_until: Dict[str, float] = {}    # {sym: unix_ts}
 _daily_entry_count: int = 0
 _last_entry_date: str = ""
@@ -201,14 +201,16 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                 continue  # 볼륨 없는 스파이크 → 무시
 
             if sym not in _armed:
+                _bl = _calc_baseline_excess(sym)
                 _armed[sym] = {
                     "ts": time.time(),
                     "peak_excess": arm_excess,
                     "peak_price": cur_p,
                     "beta": arm_beta,
                     "tf": arm_tf,
+                    "baseline": _bl if _bl is not None else 0.0,
                 }
-                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β↑={arm_beta:.2f} tf={arm_tf}")
+                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β↑={arm_beta:.2f} tf={arm_tf} baseline={_armed[sym]['baseline']:+.1%}")
             else:
                 if arm_excess > _armed[sym]["peak_excess"]:
                     _armed[sym]["peak_excess"] = arm_excess
@@ -219,12 +221,14 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                     _armed[sym]["tf"] = "1d"
                     _armed[sym]["ts"] = time.time()
 
-        # ── SHORT 진입 (OR: 어느 쪽이든 0 ≤ excess ≤ NORM) ──
+        # ── SHORT 진입: 1h excess가 baseline(72h 정상 수준)으로 복귀해야 진입 ──
+        # ★ V10.30: 고정 NORM_THRESH 제거 → 심볼별 baseline 적응형
         norm_triggered = False
-        if excess_1h is not None and 0 <= excess_1h <= CFG.BC_NORM_THRESH:
-            norm_triggered = True
-        if excess_d is not None and 0 <= excess_d <= CFG.BC_NORM_THRESH:
-            norm_triggered = True
+        if sym in _armed:
+            _bl = _armed[sym].get("baseline", 0.0)
+            # 1h excess가 baseline 이하 = "진짜 식었다"
+            if excess_1h is not None and excess_1h <= _bl:
+                norm_triggered = True
 
         # ★ V10.29e: excess 완전 되돌림(≤0) → ARMED 해제 (기회 소멸)
         if sym in _armed:
@@ -275,12 +279,13 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                 side="sell",
                 qty=qty,
                 price=None,
-                reason=f"BC_SHORT peak={arm['peak_excess']:+.1%} {_ex_1h_str} {_ex_d_str} pb={pullback:.1%}",
+                reason=f"BC_SHORT peak={arm['peak_excess']:+.1%} {_ex_1h_str} {_ex_d_str} pb={pullback:.1%} bl={arm.get('baseline',0):+.1%}",
                 metadata={
                     "positionSide": "SHORT",
                     "role": "BC",
                     "bc_peak_excess": arm["peak_excess"],
                     "bc_beta": arm.get("beta", 0),
+                    "bc_baseline": arm.get("baseline", 0.0),
                     "bc_entry_ts": time.time(),
                 },
             )
@@ -364,7 +369,8 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
         elif hold_hours >= CFG.BC_MAX_HOLD_HOURS:
             reason = "BC_TIMEOUT"
 
-        # ★ V10.29e: excess 재상승 → thesis 실패 손절
+        # ★ V10.30: excess 재상승 → thesis 실패 손절
+        # baseline 복귀 후 진입했으므로 ARM_THRESH까지 충분한 갭 확보됨
         if not reason:
             _er = _calc_excess_1h(sym)
             if _er and _er[0] >= CFG.BC_ARM_THRESH:
@@ -532,7 +538,9 @@ def _update_universe():
     beta_w = getattr(CFG, 'BC_BETA_WINDOW', 168)
     ret_w = getattr(CFG, 'BC_RETURN_WINDOW', 24)
     arm_th = getattr(CFG, 'BC_ARM_THRESH', 0.05)
-    norm_th = getattr(CFG, 'BC_NORM_THRESH', 0.04)
+    # ★ V10.30: 유니버스 점수용 정규화 임계치 (baseline 근사값)
+    # 실제 진입은 심볼별 baseline 사용, 여기는 순위 산정용 고정값
+    norm_th = 0.02
 
     if len(_btc_hourly) < beta_w + 65:
         return
@@ -719,6 +727,61 @@ def _calc_excess_daily(sym) -> Optional[Tuple[float, float]]:
 
     excess = alt_ret - (beta * btc_ret)
     return (excess, beta)
+
+
+def _calc_baseline_excess(sym) -> Optional[float]:
+    """★ V10.30: ARM 직전 72h 중앙값 excess (스파이크 전 "정상" 수준).
+
+    최근 SKIP(24h)을 제외하고 그 이전 WINDOW(72h) 구간에서
+    매 시점의 24h excess return을 계산 → 중앙값 반환.
+    """
+    beta_w = getattr(CFG, 'BC_BETA_WINDOW', 168)
+    ret_w = getattr(CFG, 'BC_RETURN_WINDOW', 24)
+    skip = getattr(CFG, 'BC_BASELINE_SKIP', 24)
+    window = getattr(CFG, 'BC_BASELINE_WINDOW', 72)
+
+    ac = list(_hourly_closes.get(sym, []))
+    bc = list(_btc_hourly)
+    need = max(beta_w, skip + window + ret_w) + 5
+    if len(ac) < need or len(bc) < need:
+        return None
+
+    # beta — _calc_excess_1h와 동일 방식
+    try:
+        alt_lr = np.diff(np.log(ac[-(beta_w + 1):]))
+        btc_lr = np.diff(np.log(bc[-(beta_w + 1):]))
+        n = min(len(alt_lr), len(btc_lr))
+        if n < 20:
+            return None
+        _up_mask = btc_lr[-n:] > 0
+        if np.sum(_up_mask) < 10:
+            return None
+        _alt_up = alt_lr[-n:][_up_mask]
+        _btc_up = btc_lr[-n:][_up_mask]
+        var_b = np.var(_btc_up)
+        if var_b < 1e-15:
+            return None
+        beta = float(np.cov(_alt_up, _btc_up)[0][1] / var_b)
+    except Exception:
+        return None
+
+    excesses = []
+    for t in range(skip, skip + window):
+        idx_now = -(t + 1)
+        idx_ago = -(t + 1 + ret_w)
+        if abs(idx_ago) >= len(ac) or abs(idx_ago) >= len(bc):
+            continue
+        a_now, a_ago = ac[idx_now], ac[idx_ago]
+        b_now, b_ago = bc[idx_now], bc[idx_ago]
+        if a_now <= 0 or a_ago <= 0 or b_now <= 0 or b_ago <= 0:
+            continue
+        alt_ret = (a_now / a_ago) - 1
+        btc_ret = (b_now / b_ago) - 1
+        excesses.append(alt_ret - beta * btc_ret)
+
+    if len(excesses) < 10:
+        return None
+    return float(np.median(excesses))
 
 
 def _calc_atr_1h(ohlcv_1h) -> float:
