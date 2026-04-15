@@ -5,13 +5,14 @@
 - `apply_order_results` 등 시그니처 변경 시 모든 호출부 동시 수정 (grep으로 확인)
 - 수정 완료 후 `python3 -c "import ast; ast.parse(open('파일').read())"` 문법 검증
 - BC/CB는 **모든** 슬롯 카운팅에서 제외 (slot_manager, planners._core_long/short, _HEDGE_ROLES_SLOT)
-- DCA 처리 시 stale tp1_limit_oid/tp1_preorder_id 반드시 클리어
+- DCA 처리 시 trim_trail_active / trim_trail_max 리셋 + stale tp1 필드 정리
 - trail close는 p["amt"] 전량 — 잔량 남으면 바이낸스 유령 포지션 발생
 - pending 구조는 fill 이벤트 없으면 영원히 발사 안 됨 → 즉시 발사 필요 시 intents.append
 - **★ V10.30: .md 파일 읽고 수정 후 반드시 업데이트**
 - **★ V10.30: DCA는 단일 경로(_place_dca_preorders LIMIT만). plan_dca 호출 금지**
 - **★ V10.30: DCA 주문 전 calc_tier_notional - 현재보유 검증 필수 (과주문 방지)**
 - **★ V10.30: FC/TRAIL_ON 시 거래소 잔존 주문 즉시 취소 (_FC_EXCHANGE_CANCEL)**
+- **★ V10.31b: TP1 전 tier trail 통합. tp1_preorder_id/tp1_limit_oid 제거. _manage_tp1_preorders 비활성화**
 
 ## 모듈별 상세 문서 (관련 수정 시 반드시 참조)
 - 슬롯/리스크 수정 → `docs/SLOTS.md`
@@ -53,3 +54,4 @@
 | 04-14 | T2 정규 TP1 빠짐 | T2+에서 trim 미발동 시 정규 TP1 fallback → 전량 사망 | planners.py continue 추가 |
 | 04-14 | DCA 과주문 (AAVE 3배) | 목표 노셔널 검증 없이 개별 weight 기반 주문 | planners.py + runner.py 가드 |
 | 04-14 | DCA 이중 경로 | plan_dca(시장가) + DCA_PRE(LIMIT) 동시 발동 | plan_dca 제거, 단일 경로 |
+| 04-15 | T2+ trim trail 미발동 | plan_tp1 guard(tp1_preorder_id/limit_oid/step 등)가 T2+ trail까지 차단 | V10.31b: 전 tier trail 통합, preorder 시스템 제거 |

@@ -1440,56 +1440,45 @@ def plan_dca(
 # ═════════════════════════════════════════════════════════════════
 def plan_tp1(snapshot: MarketSnapshot, st: Dict,
              exclude_syms: set = None) -> List[Intent]:
-    """★ V10.29e: TP1 + DCA Trim.
+    """★ V10.31b: T1 TP1 — trail 방식 통합.
 
-    T1: TP1_FIXED 고정값
-    T2+: DCA Trim only (TRIM_BLENDED_ROI_BY_TIER)
+    tp1_preorder_id / tp1_limit_oid 가드 제거.
+    T1: ROI ≥ TP1_FIXED → trail 활성화 → max-gap 하회 시 partial close → step=1 → TRAIL_ON.
+    T2+: plan_trim_trail()이 독립 처리.
     """
+    from v9.config import (TRIM_TRAIL_FLOOR, HARD_SL_ATR_BASE,
+                           calc_tier_notional, notional_to_qty)
     intents: List[Intent] = []
     _tp1_excl = exclude_syms or set()
-
 
     for symbol, p in _pos_items(st):
         if symbol in _tp1_excl:
             continue
+        # ★ V10.31b: 기존 tp1_preorder_id / tp1_limit_oid 잔존 시 정리
+        _stale_pre = p.pop("tp1_preorder_id", None)
+        _stale_lim = p.pop("tp1_limit_oid", None)
+        if _stale_pre or _stale_lim:
+            p.pop("tp1_preorder_price", None)
+            p.pop("tp1_preorder_ts", None)
+            _oid = _stale_lim or _stale_pre
+            if _oid and _oid != "DRY_PREORDER":
+                from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _oid})
+                print(f"[TP_TRAIL] {symbol} stale preorder/limit 취소: {_oid}")
         if p.get("step", 0) != 0 or p.get("tp1_done"):
             continue
         if p.get("pending_close"):
             continue
-        # ★ V10.29d: BC/CB는 자체 SL/TP — MR TP1 제외
-        if p.get("role") in ("BC", "CB"):
+        _role = p.get("role", "")
+        if _role in ("BC", "CB"):
             continue
-        # ★ V10.27e: tp1_preorder 활성이면 plan_tp1 스킵 (DEDUP 스팸 방지)
-        if p.get("tp1_preorder_id"):
+        if _role in ("INSURANCE_SH", "CORE_HEDGE"):
             continue
-        # ★ V10.28b FIX: plan_tp1 경로로 배치된 TP1 limit이 pending이면 스킵
-        if p.get("tp1_limit_oid"):
-            continue
-        # ★ V10.29d: trim_preorders OR 최근 trim_to_place만 스킵
-        # trim_to_place는 60초 TTL — 초과 시 stale로 간주, plan_tp1 DCA_TRIM fallback
-        _ttp = p.get("trim_to_place")
-        if _ttp and isinstance(_ttp, dict):
-            _ttp_age = time.time() - float(_ttp.get("_ts", 0) or 0)
-            if _ttp_age > 60:
-                p.pop("trim_to_place", None)  # stale → 정리
-                _ttp = None
-        # ★ V10.30: trim_preorders/trim_to_place 차단 제거 — trim trail로 대체
-        _sym_st_tp1 = st.get(symbol, {})
-        if float(_sym_st_tp1.get("exit_fail_cooldown_until", 0.0) or 0.0) > time.time():
-            continue
-        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
-        if curr_p <= 0:
-            continue
-        is_long   = p.get("side", "") == "buy"
-        _role     = p.get("role", "")
-        dca_level = int(p.get("dca_level", 1) or 1)
-
         # HEDGE 계열 → 전용 모듈 위임
-        if _role == "INSURANCE_SH":
-            continue
-        if _role == "CORE_HEDGE":
-            continue
         if _role in ("HEDGE", "SOFT_HEDGE"):
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+            if curr_p <= 0:
+                continue
             from v9.engines.hedge_engine_v2 import check_hedge_tp1
             _tp1_ok, roi_gross, tp1_thresh = check_hedge_tp1(p, curr_p)
             if not _tp1_ok:
@@ -1498,112 +1487,201 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             p["tp1_done"] = True
             p["trailing_on_time"] = time.time()
             print(f"[SOFT_HEDGE] {symbol} TP1 {roi_gross:.1f}% → 100% trailing")
+            continue
+
+        dca_level = int(p.get("dca_level", 1) or 1)
+        # T2+는 plan_trim_trail()이 처리
+        if dca_level >= 2:
+            continue
+
+        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+        if curr_p <= 0:
+            continue
+        is_long = p.get("side", "") == "buy"
         roi_gross = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
 
-        # ★ V10.29e: TP1 threshold — 고정값 (urgency/heavy 제거)
+        # ★ T1 trail 임계치
         _worst = float(p.get("worst_roi", 0.0) or 0.0)
         tp1_thresh = calc_tp1_thresh(dca_level, _worst)
 
-        # ★ V10.30: Trim Trail — DCA T2+ (고정값 즉시 발동 → trail로 교체)
-        if dca_level >= 2:
-            from v9.config import TRIM_BLENDED_ROI_BY_TIER, TRIM_TRAIL_FLOOR
-            _DCA_TRIM_ROI = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0)
+        # ── trail 활성화 ──
+        if roi_gross >= tp1_thresh and not p.get("trim_trail_active"):
+            p["trim_trail_active"] = True
+            p["trim_trail_max"] = roi_gross
+            print(f"[TP_TRAIL] {symbol} T{dca_level} 활성화 "
+                  f"roi={roi_gross:.2f}%≥{tp1_thresh}")
 
-            # trail 활성화: ROI가 TRIM 임계치 도달
-            if roi_gross >= _DCA_TRIM_ROI and not p.get("trim_trail_active"):
-                p["trim_trail_active"] = True
-                p["trim_trail_max"] = roi_gross
-                print(f"[TRIM_TRAIL] {symbol} T{dca_level} 활성화 roi={roi_gross:.2f}%≥{_DCA_TRIM_ROI}")
-
-            # trail 추적 + 발동
-            if p.get("trim_trail_active"):
-                _trim_max = float(p.get("trim_trail_max", 0) or 0)
-                if roi_gross > _trim_max:
-                    p["trim_trail_max"] = roi_gross
-                    _trim_max = roi_gross
-
-                # ★ V10.30: 15m ATR 구간별 trim gap 선택
-                _t_pool = (snapshot.ohlcv_pool or {}).get(symbol, {})
-                _t_15m = _t_pool.get("15m", [])
-                _t_atr = atr_from_ohlcv(_t_15m[-15:], period=10) if len(_t_15m) >= 15 else 0.0
-                _t_atr_pct = (_t_atr / curr_p) if (curr_p > 0 and _t_atr > 0) else HARD_SL_ATR_BASE * 3
-                if _t_atr_pct < HARD_SL_ATR_BASE * 2:      # 저변동
-                    _trim_gap = 0.2
-                elif _t_atr_pct < HARD_SL_ATR_BASE * 5:     # 정상
-                    _trim_gap = 0.3
-                else:                                          # 고변동
-                    _trim_gap = 0.5
-
-                _trim_stop = _trim_max - _trim_gap
-                _trim_fire = False
-                _trim_reason = ""
-
-                if roi_gross <= _trim_stop:
-                    _trim_fire = True
-                    _trim_reason = f"TRIM_TRAIL(max={_trim_max:.1f},gap={_trim_gap:.2f},roi={roi_gross:.1f})"
-                elif roi_gross <= TRIM_TRAIL_FLOOR:
-                    _trim_fire = True
-                    _trim_reason = f"TRIM_FLOOR(roi={roi_gross:.1f}≤{TRIM_TRAIL_FLOOR})"
-
-                if _trim_fire:
-                    p["trim_trail_active"] = False
-                    p["trim_trail_max"] = 0.0
-                    total_qty = float(p.get("amt", 0.0))
-                    _trim_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                    _trim_ep = float(p.get("ep", 0) or 0)
-                    trim_qty = calc_trim_qty(total_qty, dca_level,
-                                            ep=_trim_ep, bal=_trim_bal, mark_price=curr_p)
-                    _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-                    if trim_qty >= _sym_min_qty:
-                        intents.append(Intent(
-                            trace_id=_tid(),
-                            intent_type=IntentType.TP1,
-                            symbol=symbol,
-                            side="sell" if is_long else "buy",
-                            qty=trim_qty,
-                            price=curr_p,
-                            reason=f"DCA_{_trim_reason}→T{dca_level-1}_T{dca_level}",
-                            metadata={"roi_gross": roi_gross, "is_trim": True,
-                                      "target_tier": dca_level - 1},
-                        ))
-                        continue
-            # ★ V10.30: T2+는 trim trail이 유일한 exit → 정규 TP1 차단
+        if not p.get("trim_trail_active"):
             continue
-        # ★ V10.29b: 최소 슬롯 유지 제거 — ATR 3.0 진입 감소로 교착 위험
-        p.pop("min_slot_hold", None)
 
-        if roi_gross >= tp1_thresh:
-            total_qty  = float(p.get("amt", 0.0))
-            # ★ V10.29d: 노셔널 기반 T1 close qty
-            from v9.config import calc_tier_notional, notional_to_qty
-            _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
-            _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
-            if _t1_notional > 0 and curr_p > 0:
-                _t1_qty = notional_to_qty(_t1_notional, curr_p)
-                close_qty = _t1_qty * TP1_PARTIAL_RATIO
-            else:
-                close_qty = total_qty * TP1_PARTIAL_RATIO  # fallback
-            _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-            if close_qty < _sym_min_qty:
-                close_qty = total_qty
-            # ★ V10.27e: 잔량 < min_qty → 전량 (RESIDUAL 무한루프 방지)
-            _remaining = total_qty - close_qty
-            if 0 < _remaining < _sym_min_qty:
-                close_qty = total_qty
-            # ★ V10.29d: close_qty가 실제 보유보다 크면 cap
-            close_qty = min(close_qty, total_qty)
-            if close_qty <= 0:
-                continue
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.TP1,
-                symbol=symbol,
-                side="sell" if is_long else "buy",
-                qty=close_qty,
-                price=curr_p,
-                reason=f"TP1({tp1_thresh:.1f},roi={roi_gross:.1f})_T{dca_level}",
-                metadata={"roi_gross": roi_gross, "tp1_thresh": tp1_thresh},
-            ))
+        # ── max 갱신 ──
+        _max = float(p.get("trim_trail_max", 0) or 0)
+        if roi_gross > _max:
+            p["trim_trail_max"] = roi_gross
+            _max = roi_gross
+
+        # ── ATR 기반 gap ──
+        _pool = (snapshot.ohlcv_pool or {}).get(symbol, {})
+        _15m = _pool.get("15m", [])
+        _atr = atr_from_ohlcv(_15m[-15:], period=10) if len(_15m) >= 15 else 0.0
+        _atr_pct = (_atr / curr_p) if (curr_p > 0 and _atr > 0) else HARD_SL_ATR_BASE * 3
+        if _atr_pct < HARD_SL_ATR_BASE * 2:
+            _gap = 0.2
+        elif _atr_pct < HARD_SL_ATR_BASE * 5:
+            _gap = 0.3
+        else:
+            _gap = 0.5
+
+        # ── 발동 체크 ──
+        _stop = _max - _gap
+        _fire = False
+        _reason = ""
+        if roi_gross <= _stop:
+            _fire = True
+            _reason = f"TP_TRAIL(max={_max:.1f},gap={_gap:.2f},roi={roi_gross:.1f})"
+        elif roi_gross <= TRIM_TRAIL_FLOOR:
+            _fire = True
+            _reason = f"TP_FLOOR(roi={roi_gross:.1f}≤{TRIM_TRAIL_FLOOR})"
+
+        if not _fire:
+            continue
+
+        # ── T1 partial close (→ step=1 → TRAIL_ON) ──
+        p["trim_trail_active"] = False
+        p["trim_trail_max"] = 0.0
+
+        total_qty = float(p.get("amt", 0.0))
+        _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+        _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
+        if _t1_notional > 0 and curr_p > 0:
+            _t1_qty = notional_to_qty(_t1_notional, curr_p)
+            close_qty = _t1_qty * TP1_PARTIAL_RATIO
+        else:
+            close_qty = total_qty * TP1_PARTIAL_RATIO
+        _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+        if close_qty < _sym_min_qty:
+            close_qty = total_qty
+        _remaining = total_qty - close_qty
+        if 0 < _remaining < _sym_min_qty:
+            close_qty = total_qty
+        close_qty = min(close_qty, total_qty)
+        if close_qty <= 0:
+            continue
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=IntentType.TP1,
+            symbol=symbol,
+            side="sell" if is_long else "buy",
+            qty=close_qty,
+            price=curr_p,
+            reason=f"TP1_{_reason}_T{dca_level}",
+            metadata={"roi_gross": roi_gross, "tp1_thresh": tp1_thresh,
+                      "force_market": True},
+        ))
+    return intents
+
+
+# ═════════════════════════════════════════════════════════════════
+# TRIM TRAIL Planner (V10.31 — T2+ 독립 분리)
+# ═════════════════════════════════════════════════════════════════
+def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
+                    exclude_syms: set = None) -> List[Intent]:
+    """★ V10.31: T2+ Trim Trail — plan_tp1에서 완전 분리.
+
+    guard 최소화: position이 존재하고 dca_level >= 2이면 무조건 trail 체크.
+    tp1_preorder_id, tp1_limit_oid, step, tp1_done 등 T1 전용 필드 무시.
+    """
+    from v9.config import (TRIM_BLENDED_ROI_BY_TIER, TRIM_TRAIL_FLOOR,
+                           HARD_SL_ATR_BASE, calc_trim_qty)
+    intents: List[Intent] = []
+    _excl = exclude_syms or set()
+
+    for symbol, p in _pos_items(st):
+        if symbol in _excl:
+            continue
+        # ── 최소 guard: 수량 있고, T2+이고, BC/CB 아닌 것만 ──
+        amt = float(p.get("amt", 0) or 0)
+        if amt <= 0:
+            continue
+        dca_level = int(p.get("dca_level", 1) or 1)
+        if dca_level < 2:
+            continue
+        if p.get("role") in ("BC", "CB"):
+            continue
+        if p.get("pending_close"):
+            continue
+
+        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+        if curr_p <= 0:
+            continue
+
+        is_long = p.get("side", "") == "buy"
+        roi = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
+        _threshold = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0)
+
+        # ── trail 활성화 ──
+        if roi >= _threshold and not p.get("trim_trail_active"):
+            p["trim_trail_active"] = True
+            p["trim_trail_max"] = roi
+            print(f"[TRIM_TRAIL] {symbol} T{dca_level} 활성화 "
+                  f"roi={roi:.2f}%≥{_threshold}")
+
+        if not p.get("trim_trail_active"):
+            continue
+
+        # ── max 갱신 ──
+        _max = float(p.get("trim_trail_max", 0) or 0)
+        if roi > _max:
+            p["trim_trail_max"] = roi
+            _max = roi
+
+        # ── ATR 기반 gap ──
+        _pool = (snapshot.ohlcv_pool or {}).get(symbol, {})
+        _15m = _pool.get("15m", [])
+        _atr = atr_from_ohlcv(_15m[-15:], period=10) if len(_15m) >= 15 else 0.0
+        _atr_pct = (_atr / curr_p) if (curr_p > 0 and _atr > 0) else HARD_SL_ATR_BASE * 3
+        if _atr_pct < HARD_SL_ATR_BASE * 2:
+            _gap = 0.2
+        elif _atr_pct < HARD_SL_ATR_BASE * 5:
+            _gap = 0.3
+        else:
+            _gap = 0.5
+
+        # ── 발동 체크 ──
+        _stop = _max - _gap
+        _fire = False
+        _reason = ""
+
+        if roi <= _stop:
+            _fire = True
+            _reason = f"TRIM_TRAIL(max={_max:.1f},gap={_gap:.2f},roi={roi:.1f})"
+        elif roi <= TRIM_TRAIL_FLOOR:
+            _fire = True
+            _reason = f"TRIM_FLOOR(roi={roi:.1f}≤{TRIM_TRAIL_FLOOR})"
+
+        if not _fire:
+            continue
+
+        # ── trim 실행 ──
+        p["trim_trail_active"] = False
+        p["trim_trail_max"] = 0.0
+        _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+        _ep = float(p.get("ep", 0) or 0)
+        trim_qty = calc_trim_qty(amt, dca_level, ep=_ep, bal=_bal, mark_price=curr_p)
+        _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+        if trim_qty < _min_qty:
+            continue
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=IntentType.TP1,
+            symbol=symbol,
+            side="sell" if is_long else "buy",
+            qty=trim_qty,
+            price=curr_p,
+            reason=f"DCA_{_reason}→T{dca_level-1}_T{dca_level}",
+            metadata={"roi_gross": roi, "is_trim": True,
+                      "target_tier": dca_level - 1},
+        ))
     return intents
 
 
@@ -1907,6 +1985,7 @@ def generate_all_intents(
     _fc_syms = {i.symbol for i in _fc_intents}
 
     intents += plan_tp1(snapshot, st, exclude_syms=_fc_syms)
+    intents += plan_trim_trail(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_trail_on(snapshot, st)
     # ★ V10.30: plan_dca 제거 — _place_dca_preorders(LIMIT)로 통일 (시장가/LIMIT 중복 방지)
     # intents += plan_dca(snapshot, st, cooldowns, system_state)

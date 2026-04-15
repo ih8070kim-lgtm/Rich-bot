@@ -109,18 +109,10 @@ def apply_order_results(
                     "order_id": result.order_id,
                     "ts": now,
                 })
-            # ★ V10.28b FIX: TP1 limit 배치 후 position에 마킹 → plan_tp1 재생성 방지 (DEDUP 스팸 제거)
-            # tp1_preorder_id 대신 별도 필드 사용 — _manage_tp1_preorders 간섭 방지
-            if (intent_pend and intent_pend.intent_type == IntentType.TP1
-                    and getattr(result, 'order_type', '') == 'limit_pending'
-                    and result.order_id):
-                _tp1_sym = result.symbol
-                _tp1_side = intent_pend.side  # 청산 방향
-                _tp1_pos_side = "sell" if _tp1_side == "buy" else "buy"  # 포지션 방향
-                ensure_slot(st, _tp1_sym)
-                _tp1_p = get_p(st[_tp1_sym], _tp1_pos_side)
-                if isinstance(_tp1_p, dict):
-                    _tp1_p["tp1_limit_oid"] = result.order_id
+            # ★ V10.31b: tp1_limit_oid 마킹 제거 — TP1이 시장가 trail로 전환됨
+            # (TP1 limit_pending 발생 안 함 → 이 블록 도달 안 하지만 안전용 주석처리)
+            # if (intent_pend and intent_pend.intent_type == IntentType.TP1 ...):
+            #     _tp1_p["tp1_limit_oid"] = result.order_id
             continue
         intent = intents_map.get(result.trace_id)
         if not intent:

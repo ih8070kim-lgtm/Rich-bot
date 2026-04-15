@@ -2486,8 +2486,8 @@ async def _main_loop(ex_init, dry_run: bool):
             # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
             await _manage_pending_limits(ex, st, snapshot)
 
-            # ★ V10.25: TP1 선주문 관리 (매 틱)
-            await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
+            # ★ V10.31b: TP1 선주문 제거 — 전 tier trail 방식 통합
+            # await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
 
             # ★ V10.30: Trim 선주문 제거 — trail로 대체 (시장가, 동적 트리거)
             # await _place_trim_preorders(ex, st, snapshot)
