@@ -9,31 +9,31 @@
 
 ## TP Trail 흐름 (V10.31b)
 ```
-■ T1 (plan_tp1)
-  guard: step=0, tp1_done=False, not pending_close, role not BC/CB/HEDGE
-  (tp1_preorder_id, tp1_limit_oid, exit_fail_cooldown 체크 없음)
+■ 레짐 분기
+  HIGH → trail (시장가, 추세 수익 포착)
+  LOW/NORMAL → 선주문 limit (지정가, maker 수수료, 슬리피지 0)
 
-  ROI ≥ 2.0% → trim_trail_active = True, max 추적 시작
-  ROI 상승 → max 갱신
-  ROI ≤ max - gap → TP1 발동 (시장가, partial close)
-  ROI ≤ 0.5% (floor) → 안전 TP1 발동
-  → step=1, tp1_done=True → TRAIL_ON이 잔량 처리
+■ T1 HIGH (plan_tp1 trail)
+  ROI ≥ 2.0% → trail 활성화 → max-gap 하회 시 시장가 partial close
+  → step=1 → TRAIL_ON이 잔량 처리
 
-■ T2 (plan_trim_trail)
-  guard: amt > 0, dca_level ≥ 2, not BC/CB, not pending_close
-  
-  ROI ≥ 1.5% → trim_trail_active = True
-  ROI ≤ max - gap → TRIM 발동 (T2→T1)
-  ROI ≤ 0.5% (floor) → 안전 TRIM 발동
+■ T1 LOW/NORMAL (_manage_tp1_preorders)
+  TP 가격 계산 → 거래소 limit 선주문
+  가격 도달 → 거래소 자동 체결 → _manage_pending_limits 처리
+  → step=1 → TRAIL_ON이 잔량 처리
 
-■ T3 (plan_trim_trail)
-  ROI ≥ 1.0% → trim_trail_active = True
-  같은 로직 → TRIM 발동 (T3→T2)
+■ T2+ HIGH (plan_trim_trail trail)
+  ROI ≥ threshold → trail 활성화 → 시장가 TRIM
 
-■ gap = ATR 15m 구간별:
-  ATR < 0.30% → 0.2%
-  ATR < 0.75% → 0.3%
-  ATR ≥ 0.75% → 0.5%
+■ T2+ LOW/NORMAL (_place_trim_preorders)
+  DCA 체결 시 calc_trim_price → limit 선주문
+  기존 T2+ 포지션도 자동 재생성 (regen)
+  가격 도달 → 체결 → tier 감소
+
+■ 전환 안전장치
+  LOW→HIGH: 선주문 취소 → trail 시작
+  HIGH→LOW: trail 리셋 → 다음 틱 선주문 배치
+  DCA: 둘 다 리셋 (runner DCA fill handler)
 ```
 
 ## 제거된 것 (V10.31b)

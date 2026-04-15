@@ -1454,17 +1454,11 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
     for symbol, p in _pos_items(st):
         if symbol in _tp1_excl:
             continue
-        # ★ V10.31b: 기존 tp1_preorder_id / tp1_limit_oid 잔존 시 정리
-        _stale_pre = p.pop("tp1_preorder_id", None)
+        # ★ V10.31b: tp1_limit_oid는 사용 안 함 → 항상 정리
         _stale_lim = p.pop("tp1_limit_oid", None)
-        if _stale_pre or _stale_lim:
-            p.pop("tp1_preorder_price", None)
-            p.pop("tp1_preorder_ts", None)
-            _oid = _stale_lim or _stale_pre
-            if _oid and _oid != "DRY_PREORDER":
-                from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
-                _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _oid})
-                print(f"[TP_TRAIL] {symbol} stale preorder/limit 취소: {_oid}")
+        if _stale_lim:
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _stale_lim})
         if p.get("step", 0) != 0 or p.get("tp1_done"):
             continue
         if p.get("pending_close"):
@@ -1493,6 +1487,25 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         # T2+는 plan_trim_trail()이 처리
         if dca_level >= 2:
             continue
+
+        # ★ V10.31b: 레짐별 exit 분기
+        _regime = _btc_vol_regime(snapshot)
+        if _regime != "HIGH":
+            # LOW/NORMAL: _manage_tp1_preorders가 처리 → trail 정리 + skip
+            if p.get("trim_trail_active"):
+                p["trim_trail_active"] = False
+                p["trim_trail_max"] = 0.0
+            continue
+
+        # ── HIGH: trail 모드 ──
+        # 이전 LOW/NORMAL에서 남은 선주문 정리
+        _stale_pre = p.pop("tp1_preorder_id", None)
+        if _stale_pre and _stale_pre != "DRY_PREORDER":
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _stale_pre})
+            p.pop("tp1_preorder_price", None)
+            p.pop("tp1_preorder_ts", None)
+            print(f"[TP_TRAIL] {symbol} LOW→HIGH 전환: 선주문 취소 {_stale_pre}")
 
         curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
         if curr_p <= 0:
@@ -1610,6 +1623,26 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
             continue
         if p.get("pending_close"):
             continue
+
+        # ★ V10.31b: 레짐별 exit 분기
+        _regime = _btc_vol_regime(snapshot)
+        if _regime != "HIGH":
+            # LOW/NORMAL: _place_trim_preorders가 처리 → trail 정리 + skip
+            if p.get("trim_trail_active"):
+                p["trim_trail_active"] = False
+                p["trim_trail_max"] = 0.0
+            continue
+
+        # ── HIGH: trail 모드 ──
+        # 이전 LOW/NORMAL에서 남은 trim 선주문 취소 (이중 exit 방지)
+        _trp = p.get("trim_preorders", {})
+        if _trp:
+            for _ct, _ci in list(_trp.items()):
+                if isinstance(_ci, dict) and _ci.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _ci["oid"]})
+            p["trim_preorders"] = {}
+            p.pop("trim_to_place", None)
 
         curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
         if curr_p <= 0:

@@ -750,6 +750,13 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             _role = p.get("role", "")
             if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "BC", "CB"):
                 continue
+            # ★ V10.31b: HIGH 레짐 → trail 모드 (선주문 비활성)
+            from v9.strategy.planners import _btc_vol_regime
+            _tp_regime = _btc_vol_regime(snapshot) if snapshot else "LOW"
+            if _tp_regime == "HIGH":
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
             # ★ V10.29: T2+ → TP1 선주문 전면 차단 (trim이 exit 담당)
             _dca_lv = int(p.get("dca_level", 1) or 1)
             if _dca_lv >= 2:
@@ -1798,7 +1805,21 @@ async def _place_trim_preorders(ex, st, snapshot):
             if not isinstance(p, dict):
                 continue
 
-            # ★ V10.29b: stale trim_preorders 정리 — 거래소에 없는 주문 참조 제거
+            # ★ V10.31b: HIGH 레짐 → trail 모드, 선주문 취소
+            from v9.strategy.planners import _btc_vol_regime
+            _trim_regime = _btc_vol_regime(snapshot) if snapshot else "LOW"
+            if _trim_regime == "HIGH":
+                _trp_h = p.get("trim_preorders")
+                if _trp_h and isinstance(_trp_h, dict):
+                    for _ht, _hv in list(_trp_h.items()):
+                        if isinstance(_hv, dict) and _hv.get("oid"):
+                            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _hv["oid"]})
+                    p["trim_preorders"] = {}
+                p.pop("trim_to_place", None)
+                continue
+
+            # ★ V10.31b: stale trim_preorders 정리 — 거래소 취소 포함
             _trp = p.get("trim_preorders")
             if _trp and isinstance(_trp, dict):
                 _stale_tiers = [
@@ -1806,9 +1827,15 @@ async def _place_trim_preorders(ex, st, snapshot):
                     if info.get("oid") and str(info["oid"]) not in _PENDING_LIMITS
                 ]
                 for _st in _stale_tiers:
+                    _st_oid = _trp[_st].get("oid", "")
+                    try:
+                        await asyncio.to_thread(ex.cancel_order, _st_oid, sym)
+                        print(f"[TRIM_STALE] {sym} T{_st} 거래소 취소: {_st_oid}")
+                    except Exception as _stale_e:
+                        _se = str(_stale_e)
+                        if "Unknown order" not in _se and "-2013" not in _se:
+                            print(f"[TRIM_STALE] {sym} T{_st} 취소 실패(무시): {_stale_e}")
                     _trp.pop(_st, None)
-                    print(f"[TRIM_STALE] {sym} {pos_side} T{_st} trim_preorders 정리 "
-                          f"(oid not in pending_limits → plan_tp1 DCA_TRIM 복귀)")
 
             ttp = p.get("trim_to_place")
             if not ttp:
@@ -2516,11 +2543,11 @@ async def _main_loop(ex_init, dry_run: bool):
             # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
             await _manage_pending_limits(ex, st, snapshot)
 
-            # ★ V10.31b: TP1 선주문 제거 — 전 tier trail 방식 통합
-            # await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
+            # ★ V10.31b: T1 선주문 관리 (LOW/NORMAL만, HIGH는 내부에서 스킵)
+            await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
 
-            # ★ V10.30: Trim 선주문 제거 — trail로 대체 (시장가, 동적 트리거)
-            # await _place_trim_preorders(ex, st, snapshot)
+            # ★ V10.31b: Trim 선주문 (LOW/NORMAL만, HIGH는 내부에서 스킵)
+            await _place_trim_preorders(ex, st, snapshot)
 
             # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
             await _place_dca_preorders(ex, st, snapshot)
