@@ -82,6 +82,10 @@ def apply_order_results(
 ) -> None:
     """주문 결과를 포지션 북에 반영."""
     now = time.time()
+    # ★ V10.31b FIX: calc_roi_pct를 함수 최상단에서 import
+    # line 447 TRAIL_ON 블록 내 로컬 import가 Python에 의해 함수 전체 로컬 변수로 인식
+    # → TP1 블록(line 417)에서 UnboundLocalError 발생 → 롱 포지션 소실
+    from v9.utils.utils_math import calc_roi_pct
 
     # ★ CORE 포지션을 HEDGE보다 먼저 처리
     def _apply_order_key(r):

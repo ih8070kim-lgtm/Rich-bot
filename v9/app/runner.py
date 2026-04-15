@@ -797,8 +797,10 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
             roi_now = calc_roi_pct(ep, curr_p, pos_side, LEVERAGE)
             if roi_now >= tp1_thresh:
                 # 선주문이 있으면 유지 (거래소에서 자연 체결 대기)
-                # 선주문이 없으면 plan_tp1이 처리 → 스킵
-                continue
+                if p.get("tp1_preorder_id"):
+                    continue
+                # ★ V10.31b: 선주문 없으면 즉시 배치 (HIGH→LOW 전환 직후 등)
+                # target_price가 현재가 아래이므로 거래소에서 즉시 체결됨
 
             # 수량 계산 — ★ V10.29d: 노셔널 기반
             from v9.config import calc_tier_notional, notional_to_qty
@@ -908,6 +910,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                         "role": p.get("role", ""),
                         "_expected_role": p.get("role", ""),
                         "tier": 0,
+                        "is_tp_pre": True,  # ★ V10.31b: 타임아웃 취소 제외
                     },
                 )
                 _rpl(f"tp1pre_{oid}", sym, close_side, safe_qty, safe_price, oid,
@@ -1066,7 +1069,7 @@ async def _manage_pending_limits(ex, st, snapshot):
         if status.startswith("_"):
             # 타임아웃 체크 — 등록 후 5분 경과
             # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre"):
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre") and not info.get("is_tp_pre"):
                 cancel_list.append((oid, info))
             continue
 
@@ -1185,7 +1188,7 @@ async def _manage_pending_limits(ex, st, snapshot):
         elif status == "open":
             # 타임아웃 체크
             # ★ V10.29b: trim 선주문은 타임아웃 취소 제외 (체결까지 유지)
-            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre"):
+            if now - info["placed_at"] > PENDING_LIMIT_TIMEOUT_SEC and not info.get("is_trim") and not info.get("is_dca_pre") and not info.get("is_tp_pre"):
                 cancel_list.append((oid, info))
 
     # ── Phase 3: 타임아웃 취소 (병렬) ──
