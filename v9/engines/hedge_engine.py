@@ -89,7 +89,8 @@ def plan_force_close(
             _res_notional = _res_amt * curr_p
             _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
             # ★ V10.30 FIX: float epsilon(2.84e-14) 차단 + reduce_fail 쿨다운 존중
-            _res_cd = float(sym_st.get("reduce_fail_cooldown_until", 0) or 0)
+            # ★ V10.31b FIX: 필드명 통일 (runner는 exit_fail_cooldown_until 세팅)
+            _res_cd = float(sym_st.get("exit_fail_cooldown_until", 0) or 0)
             if _res_amt > _res_min_qty * 0.01 and _res_cd < now:
                 if _res_notional < 20.0 or _res_amt < _res_min_qty * 2:
                     force  = True

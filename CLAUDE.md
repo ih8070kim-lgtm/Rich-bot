@@ -59,3 +59,4 @@
 | 04-15 | trim이 limit으로 나감 | plan_trim_trail에 force_market 미설정 → limit placed → sync 불일치 → ghost | V10.31b: plan_trim_trail metadata에 force_market:True 추가 |
 | 04-15 | 재시작 후 stale DCA 잔존 | _PENDING_LIMITS 유실 + dca_preorders OID만 남음 → stale pop만 하고 거래소 미취소 | V10.31b: stale 감지 시 ex.cancel_order 호출 + GHOST에 FC_EXCHANGE_CANCEL 추가 |
 | 04-15 | calc_roi_pct UnboundLocalError | TRAIL_ON 블록 내 로컬 import가 TP1 블록까지 오염 → TP1 체결 시 크래시 → 롱 소실(L2→L0) | V10.31b: apply_order_results 함수 최상단으로 import 이동 |
+| 04-13 | RESIDUAL_CLEANUP 무한루프 | hedge_engine이 reduce_fail_cooldown 체크, runner는 exit_fail_cooldown 세팅 → 필드명 불일치 → 쿨다운 무시 | V10.31b: exit_fail_cooldown_until로 통일 |
