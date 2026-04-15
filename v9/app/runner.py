@@ -273,6 +273,26 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                     )
                 except Exception as _lt_e:
                     print(f"[SYNC] log_trade(GHOST) 실패(무시): {_lt_e}")
+                # ★ V10.31b: GHOST_CLEANUP 시 거래소 잔존 DCA/trim limit 취소
+                try:
+                    from v9.execution.order_router import _PENDING_LIMITS
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _ps = "LONG" if side == "buy" else "SHORT"
+                    for _oid, _info in list(_PENDING_LIMITS.items()):
+                        if _info.get("sym") == sym and _info.get("positionSide") == _ps:
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _oid})
+                            print(f"[GHOST_CLEANUP] {sym} 잔존 limit 취소큐: {_oid}")
+                except Exception:
+                    pass
+                _dca_pre = book_p.get("dca_preorders", {})
+                for _dt, _di in _dca_pre.items():
+                    if isinstance(_di, dict) and _di.get("oid"):
+                        try:
+                            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _di["oid"]})
+                            print(f"[GHOST_CLEANUP] {sym} DCA limit 취소큐: {_di['oid']}")
+                        except Exception:
+                            pass
                 sym_st = st.get(sym, {})
                 set_p(sym_st, side, None)
 

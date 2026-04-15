@@ -52,3 +52,5 @@
 - [ ] trim 후 dca_level 정확히 감소
 - [ ] TRIM_TRAIL_FLOOR(0.5%) 하한 유지
 - [ ] T1 TP1 intent에 force_market: True 포함
+- [ ] T2+ TRIM intent에 force_market: True 포함
+- [ ] GHOST_CLEANUP 시 거래소 DCA/trim limit 취소 (runner.py sync)

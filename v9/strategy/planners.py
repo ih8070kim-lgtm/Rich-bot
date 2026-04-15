@@ -1680,7 +1680,8 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
             price=curr_p,
             reason=f"DCA_{_reason}→T{dca_level-1}_T{dca_level}",
             metadata={"roi_gross": roi, "is_trim": True,
-                      "target_tier": dca_level - 1},
+                      "target_tier": dca_level - 1,
+                      "force_market": True},
         ))
     return intents
 
