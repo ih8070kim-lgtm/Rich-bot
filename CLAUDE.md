@@ -57,3 +57,4 @@
 | 04-15 | T2+ trim trail 미발동 | plan_tp1 guard(tp1_preorder_id/limit_oid/step 등)가 T2+ trail까지 차단 | V10.31b: 전 tier trail 통합, preorder 시스템 제거 |
 | 04-15 | TIA T2 포지션 비대화(3728) | GHOST_CLEANUP이 거래소 DCA limit 미취소 → 다음 OPEN에 옛날 DCA 체결 | V10.31b: GHOST_CLEANUP 시 PENDING_LIMITS+dca_preorders 취소큐 추가 |
 | 04-15 | trim이 limit으로 나감 | plan_trim_trail에 force_market 미설정 → limit placed → sync 불일치 → ghost | V10.31b: plan_trim_trail metadata에 force_market:True 추가 |
+| 04-15 | 재시작 후 stale DCA 잔존 | _PENDING_LIMITS 유실 + dca_preorders OID만 남음 → stale pop만 하고 거래소 미취소 | V10.31b: stale 감지 시 ex.cancel_order 호출 + GHOST에 FC_EXCHANGE_CANCEL 추가 |

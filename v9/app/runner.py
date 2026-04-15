@@ -276,12 +276,14 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                 # ★ V10.31b: GHOST_CLEANUP 시 거래소 잔존 DCA/trim limit 취소
                 try:
                     from v9.execution.order_router import _PENDING_LIMITS
-                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE, _FC_EXCHANGE_CANCEL
                     _ps = "LONG" if side == "buy" else "SHORT"
                     for _oid, _info in list(_PENDING_LIMITS.items()):
                         if _info.get("sym") == sym and _info.get("positionSide") == _ps:
                             _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _oid})
                             print(f"[GHOST_CLEANUP] {sym} 잔존 limit 취소큐: {_oid}")
+                    # ★ 거래소 전수 취소 (재시작 후 레지스트리 비어있을 때도 커버)
+                    _FC_EXCHANGE_CANCEL.append({"sym": sym, "positionSide": _ps})
                 except Exception:
                     pass
                 _dca_pre = book_p.get("dca_preorders", {})
@@ -1655,8 +1657,16 @@ async def _place_dca_preorders(ex, st, snapshot):
             if _existing and _existing.get("oid"):
                 _oid = _existing["oid"]
 
-                # stale 체크
+                # stale 체크: 재시작 시 _PENDING_LIMITS 비어있음 → 거래소 취소 필요
                 if _oid not in _PENDING_LIMITS:
+                    # ★ V10.31b: stale OID를 거래소에서 실제 취소
+                    try:
+                        await asyncio.to_thread(ex.cancel_order, _oid, sym)
+                        print(f"[DCA_PRE_STALE] {sym} T{next_tier} 거래소 취소: {_oid}")
+                    except Exception as _stale_e:
+                        _se = str(_stale_e)
+                        if "Unknown order" not in _se and "-2013" not in _se:
+                            print(f"[DCA_PRE_STALE] {sym} T{next_tier} 취소 실패(무시): {_stale_e}")
                     _dca_pre.pop(next_tier, None)
                     continue
 
