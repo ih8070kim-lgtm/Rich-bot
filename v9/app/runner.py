@@ -757,6 +757,11 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                 if p.get("tp1_preorder_id"):
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue
+            # ★ V10.31b: 미장전 정리 중 선주문 차단
+            if p.get("pending_close"):
+                if p.get("tp1_preorder_id"):
+                    await _cancel_tp1_preorder(ex, p, sym)
+                continue
             # ★ V10.29: T2+ → TP1 선주문 전면 차단 (trim이 exit 담당)
             _dca_lv = int(p.get("dca_level", 1) or 1)
             if _dca_lv >= 2:
@@ -1643,6 +1648,9 @@ async def _place_dca_preorders(ex, st, snapshot):
             if p.get("role", "") in ("BC", "CB", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
                 continue
             if p.get("pending_dca") or int(p.get("step", 0) or 0) >= 1:
+                continue
+            # ★ V10.31b: 미장전 정리 중 DCA 차단
+            if p.get("pending_close"):
                 continue
 
             dca_level = int(p.get("dca_level", 1) or 1)

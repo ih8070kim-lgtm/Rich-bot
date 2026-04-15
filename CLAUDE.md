@@ -12,7 +12,7 @@
 - **★ V10.30: DCA는 단일 경로(_place_dca_preorders LIMIT만). plan_dca 호출 금지**
 - **★ V10.30: DCA 주문 전 calc_tier_notional - 현재보유 검증 필수 (과주문 방지)**
 - **★ V10.30: FC/TRAIL_ON 시 거래소 잔존 주문 즉시 취소 (_FC_EXCHANGE_CANCEL)**
-- **★ V10.31b: TP1 레짐 분기. HIGH=trail(시장가), LOW/NORMAL=선주문(지정가). _manage_tp1_preorders+_place_trim_preorders 복원**
+- **★ V10.31b: 미장전 포지션 정리. ET08:00 진입차단 → ET08:30 전포지션 시장가정리. DST자동, 주말/공휴일 스킵**
 
 ## 모듈별 상세 문서 (관련 수정 시 반드시 참조)
 - 슬롯/리스크 수정 → `docs/SLOTS.md`

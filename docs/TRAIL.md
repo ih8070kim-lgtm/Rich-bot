@@ -17,6 +17,17 @@ T1 TP trail과 T2+ TRIM trail과 TRAIL_ON 모두 동일 기준 사용.
 기준: HARD_SL_ATR_BASE × 2 / × 5 경계
 ```
 
+## Pre-Market Clear (V10.31b)
+```
+★ 미장 오픈 전 포지션 정리 — T3 FC 손실 36~45% 절감
+  ET 08:00: 신규 진입 차단 (_pmc_block_entry)
+  ET 08:30: 전 포지션 시장가 정리 (PRE_MKT_CLEAR, 1회)
+  ET 09:30: 진입 차단 해제
+  DST 자동 반영 (zoneinfo America/New_York)
+  주말(토/일) + NYSE 2026 공휴일 스킵
+  DCA 선주문 취소큐 추가
+```
+
 ## 수정 시 체크
 - [ ] trail_qty가 p["amt"] 전량인지 (부분 수량 금지)
 - [ ] step=1 조건 유지

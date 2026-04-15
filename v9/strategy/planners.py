@@ -494,6 +494,9 @@ def plan_open(
     system_state: Dict,
 ) -> List[Intent]:
     intents: List[Intent] = []
+    # ★ V10.31b: 미장전 신규 진입 차단
+    if system_state.get("_pmc_block_entry"):
+        return intents
     long_targets  = list(getattr(snapshot, "global_targets_long",  None) or [])
     short_targets = list(getattr(snapshot, "global_targets_short", None) or [])
     # ★ Python UnboundLocalError 방지: 루프 안에서 재할당되는 변수 미리 초기화
@@ -1985,6 +1988,96 @@ from v9.engines.hedge_engine import plan_force_close, save_exit_state, restore_e
 from v9.engines.dca_engine import plan_counter, save_counter_state, restore_counter_state
 
 
+# ═════════════════════════════════════════════════════════════════
+# PRE-MARKET CLEAR (V10.31b — 미장 전 포지션 정리)
+# ═════════════════════════════════════════════════════════════════
+def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
+                          system_state: Dict) -> List[Intent]:
+    """★ V10.31b: 미장 오픈 전 포지션 정리 (DST 자동 반영).
+
+    08:00 ET: 신규 진입 차단 (system_state 플래그)
+    08:30 ET: 전 포지션 시장가 정리
+    """
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    intents: List[Intent] = []
+    et = datetime.now(ZoneInfo("America/New_York"))
+    et_min = et.hour * 60 + et.minute
+    today_key = et.strftime("%Y-%m-%d")
+
+    # ★ 주말(토/일) + NYSE 공휴일 → 스킵
+    if et.weekday() >= 5:
+        return intents
+    _NYSE_HOLIDAYS_2026 = {
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03",
+        "2026-05-25", "2026-06-19", "2026-07-03", "2026-09-07",
+        "2026-11-26", "2026-12-25",
+    }
+    if today_key in _NYSE_HOLIDAYS_2026:
+        return intents
+
+    BLOCK_START = 480   # ET 08:00 — 신규 진입 차단
+    CLEAR_START = 510   # ET 08:30 — 전 포지션 시장가 정리
+    CLEAR_END   = 570   # ET 09:30 — 차단 해제
+
+    # ── 08:00~09:30: 신규 진입 차단 ──
+    if BLOCK_START <= et_min < CLEAR_END:
+        system_state["_pmc_block_entry"] = True
+    else:
+        system_state.pop("_pmc_block_entry", None)
+
+    # ── 08:30: 전 포지션 시장가 정리 (1회) ──
+    if CLEAR_START <= et_min < CLEAR_END:
+        clear_key = f"_pmc_clear_{today_key}"
+        if system_state.get(clear_key):
+            return intents
+
+        for symbol, p in _pos_items(st):
+            if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                                 "INSURANCE_SH", "CORE_HEDGE"):
+                continue
+            amt = float(p.get("amt", 0) or 0)
+            if amt <= 0:
+                continue
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+            if curr_p <= 0:
+                continue
+
+            is_long = p.get("side", "") == "buy"
+            dca_level = int(p.get("dca_level", 1) or 1)
+
+            # DCA 선주문 취소
+            for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                if isinstance(_di, dict) and _di.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+            p["dca_preorders"] = {}
+
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.FORCE_CLOSE,
+                symbol=symbol,
+                side="sell" if is_long else "buy",
+                qty=amt,
+                price=curr_p,
+                reason=f"PRE_MKT_CLEAR_T{dca_level}",
+                metadata={"force_market": True,
+                          "_expected_role": p.get("role", "")},
+            ))
+
+        if intents:
+            system_state[clear_key] = True
+            print(f"[PRE_MKT] {len(intents)}건 전 포지션 시장가 정리 "
+                  f"(ET {et.strftime('%H:%M')})")
+        return intents
+
+    return intents
+
+
 def generate_all_intents(
     snapshot: MarketSnapshot,
     st: Dict,
@@ -2014,6 +2107,12 @@ def generate_all_intents(
                   f"heavy={_urg_log['heavy_side']}")
             generate_all_intents._last_urg = _urg_log["urgency"]
 
+    # ★ V10.31b: 미장 전 포지션 정리 (최우선)
+    _pmc_intents = plan_pre_market_clear(snapshot, st, system_state)
+    if _pmc_intents:
+        intents += _pmc_intents
+        return intents  # Phase 발동 시 다른 intent 생성 차단
+
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
@@ -2023,9 +2122,11 @@ def generate_all_intents(
     intents += plan_trail_on(snapshot, st)
     # ★ V10.30: plan_dca 제거 — _place_dca_preorders(LIMIT)로 통일 (시장가/LIMIT 중복 방지)
     # intents += plan_dca(snapshot, st, cooldowns, system_state)
-    intents += plan_counter(snapshot, st, system_state)  # ★ V10.29: MR ROI- 반대 사이드 진입
-    intents += plan_insurance_sh(snapshot, st, system_state)
-    intents += plan_open(snapshot, st, cooldowns, system_state)
+    # ★ V10.31b: 미장전 신규 진입 차단 (08:00-09:30 ET)
+    if not system_state.get("_pmc_block_entry"):
+        intents += plan_counter(snapshot, st, system_state)
+        intents += plan_insurance_sh(snapshot, st, system_state)
+        intents += plan_open(snapshot, st, cooldowns, system_state)
     for _i in intents:
         if _i.metadata is None:
             _i.metadata = {}
