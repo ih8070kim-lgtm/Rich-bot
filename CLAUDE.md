@@ -64,3 +64,4 @@
 | 04-15 | Zombie 강제청산 | 슬롯풀 시 T1/T2 조건부 청산 → 회복 차단 | V10.31b: Zombie 로직 제거 |
 | 04-15 | TREND_COMP 쿨다운 막힘 | DOT TRAIL_ON 15분 후 SEI MR이 DOT를 companion 선택 → DOT 쿨다운에 걸려 REJECT | V10.31b: entry_type=TREND는 쿨다운 면제 |
 | 04-17 | trim 선주문 가격 stale | DCA로 EP 변경 후 기존 trim limit 가격 미갱신 → 구 EP 기준 +3.3%에서 대기 (정상 1.5%) | V10.31b: _place_trim_preorders에서 매 틱 가격 검증, 0.1% 이상 차이 시 취소+재배치 |
+| 04-17 | TREND score 1.0~2.0 구간 손실 | 애매한 트렌드 세기 → DCA까지 끌려감 → T3 FC | V10.31b: score 1.0~2.0 TREND 진입 차단 (COMP+NOSLOT 모두) |

@@ -1065,45 +1065,54 @@ def plan_open(
                             _tr_best_sym = _tr_sym
 
                 if _tr_best_sym:
-                    _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
-                    _tr_grid = total_cap / GRID_DIVISOR * LEVERAGE
-                    _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
-                    _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
-
-                    if _tr_qty > 0:
-                        _tr_dca_targets = _build_dca_targets(
-                            _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
-                        _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
-
-                        # ★ V10.29d: MR fill 확인 후 발사 — system_state에 저장
-                        # runner._process_pending_fill(OPEN)에서 꺼내서 실행
-                        system_state["_pending_trend_comp"] = {
-                            "symbol": _tr_best_sym,
-                            "side": _tr_opp_side,
-                            "qty": _tr_qty,
-                            "price": _tr_cp,
-                            "score": _tr_best_score,
-                            "mr_symbol": symbol,
-                            "dca_targets": _tr_dca_targets,
-                            "regime": _btc_regime,
-                            "ts": time.time(),
-                        }
-                        # ★ V10.29e: 동일심볼 헷지 시뮬레이션 — TREND_COMP와 비교용
-                        _hsim = system_state.setdefault("_hedge_sim", {})
-                        _hsim_opp = "buy" if trigger_side == "sell" else "sell"
-                        _hsim[f"{symbol}:{trigger_side}"] = {
-                            "ep": curr_p, "side": _hsim_opp,
-                            "ts": time.time(), "mr_side": trigger_side,
-                            "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
-                            "trend_ep": _tr_cp,
-                        }
-                        print(f"[HEDGE_SIM] 📊 {symbol} {_hsim_opp} ep={curr_p:.4f} "
-                              f"(vs TREND {_tr_best_sym} {_tr_opp_side} ep={_tr_cp:.4f})")
+                    # ★ V10.31b: score 1.0~2.0 필터 — 애매한 트렌드 스킵
+                    if 1.0 <= _tr_best_score < 2.0:
+                        print(f"[TREND_SCORE_SKIP] COMP {_tr_best_sym} score={_tr_best_score:.1f} "
+                              f"(1.0~2.0 필터) ← {symbol}")
                         try:
-                            log_system("HEDGE_SIM", f"{symbol} {_hsim_opp} ep={curr_p:.4f} vs {_tr_best_sym} {_tr_opp_side}")
+                            from v9.logging.logger_csv import log_system
+                            log_system("TREND_SCORE_SKIP", f"COMP {_tr_best_sym} score={_tr_best_score:.1f} sig={symbol}")
                         except Exception: pass
-                        print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
-                              f"← sig {symbol} {_trend_signal_side} (PENDING→MR fill)")
+                    else:
+                        _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
+                        _tr_grid = total_cap / GRID_DIVISOR * LEVERAGE
+                        _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                        _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
+
+                        if _tr_qty > 0:
+                            _tr_dca_targets = _build_dca_targets(
+                                _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
+                            _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
+
+                            # ★ V10.29d: MR fill 확인 후 발사 — system_state에 저장
+                            # runner._process_pending_fill(OPEN)에서 꺼내서 실행
+                            system_state["_pending_trend_comp"] = {
+                                "symbol": _tr_best_sym,
+                                "side": _tr_opp_side,
+                                "qty": _tr_qty,
+                                "price": _tr_cp,
+                                "score": _tr_best_score,
+                                "mr_symbol": symbol,
+                                "dca_targets": _tr_dca_targets,
+                                "regime": _btc_regime,
+                                "ts": time.time(),
+                            }
+                            # ★ V10.29e: 동일심볼 헷지 시뮬레이션 — TREND_COMP와 비교용
+                            _hsim = system_state.setdefault("_hedge_sim", {})
+                            _hsim_opp = "buy" if trigger_side == "sell" else "sell"
+                            _hsim[f"{symbol}:{trigger_side}"] = {
+                                "ep": curr_p, "side": _hsim_opp,
+                                "ts": time.time(), "mr_side": trigger_side,
+                                "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
+                                "trend_ep": _tr_cp,
+                            }
+                            print(f"[HEDGE_SIM] 📊 {symbol} {_hsim_opp} ep={curr_p:.4f} "
+                                  f"(vs TREND {_tr_best_sym} {_tr_opp_side} ep={_tr_cp:.4f})")
+                            try:
+                                log_system("HEDGE_SIM", f"{symbol} {_hsim_opp} ep={curr_p:.4f} vs {_tr_best_sym} {_tr_opp_side}")
+                            except Exception: pass
+                            print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
+                                  f"← sig {symbol} {_trend_signal_side} (PENDING→MR fill)")
                         try:
                             from v9.logging.logger_csv import log_system
                             log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol} PENDING")
@@ -1121,6 +1130,17 @@ def plan_open(
             print(f"[TREND_SKIP] {symbol} {trigger_side} → 시그널없음({','.join(_ts_reasons) or 'N/A'})")
 
     # ★ V10.29e: TREND_NOSLOT — 루프 종료 후 최고 score 1개만 발사
+    if _noslot_best:
+        _ns = _noslot_best
+        # ★ V10.31b: score 1.0~2.0 필터
+        if 1.0 <= _ns["score"] < 2.0:
+            print(f"[TREND_SCORE_SKIP] NOSLOT {_ns['sym']} score={_ns['score']:.1f} "
+                  f"(1.0~2.0 필터) ← {_ns['sig_sym']}")
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("TREND_SCORE_SKIP", f"NOSLOT {_ns['sym']} score={_ns['score']:.1f} sig={_ns['sig_sym']}")
+            except Exception: pass
+            _noslot_best = None
     if _noslot_best:
         _ns = _noslot_best
         _ns_prices = snapshot.all_prices or {}
