@@ -2062,17 +2062,63 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
     if today_key in _NYSE_HOLIDAYS_2026:
         return intents
 
-    BLOCK_START = 480   # ET 08:00 — 신규 진입 차단
-    CLEAR_START = 510   # ET 08:30 — 전 포지션 시장가 정리
-    CLEAR_END   = 570   # ET 09:30 — 차단 해제
+    BLOCK_START = 480   # ET 08:00 — 신규 진입 차단 + limit 배치
+    CLEAR_START = 510   # ET 08:30 — 잔존 시장가 정리 + 차단 해제
+    CLEAR_END   = 570   # ET 09:30 — Phase 2 실행 허용 윈도우
 
-    # ── 08:00~09:30: 신규 진입 차단 ──
-    if BLOCK_START <= et_min < CLEAR_END:
+    # ── 08:00~08:30: 신규 진입 차단 ──
+    if BLOCK_START <= et_min < CLEAR_START:
         system_state["_pmc_block_entry"] = True
     else:
         system_state.pop("_pmc_block_entry", None)
 
-    # ── 08:30: 전 포지션 시장가 정리 (1회) ──
+    # ── Phase 1 (08:00): limit +0.5% 배치 (1회) ──
+    if BLOCK_START <= et_min < CLEAR_START:
+        p1_key = f"_pmc_p1_{today_key}"
+        if system_state.get(p1_key):
+            return intents
+
+        for symbol, p in _pos_items(st):
+            if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                                 "INSURANCE_SH", "CORE_HEDGE"):
+                continue
+            amt = float(p.get("amt", 0) or 0)
+            if amt <= 0:
+                continue
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+            if curr_p <= 0:
+                continue
+
+            is_long = p.get("side", "") == "buy"
+            close_price = curr_p * 1.005 if is_long else curr_p * 0.995
+            dca_level = int(p.get("dca_level", 1) or 1)
+
+            # DCA 선주문 취소
+            for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                if isinstance(_di, dict) and _di.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+            p["dca_preorders"] = {}
+
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.CLOSE,
+                symbol=symbol,
+                side="sell" if is_long else "buy",
+                qty=amt,
+                price=close_price,
+                reason=f"PRE_MKT_P1_T{dca_level}(+0.5%)",
+                metadata={"pre_market_limit": True,
+                          "_expected_role": p.get("role", "")},
+            ))
+
+        if intents:
+            system_state[p1_key] = True
+            print(f"[PRE_MKT] Phase 1: {len(intents)}건 limit +0.5% 배치 "
+                  f"(ET {et.strftime('%H:%M')})")
+        return intents
+
+    # ── Phase 2 (08:30): 잔존 포지션 시장가 정리 (1회) ──
     if CLEAR_START <= et_min < CLEAR_END:
         clear_key = f"_pmc_clear_{today_key}"
         if system_state.get(clear_key):
@@ -2106,14 +2152,14 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
                 side="sell" if is_long else "buy",
                 qty=amt,
                 price=curr_p,
-                reason=f"PRE_MKT_CLEAR_T{dca_level}",
+                reason=f"PRE_MKT_P2_T{dca_level}",
                 metadata={"force_market": True,
                           "_expected_role": p.get("role", "")},
             ))
 
         if intents:
             system_state[clear_key] = True
-            print(f"[PRE_MKT] {len(intents)}건 전 포지션 시장가 정리 "
+            print(f"[PRE_MKT] Phase 2: {len(intents)}건 잔존 시장가 정리 "
                   f"(ET {et.strftime('%H:%M')})")
         return intents
 

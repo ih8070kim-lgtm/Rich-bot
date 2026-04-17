@@ -144,6 +144,7 @@ async def route_order(
     from v9.types import IntentType as _IT_route
     _force_market = (
         _is_reduce(intent) and intent.intent_type != _IT_route.TP1  # TP1 제외 — 지정가
+        and not bool((intent.metadata or {}).get("pre_market_limit", False))  # ★ V10.31b: 미장전 limit
         or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")
         or bool((intent.metadata or {}).get("force_market", False))
     )
