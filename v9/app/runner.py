@@ -1082,21 +1082,7 @@ async def _manage_pending_limits(ex, st, snapshot):
         avg_price = float(fetch_result.get("average", 0) or info["price"] or 0)
 
         if status == "closed" or (status == "canceled" and filled_qty > 0):
-            # ★ 체결 → 포지션북 반영
-            _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot)
-            log_fill(info["trace_id"], sym, info["side"], avg_price, filled_qty,
-                     info["tag"], oid)
-            _clear_pending(sym)
-            remove_pending_limit(oid)
-            # ★ v10.14b: pending_entry 반드시 해제 (_apply_pending_fill 실패해도)
-            from v9.execution.position_book import set_pending_entry as _spe2
-            ensure_slot(st, sym)
-            # ★ v10.21: TP1 limit은 reduce → pending_entry 해제 불필요
-            if info["intent_type"] != "TP1":
-                _spe2(st[sym], info["side"], None)
-            print(f"[PENDING_LIMIT] ★ {sym} {info['intent_type']} 체결! "
-                  f"{filled_qty}@{avg_price:.4f}")
-            # ★ V10.31b: 바이낸스 realizedPnl 추출 (limit fill) — telegram 외부로 이동
+            # ★ V10.31b: 바이낸스 realizedPnl 추출 (limit fill) — _apply_pending_fill 전에
             _rpnl = 0.0
             _rcomm = 0.0
             try:
@@ -1116,6 +1102,22 @@ async def _manage_pending_limits(ex, st, snapshot):
                         _rcomm = float(_ffee.get("cost", 0) or 0)
             except Exception:
                 pass
+            info["_realized_pnl"] = _rpnl
+
+            # ★ 체결 → 포지션북 반영
+            _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot)
+            log_fill(info["trace_id"], sym, info["side"], avg_price, filled_qty,
+                     info["tag"], oid)
+            _clear_pending(sym)
+            remove_pending_limit(oid)
+            # ★ v10.14b: pending_entry 반드시 해제 (_apply_pending_fill 실패해도)
+            from v9.execution.position_book import set_pending_entry as _spe2
+            ensure_slot(st, sym)
+            # ★ v10.21: TP1 limit은 reduce → pending_entry 해제 불필요
+            if info["intent_type"] != "TP1":
+                _spe2(st[sym], info["side"], None)
+            print(f"[PENDING_LIMIT] ★ {sym} {info['intent_type']} 체결! "
+                  f"{filled_qty}@{avg_price:.4f}")
 
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
@@ -1587,6 +1589,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             _hold = now - float(p.get("time", now) or now)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
             # ★ V10.31b: 바이낸스 realizedPnl 우선 사용
+            _rpnl = float(info.get("_realized_pnl", 0) or 0)
             if _rpnl != 0.0:
                 _pnl = _rpnl
             elif pos_side == "buy":
