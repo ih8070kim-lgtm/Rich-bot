@@ -307,6 +307,11 @@ def apply_order_results(
                         mark_price=_sc_trim_mark)
                     if _sc_trim_qty <= 0:
                         _sc_trim_qty = filled
+                    # ★ V10.31b: trim qty 디버그
+                    print(f"[TRIM_DBG] {sym} T{tier} calc_trim_qty: "
+                          f"amt={p['amt']:.1f} ep={p['ep']:.4f} "
+                          f"bal=${_sc_trim_bal:.0f} mark=${_sc_trim_mark:.5f} "
+                          f"→ qty={_sc_trim_qty:.1f} (잔량={p['amt']-_sc_trim_qty:.1f})")
                     # 구 tier trim 선주문 취소
                     for _old_t, _old_info in list(p.get("trim_preorders", {}).items()):
                         if _old_info.get("oid"):

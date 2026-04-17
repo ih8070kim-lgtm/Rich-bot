@@ -60,3 +60,7 @@
 | 04-15 | 재시작 후 stale DCA 잔존 | _PENDING_LIMITS 유실 + dca_preorders OID만 남음 → stale pop만 하고 거래소 미취소 | V10.31b: stale 감지 시 ex.cancel_order 호출 + GHOST에 FC_EXCHANGE_CANCEL 추가 |
 | 04-15 | calc_roi_pct UnboundLocalError | TRAIL_ON 블록 내 로컬 import가 TP1 블록까지 오염 → TP1 체결 시 크래시 → 롱 소실(L2→L0) | V10.31b: apply_order_results 함수 최상단으로 import 이동 |
 | 04-13 | RESIDUAL_CLEANUP 무한루프 | hedge_engine이 reduce_fail_cooldown 체크, runner는 exit_fail_cooldown 세팅 → 필드명 불일치 → 쿨다운 무시 | V10.31b: exit_fail_cooldown_until로 통일 |
+| 04-15 | SEI CorrGuard -5.3% 조기컷 | corr<0.5+ROI<-4% → 강제청산이 T3 회복 차단 | V10.31b: CorrGuard 제거 (pure trim/trail 신뢰) |
+| 04-15 | Zombie 강제청산 | 슬롯풀 시 T1/T2 조건부 청산 → 회복 차단 | V10.31b: Zombie 로직 제거 |
+| 04-15 | TREND_COMP 쿨다운 막힘 | DOT TRAIL_ON 15분 후 SEI MR이 DOT를 companion 선택 → DOT 쿨다운에 걸려 REJECT | V10.31b: entry_type=TREND는 쿨다운 면제 |
+| 04-17 | trim 선주문 가격 stale | DCA로 EP 변경 후 기존 trim limit 가격 미갱신 → 구 EP 기준 +3.3%에서 대기 (정상 1.5%) | V10.31b: _place_trim_preorders에서 매 틱 가격 검증, 0.1% 이상 차이 시 취소+재배치 |

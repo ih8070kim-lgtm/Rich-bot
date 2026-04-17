@@ -210,7 +210,11 @@ def evaluate_intent(
 
     # ── R6: 쿨다운 / Corr ────────────────────────────────────────
     # ★ BC/CB는 자체 쿨다운 + excess return 사용 → MR 쿨다운/Corr 스킵
-    if itype in (IntentType.OPEN, IntentType.DCA) and not is_asym and meta.get("role") not in ("BC", "CB"):
+    # ★ V10.31b: TREND_COMP도 쿨다운 면제 (MR 시그널과 동시 진입 의도)
+    _entry_type = meta.get("entry_type", "")
+    if (itype in (IntentType.OPEN, IntentType.DCA) and not is_asym
+            and meta.get("role") not in ("BC", "CB")
+            and _entry_type != "TREND"):
         now      = time.time()
         cd_until = cooldowns.get(sym, 0.0)
         if now < cd_until:

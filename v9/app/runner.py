@@ -1458,6 +1458,11 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark)
             if _trim_qty <= 0:
                 _trim_qty = filled_qty  # fallback: DCA 수량 그대로
+            # ★ V10.31b: trim qty 디버그
+            print(f"[TRIM_DBG_PF] {sym} T{tier} calc_trim_qty: "
+                  f"amt={p['amt']:.1f} ep={p['ep']:.4f} "
+                  f"bal=${_bal:.0f} mark=${_mark:.5f} "
+                  f"→ qty={_trim_qty:.1f} (잔량={p['amt']-_trim_qty:.1f})")
             p.setdefault("trim_preorders", {})
             p["trim_to_place"] = {
                 "tier": tier,
@@ -1848,6 +1853,30 @@ async def _place_trim_preorders(ex, st, snapshot):
                             print(f"[TRIM_STALE] {sym} T{_st} 취소 실패(무시): {_stale_e}")
                     _trp.pop(_st, None)
 
+            # ★ V10.31b FIX: EP 변경 시 trim 선주문 가격 검증 → 불일치 시 취소+재배치
+            _trp_v = p.get("trim_preorders", {})
+            if _trp_v and isinstance(_trp_v, dict):
+                from v9.config import calc_trim_price as _ctp_v
+                _v_ep = float(p.get("ep", 0) or 0)
+                _v_dca = int(p.get("dca_level", 1) or 1)
+                if _v_ep > 0 and _v_dca >= 2:
+                    _v_correct = _ctp_v(_v_ep, pos_side, _v_dca)
+                    for _vt, _vi in list(_trp_v.items()):
+                        if not isinstance(_vi, dict) or not _vi.get("oid"):
+                            continue
+                        _v_old = float(_vi.get("price", 0) or 0)
+                        if _v_old > 0 and _v_correct > 0:
+                            _v_diff = abs(_v_old - _v_correct) / _v_correct
+                            if _v_diff > 0.001:  # 0.1% 이상 차이 → stale
+                                try:
+                                    await asyncio.to_thread(ex.cancel_order, _vi["oid"], sym)
+                                    print(f"[TRIM_REPRICE] {sym} T{_vt} "
+                                          f"${_v_old:.4f}→${_v_correct:.4f} (EP 변경)")
+                                except Exception:
+                                    pass
+                                _PENDING_LIMITS.pop(str(_vi["oid"]), None)
+                                _trp_v.pop(_vt, None)
+
             ttp = p.get("trim_to_place")
             if not ttp:
                 # ★ V10.29d: trim 재생성 — 노셔널 기반
@@ -1863,6 +1892,12 @@ async def _place_trim_preorders(ex, st, snapshot):
                         ep=_regen_ep, bal=_regen_bal, mark_price=_regen_mark
                     )
                     _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca)
+                    # ★ V10.31b: regen trim qty 디버그
+                    print(f"[TRIM_DBG_REGEN] {sym} T{_regen_dca} "
+                          f"amt={p['amt']:.1f} ep={_regen_ep:.4f} "
+                          f"bal=${_regen_bal:.0f} mark=${_regen_mark:.5f} "
+                          f"→ qty={_regen_qty:.1f} price=${_regen_price:.4f} "
+                          f"(잔량={p['amt']-_regen_qty:.1f})")
                     if _regen_qty > 0 and _regen_price > 0:
                         p["trim_to_place"] = {
                             "tier": _regen_dca,
@@ -1904,6 +1939,12 @@ async def _place_trim_preorders(ex, st, snapshot):
                     print(f"[TRIM_SKIP] {sym} T{tier} precision → 0")
                     p.pop("trim_to_place", None)
                     continue
+                # ★ V10.31b: 거래소 배치 직전 검증
+                _remain = float(p.get("amt", 0) or 0) - safe_trim_qty
+                print(f"[TRIM_DBG_PLACE] {sym} T{tier} 배치: "
+                      f"qty={safe_trim_qty}@${safe_trim_price} "
+                      f"amt={p.get('amt',0):.1f} 잔량={_remain:.1f} "
+                      f"ep={p.get('ep',0):.4f} ttp_ep={entry_price:.4f}")
                 order = await asyncio.to_thread(
                     ex.create_order,
                     sym, "limit", order_side, safe_trim_qty, safe_trim_price,
@@ -2463,8 +2504,7 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ── Intent 생성 ──────────────────────────────────────
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
-            # ★ v10.14d: plan_dca는 generate_all_intents 안에서 실행 (보험 타이밍 수정)
-            intents += generate_corrguard_intents(snapshot, st, system_state)
+            # ★ V10.31b: CorrGuard 제거 — -4% 조기컷이 T3 회복 차단
 
             # ★ Beta Cycle 통합
             if _BC_ENABLED:

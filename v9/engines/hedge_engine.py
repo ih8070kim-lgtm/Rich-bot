@@ -229,20 +229,8 @@ def plan_force_close(
                             _hsl = system_state.setdefault("_hard_sl_history", [])
                             _hsl.append({"ts": time.time(), "side": p.get("side", "buy")})
 
-                # ZOMBIE
-                if not force:
-                    _z_side = p.get("side", "buy")
-                    _z_dca = int(p.get("dca_level", 1) or 1)
-                    _z_slots = count_slots(st)
-                    _z_full = (_z_slots.risk_long >= MAX_LONG if _z_side == "buy" else _z_slots.risk_short >= MAX_SHORT)
-                    if _z_full and _z_dca < 3:
-                        _zf, _zr = _zombie_exit(p, roi_pct, now,
-                                                bad_regime_active=bad_regime_active,
-                                                snapshot=snapshot)
-                        if _zf:
-                            force  = True
-                            reason = _zr
-                            _zombie_cooldown[_z_side] = now + ZOMBIE_COOLDOWN_SEC
+                # ★ V10.31b: ZOMBIE 제거 — 슬롯풀이어도 trim/trail이 정리 담당
+                # 기존: 슬롯풀 + T1/T2 + 조건 → 강제청산. 회복 차단 요인.
 
                 # ★ V10.30: ZOMBIE_TIMECUT 제거 — T2 회복 허용
                 # 기존: T2 + 12h + ROI < 0 → 강제청산. BNB -1.4%에서 -$3 손절됨.
