@@ -1727,7 +1727,9 @@ async def _place_dca_preorders(ex, st, snapshot):
             dca_qty = dca_notional / limit_price
 
             min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
-            if dca_qty < min_qty or dca_qty * limit_price < 20.0:
+            if dca_qty < min_qty or dca_qty * limit_price < 10.0:
+                print(f"[DCA_PRE_SKIP] {sym} T{next_tier} qty={dca_qty:.1f} "
+                      f"notional=${dca_qty*limit_price:.1f} < min → skip")
                 continue
 
             ps = "LONG" if pos_side == "buy" else "SHORT"
