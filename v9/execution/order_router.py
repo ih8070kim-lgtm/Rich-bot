@@ -285,11 +285,29 @@ async def route_order(
             _DEDUP_CACHE[idem_key] = time.time()
             log_order(trace_id, sym, side, 'market', safe_qty, None, tag, order_id, 'filled')
             log_fill(trace_id, sym, side, avg_price, filled, tag, order_id)
+
+            # ★ V10.31b: 바이낸스 realizedPnl 추출 (reduce 주문만)
+            _rpnl = 0.0
+            if _is_reduce(intent):
+                try:
+                    _order_trades = order.get('trades') or []
+                    if not _order_trades:
+                        # ccxt가 trades 안 줬으면 fetch
+                        _order_trades = await asyncio.to_thread(
+                            ex.fetch_my_trades, sym, limit=5)
+                        _order_trades = [t for t in _order_trades
+                                         if str(t.get('order', '')) == str(order_id)]
+                    for _t in _order_trades:
+                        _rpnl += float((_t.get('info') or {}).get('realizedPnl', 0) or 0)
+                except Exception:
+                    pass
+
             return OrderResult(
                 trace_id=trace_id, success=True, order_id=order_id,
                 symbol=sym, side=side, qty=safe_qty,
                 avg_price=avg_price, filled_qty=filled,
                 order_type='market', tag=tag,
+                realized_pnl=_rpnl,
             )
 
     except Exception as e:

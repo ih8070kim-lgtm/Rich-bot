@@ -144,3 +144,4 @@ class OrderResult:
     order_type: str
     tag: str
     error: str | None = None
+    realized_pnl: float = 0.0  # ★ V10.31b: 바이낸스 realizedPnl

@@ -1096,28 +1096,29 @@ async def _manage_pending_limits(ex, st, snapshot):
                 _spe2(st[sym], info["side"], None)
             print(f"[PENDING_LIMIT] ★ {sym} {info['intent_type']} 체결! "
                   f"{filled_qty}@{avg_price:.4f}")
+            # ★ V10.31b: 바이낸스 realizedPnl 추출 (limit fill) — telegram 외부로 이동
+            _rpnl = 0.0
+            _rcomm = 0.0
+            try:
+                _ftrades = fetch_result.get("trades") or []
+                if _ftrades:
+                    for _ft in _ftrades:
+                        _fi = _ft.get("info", {}) if isinstance(_ft, dict) else {}
+                        _rpnl += float(_fi.get("realizedPnl", 0) or 0)
+                        _rcomm += float(_fi.get("commission", 0) or 0)
+                else:
+                    _fi = fetch_result.get("info", {})
+                    _rpnl = float(_fi.get("realizedPnl", 0) or 0)
+                    _rcomm = float(_fi.get("commission", 0) or 0)
+                if _rcomm == 0:
+                    _ffee = fetch_result.get("fee") or {}
+                    if isinstance(_ffee, dict):
+                        _rcomm = float(_ffee.get("cost", 0) or 0)
+            except Exception:
+                pass
+
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
-                # ★ V10.29e: 바이낸스 realizedPnl 추출 (limit fill)
-                _rpnl = 0.0
-                _rcomm = 0.0
-                try:
-                    _ftrades = fetch_result.get("trades") or []
-                    if _ftrades:
-                        for _ft in _ftrades:
-                            _fi = _ft.get("info", {}) if isinstance(_ft, dict) else {}
-                            _rpnl += float(_fi.get("realizedPnl", 0) or 0)
-                            _rcomm += float(_fi.get("commission", 0) or 0)
-                    else:
-                        _fi = fetch_result.get("info", {})
-                        _rpnl = float(_fi.get("realizedPnl", 0) or 0)
-                        _rcomm = float(_fi.get("commission", 0) or 0)
-                    if _rcomm == 0:
-                        _ffee = fetch_result.get("fee") or {}
-                        if isinstance(_ffee, dict):
-                            _rcomm = float(_ffee.get("cost", 0) or 0)
-                except Exception:
-                    pass
 
                 if info.get("is_trim"):
                     _pl_type = "TRIM_FILL"
@@ -1585,7 +1586,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             from v9.logging.logger_csv import log_trade
             _hold = now - float(p.get("time", now) or now)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
-            if pos_side == "buy":
+            # ★ V10.31b: 바이낸스 realizedPnl 우선 사용
+            if _rpnl != 0.0:
+                _pnl = _rpnl
+            elif pos_side == "buy":
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)

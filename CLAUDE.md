@@ -66,3 +66,4 @@
 | 04-17 | trim 선주문 가격 stale | DCA로 EP 변경 후 기존 trim limit 가격 미갱신 → 구 EP 기준 +3.3%에서 대기 (정상 1.5%) | V10.31b: _place_trim_preorders에서 매 틱 가격 검증, 0.1% 이상 차이 시 취소+재배치 |
 | 04-17 | TREND score 1.0~2.0 구간 손실 | 애매한 트렌드 세기 → DCA까지 끌려감 → T3 FC | V10.31b: score 1.0~2.0 TREND 진입 차단 (COMP+NOSLOT 모두) |
 | 04-17 | BC 활성 시 MR 레버리지 초과 | BC가 잔고 사용 중인데 MR이 전체 잔고 기준 사이징 → 실질 레버리지 초과 | V10.31b: _mr_available_balance() — BC 노셔널 차감 후 MR 사이징 (진입/DCA/trim 전부) |
+| 04-17 | PnL 과장 (내부계산 vs 바이낸스) | OrderResult에 realized_pnl 미포함 → 내부 (exit-ep)×qty 계산이 trim 과다매도 등으로 부풀림 | V10.31b: OrderResult.realized_pnl 추가 + order_router/runner에서 바이낸스 trades realizedPnl 추출 |
