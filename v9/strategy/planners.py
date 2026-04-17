@@ -30,6 +30,28 @@ from v9.engines.hedge_core import (
 
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V10.31b: MR 가용 잔고 (BC/CB 보유 노셔널 차감)
+# ═════════════════════════════════════════════════════════════════
+def _mr_available_balance(snapshot, st: Dict) -> float:
+    """real_balance_usdt에서 BC/CB 포지션 노셔널을 차감한 MR 가용 잔고."""
+    bal = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+    prices = getattr(snapshot, "all_prices", {}) or {}
+    bc_notional = 0.0
+    for sym, sym_st in (st or {}).items():
+        if not isinstance(sym_st, dict):
+            continue
+        for _, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            if p.get("role") in ("BC", "CB"):
+                amt = float(p.get("amt", 0) or 0)
+                cp = float(prices.get(sym, 0) or 0)
+                if amt > 0 and cp > 0:
+                    bc_notional += amt * cp
+    return max(bal - bc_notional, bal * 0.3)  # 최소 30% 보장
+
+
+# ═════════════════════════════════════════════════════════════════
 # BTC Volatility Regime  (★ v10.5)
 # ═════════════════════════════════════════════════════════════════
 _regime_ema_pctl = None  # 모듈 레벨 EMA 상태
@@ -500,7 +522,7 @@ def plan_open(
     long_targets  = list(getattr(snapshot, "global_targets_long",  None) or [])
     short_targets = list(getattr(snapshot, "global_targets_short", None) or [])
     # ★ Python UnboundLocalError 방지: 루프 안에서 재할당되는 변수 미리 초기화
-    total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+    total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 노셔널 차감
 
     # ═══ V10.29d: PENDING TREND_COMP 발사 (MR fill 확인 후) ═══
     _ptc = system_state.get("_pending_trend_comp")
@@ -1146,7 +1168,7 @@ def plan_open(
         _ns_prices = snapshot.all_prices or {}
         _ns_cp = float(_ns_prices.get(_ns["sym"], 0))
         if _ns_cp > 0:
-            _ns_total_cap = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+            _ns_total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 차감
             _ns_grid = _ns_total_cap / GRID_DIVISOR * LEVERAGE
             _ns_notional = _ns_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
             _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0

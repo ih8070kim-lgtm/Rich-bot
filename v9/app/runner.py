@@ -1454,6 +1454,9 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             _trim_price = calc_trim_price(float(p["ep"]), _pos_side, tier)
             # ★ V10.29d: 노셔널 기반 trim — 목표 tier 노셔널까지만 남기고 나머지 정리
             _bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+            if _bal > 0:
+                from v9.strategy.planners import _mr_available_balance
+                _bal = _mr_available_balance(snapshot, st)
             _mark = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
             _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark)
             if _trim_qty <= 0:
@@ -1640,6 +1643,10 @@ async def _place_dca_preorders(ex, st, snapshot):
     import asyncio
 
     bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+    # ★ V10.31b: BC 포지션 노셔널 차감 — MR 가용 잔고
+    if bal > 0:
+        from v9.strategy.planners import _mr_available_balance
+        bal = _mr_available_balance(snapshot, st)
     prices = (snapshot.all_prices or {}) if snapshot else {}
     if bal <= 0:
         return
@@ -1888,6 +1895,9 @@ async def _place_trim_preorders(ex, st, snapshot):
                     from v9.config import calc_trim_price, calc_trim_qty
                     _regen_ep = float(p.get("ep", 0))
                     _regen_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                    if _regen_bal > 0:
+                        from v9.strategy.planners import _mr_available_balance
+                        _regen_bal = _mr_available_balance(snapshot, st)
                     _regen_mark = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
                     _regen_qty = calc_trim_qty(
                         float(p["amt"]), _regen_dca,

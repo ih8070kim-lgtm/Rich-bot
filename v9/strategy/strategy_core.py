@@ -300,6 +300,9 @@ def apply_order_results(
                     import time as _time_mod
                     _sc_trim_price = calc_trim_price(float(p["ep"]), pos_side, tier)
                     _sc_trim_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                    if _sc_trim_bal > 0:
+                        from v9.strategy.planners import _mr_available_balance
+                        _sc_trim_bal = _mr_available_balance(snapshot, st)
                     _sc_trim_mark = float((snapshot.all_prices or {}).get(sym, 0) or 0)
                     _sc_trim_qty = calc_trim_qty(
                         float(p["amt"]), tier,
