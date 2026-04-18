@@ -397,11 +397,16 @@ async def slots_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         role_summary.append(f"  {rk}: {rv}")
     role_text = "\n".join(role_summary) if role_summary else "  └ 없음"
 
+    # ★ V10.31c: TOTAL_MAX_SLOTS config에서 동적 로드 (5/5→4/4 변경 반영)
+    try:
+        from v9.config import TOTAL_MAX_SLOTS as _TOTAL_MAX
+    except Exception:
+        _TOTAL_MAX = 8  # fallback
     msg = (
         f"🎰 <b>슬롯 상세</b>\n"
         f"────────────────\n"
         f"MR 슬롯: L {_slot_mr_l} / S {_slot_mr_s}\n"
-        f"전체 사용: {_slot_total} / 10\n"
+        f"전체 사용: {_slot_total} / {_TOTAL_MAX}\n"
         f"⏳ Pending Limits: {_pending_cnt}\n"
         f"────────────────\n"
         f"<b>Role별 카운트</b>\n"
