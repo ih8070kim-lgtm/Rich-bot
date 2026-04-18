@@ -1089,12 +1089,15 @@ def plan_open(
                 if _tr_best_sym:
                     # ★ V10.31b: score 1.0~2.0 필터 — 애매한 트렌드 스킵
                     if 1.0 <= _tr_best_score < 2.0:
-                        print(f"[TREND_SCORE_SKIP] COMP {_tr_best_sym} score={_tr_best_score:.1f} "
-                              f"(1.0~2.0 필터) ← {symbol}")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("TREND_SCORE_SKIP", f"COMP {_tr_best_sym} score={_tr_best_score:.1f} sig={symbol}")
-                        except Exception: pass
+                        _skip_cd_key2 = f"_trend_skip_log_{_tr_best_sym}"
+                        if time.time() - getattr(plan_open, _skip_cd_key2, 0) > 300:
+                            setattr(plan_open, _skip_cd_key2, time.time())
+                            print(f"[TREND_SCORE_SKIP] COMP {_tr_best_sym} score={_tr_best_score:.1f} "
+                                  f"(1.0~2.0 필터) ← {symbol}")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("TREND_SCORE_SKIP", f"COMP {_tr_best_sym} score={_tr_best_score:.1f} sig={symbol}")
+                            except Exception: pass
                     else:
                         _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
                         _tr_grid = total_cap / GRID_DIVISOR * LEVERAGE
@@ -1156,12 +1159,16 @@ def plan_open(
         _ns = _noslot_best
         # ★ V10.31b: score 1.0~2.0 필터
         if 1.0 <= _ns["score"] < 2.0:
-            print(f"[TREND_SCORE_SKIP] NOSLOT {_ns['sym']} score={_ns['score']:.1f} "
-                  f"(1.0~2.0 필터) ← {_ns['sig_sym']}")
-            try:
-                from v9.logging.logger_csv import log_system
-                log_system("TREND_SCORE_SKIP", f"NOSLOT {_ns['sym']} score={_ns['score']:.1f} sig={_ns['sig_sym']}")
-            except Exception: pass
+            # ★ V10.31b: 로그 스팸 방지 (심볼당 5분 1회)
+            _skip_cd_key = f"_trend_skip_log_{_ns['sym']}"
+            if time.time() - getattr(plan_open, _skip_cd_key, 0) > 300:
+                setattr(plan_open, _skip_cd_key, time.time())
+                print(f"[TREND_SCORE_SKIP] NOSLOT {_ns['sym']} score={_ns['score']:.1f} "
+                      f"(1.0~2.0 필터) ← {_ns['sig_sym']}")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("TREND_SCORE_SKIP", f"NOSLOT {_ns['sym']} score={_ns['score']:.1f} sig={_ns['sig_sym']}")
+                except Exception: pass
             _noslot_best = None
     if _noslot_best:
         _ns = _noslot_best

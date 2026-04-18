@@ -1042,6 +1042,7 @@ async def _manage_pending_limits(ex, st, snapshot):
     )
     from v9.logging.logger_csv import log_fill
     from v9.execution.position_book import ensure_slot, get_p, set_p
+    from v9.utils.utils_math import calc_roi_pct
 
     pending = get_pending_limits()
     if not pending:

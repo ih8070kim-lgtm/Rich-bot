@@ -112,7 +112,7 @@ def calc_skew(st: dict, total_cap: float) -> Tuple[float, float, float]:
     순수 CORE_MR / CORE_BREAKOUT / BALANCE 포지션만으로 스큐 판단.
     Returns: (skew, long_margin_ratio, short_margin_ratio)
     """
-    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE"}
+    _HEDGE_ROLES = {"CORE_HEDGE", "INSURANCE_SH", "HEDGE", "SOFT_HEDGE", "BC", "CB"}
     if total_cap <= 0:
         return 0.0, 0.0, 0.0
     long_m = sum(
