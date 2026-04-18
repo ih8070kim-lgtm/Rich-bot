@@ -916,6 +916,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
                         "_expected_role": p.get("role", ""),
                         "tier": 0,
                         "is_tp_pre": True,  # ★ V10.31b: 타임아웃 취소 제외
+                        "entry_price": float(p.get("ep", 0) or 0),  # ★ V10.31b: PnL 계산용
                     },
                 )
                 _rpl(f"tp1pre_{oid}", sym, close_side, safe_qty, safe_price, oid,
@@ -1143,15 +1144,19 @@ async def _manage_pending_limits(ex, st, snapshot):
                         _trim_pnl = _rpnl
                         _trim_roi = _rpnl / (avg_price * filled_qty / LEVERAGE) * 100 if filled_qty > 0 and avg_price > 0 else 0.0
                     else:
-                        # ★ V10.29e: position book에서 EP 조회
-                        _tp1_pos_side = "sell" if info["side"] == "buy" else "buy"
-                        _tp1_p = get_p(st.get(sym, {}), _tp1_pos_side) if st else None
-                        _tp1_ep = float(_tp1_p.get("ep", 0) or 0) if isinstance(_tp1_p, dict) else 0.0
+                        # ★ V10.31b: info.entry_price 우선, 없으면 position book
+                        _tp1_ep = float(info.get("entry_price", 0) or 0)
+                        if _tp1_ep <= 0:
+                            _tp1_pos_side = "sell" if info["side"] == "buy" else "buy"
+                            _tp1_p = get_p(st.get(sym, {}), _tp1_pos_side) if st else None
+                            _tp1_ep = float(_tp1_p.get("ep", 0) or 0) if isinstance(_tp1_p, dict) else 0.0
                         if _tp1_ep > 0 and avg_price > 0:
-                            _raw = (avg_price - _tp1_ep) / _tp1_ep if info["side"] == "sell" else (_tp1_ep - avg_price) / _tp1_ep
-                            _fee = (avg_price + _tp1_ep) / _tp1_ep * FEE_RATE
-                            _trim_roi = (_raw - _fee) * LEVERAGE * 100
-                            _trim_pnl = (_raw - _fee) * avg_price * filled_qty
+                            if info["side"] == "sell":
+                                _trim_pnl = filled_qty * (avg_price - _tp1_ep)
+                            else:
+                                _trim_pnl = filled_qty * (_tp1_ep - avg_price)
+                            _trim_roi = calc_roi_pct(_tp1_ep, avg_price,
+                                "sell" if info["side"] == "buy" else "buy", LEVERAGE)
                         else:
                             _trim_roi = _trim_pnl = 0.0
                 elif info["intent_type"] == "DCA":
