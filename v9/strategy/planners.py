@@ -452,10 +452,15 @@ def _is_falling_knife_short(ohlcv_5m: list) -> bool:
 # ★ V10.29c: TREND COMPANION — MR 진입 시 반대 방향 추세 심볼 동시 진입
 # ═════════════════════════════════════════════════════════════════
 _trend_cooldown: Dict[str, float] = {}  # sym → next allowed ts
+# ★ V10.31c: TREND_SCORE_SKIP 로그 스팸 방지 — 모듈 dict 사용
+# (기존 setattr(plan_open, ...) 방식은 함수 리임포트 등으로 리셋되어 매 틱 로깅됨)
+_TREND_SKIP_LOG_CD: Dict[str, float] = {}  # f"{scope}:{sym}" → next log allowed ts
+_TREND_SKIP_LOG_CD_SEC = 300  # 심볼당 5분 1회
 
 def _calc_trend_score(ohlcv_15m: list, ohlcv_1m: list = None) -> float:
     """추세 점수: EMA 이격 × 거래량 서지 × RSI 가중치.
-    양수=상승 추세, 음수=하락 추세. abs() >= TREND_MIN_SCORE 이면 유효."""
+    양수=상승 추세, 음수=하락 추세. ★ V10.31c: 후보 풀 진입 기준은 _TR_MIN=0.5,
+    NOSLOT/COMP 발사 시 abs()가 1.0~2.0이면 블록됨 (애매한 트렌드 차단)."""
     if len(ohlcv_15m) < 35:
         return 0.0
     closes = [float(b[4]) for b in ohlcv_15m]
@@ -802,7 +807,8 @@ def plan_open(
         _trend_signal_short = _mr_signal_short and short_trig and micro_short_ok and _mr_vs_ok and _mr_mtf_ok
 
         # ★ V10.29e: TREND 시그널 방향 — MR 슬롯 블록이어도 사용
-        from v9.config import TREND_ENABLED, TREND_MIN_SCORE, TREND_COOLDOWN_SEC, TREND_MAX_SCORE
+        # ★ V10.31c: TREND_MIN_SCORE 제거 (미사용 config)
+        from v9.config import TREND_ENABLED, TREND_COOLDOWN_SEC, TREND_MAX_SCORE
         _trend_signal_side = None
         if TREND_ENABLED:
             if _trend_signal_long:
@@ -1005,6 +1011,59 @@ def plan_open(
             _trend_tag = "FLAT"
         reason = reason + f"_TREND({_trend_tag})"
 
+        # ════════════════════════════════════════════════════════════
+        # ★ V10.31c: TREND_FILTER_SIM — BTC 방향성 필터 shadow logging
+        # 두 임계값 병렬 기록:
+        #   Strict: 1h≤-1.5% OR 6h≤-4% OR dev_ma≤-3%
+        #   Loose:  1h≤-0.7% OR 6h≤-2% OR dev_ma≤-1.5%
+        # 실전 진입은 그대로 진행. MR 청산 시점에 sim ROI 계산해서 비교.
+        # ════════════════════════════════════════════════════════════
+        try:
+            _fs_1h  = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
+            _fs_6h  = float(getattr(snapshot, "btc_6h_change", 0.0) or 0.0)
+            _fs_dev = float(getattr(snapshot, "dev_ma", 0.0) or 0.0)
+
+            _fs_down_strict = (_fs_1h <= -0.015) or (_fs_6h <= -0.04) or (_fs_dev <= -3.0)
+            _fs_up_strict   = (_fs_1h >=  0.015) or (_fs_6h >=  0.04) or (_fs_dev >=  3.0)
+            _fs_down_loose  = (_fs_1h <= -0.007) or (_fs_6h <= -0.02) or (_fs_dev <= -1.5)
+            _fs_up_loose    = (_fs_1h >=  0.007) or (_fs_6h >=  0.02) or (_fs_dev >=  1.5)
+
+            _fs_strict_block = (trigger_side == "buy"  and _fs_down_strict) or \
+                               (trigger_side == "sell" and _fs_up_strict)
+            _fs_loose_block  = (trigger_side == "buy"  and _fs_down_loose)  or \
+                               (trigger_side == "sell" and _fs_up_loose)
+
+            if _fs_strict_block or _fs_loose_block:
+                _fs_btc_dir = "DOWN" if (_fs_down_loose and trigger_side == "buy") else \
+                              "UP"   if (_fs_up_loose   and trigger_side == "sell") else "FLAT"
+                _fs_common = {
+                    "ep": curr_p, "side": trigger_side, "ts": time.time(),
+                    "btc_dir": _fs_btc_dir,
+                    "btc_1h": _fs_1h, "btc_6h": _fs_6h, "dev_ma": _fs_dev,
+                    "entry_type": entry_type_tag,
+                }
+                if _fs_strict_block:
+                    _tfs_strict = system_state.setdefault("_trend_filter_sim_strict", {})
+                    _tfs_strict[f"{symbol}:{trigger_side}"] = dict(_fs_common)
+                if _fs_loose_block:
+                    _tfs_loose = system_state.setdefault("_trend_filter_sim_loose", {})
+                    _tfs_loose[f"{symbol}:{trigger_side}"] = dict(_fs_common)
+                _fs_tags = []
+                if _fs_strict_block: _fs_tags.append("STRICT")
+                if _fs_loose_block:  _fs_tags.append("LOOSE")
+                print(f"[TREND_FILTER_SIM] 📊 {symbol} {trigger_side} "
+                      f"blocks={'+'.join(_fs_tags)} btc_dir={_fs_btc_dir} "
+                      f"1h={_fs_1h*100:+.1f}% 6h={_fs_6h*100:+.1f}% devma={_fs_dev:+.1f}%")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("TREND_FILTER_SIM",
+                        f"{symbol} {trigger_side} blocks={'+'.join(_fs_tags)} "
+                        f"btc_dir={_fs_btc_dir} 1h={_fs_1h*100:+.1f}% "
+                        f"6h={_fs_6h*100:+.1f}% devma={_fs_dev:+.1f}%")
+                except Exception: pass
+        except Exception as _fs_e:
+            print(f"[TREND_FILTER_SIM] 기록 실패(무시): {_fs_e}")
+
         intents.append(Intent(
             trace_id=_tid(),
             intent_type=IntentType.OPEN,
@@ -1089,9 +1148,11 @@ def plan_open(
                 if _tr_best_sym:
                     # ★ V10.31b: score 1.0~2.0 필터 — 애매한 트렌드 스킵
                     if 1.0 <= _tr_best_score < 2.0:
-                        _skip_cd_key2 = f"_trend_skip_log_{_tr_best_sym}"
-                        if time.time() - getattr(plan_open, _skip_cd_key2, 0) > 300:
-                            setattr(plan_open, _skip_cd_key2, time.time())
+                        # ★ V10.31c: 모듈 dict로 쿨다운 관리 (setattr 리셋 문제 fix)
+                        _skip_key = f"COMP:{_tr_best_sym}"
+                        _now_t = time.time()
+                        if _now_t - _TREND_SKIP_LOG_CD.get(_skip_key, 0) > _TREND_SKIP_LOG_CD_SEC:
+                            _TREND_SKIP_LOG_CD[_skip_key] = _now_t
                             print(f"[TREND_SCORE_SKIP] COMP {_tr_best_sym} score={_tr_best_score:.1f} "
                                   f"(1.0~2.0 필터) ← {symbol}")
                             try:
@@ -1159,10 +1220,11 @@ def plan_open(
         _ns = _noslot_best
         # ★ V10.31b: score 1.0~2.0 필터
         if 1.0 <= _ns["score"] < 2.0:
-            # ★ V10.31b: 로그 스팸 방지 (심볼당 5분 1회)
-            _skip_cd_key = f"_trend_skip_log_{_ns['sym']}"
-            if time.time() - getattr(plan_open, _skip_cd_key, 0) > 300:
-                setattr(plan_open, _skip_cd_key, time.time())
+            # ★ V10.31c: 모듈 dict로 쿨다운 관리 (setattr 리셋 문제 fix)
+            _skip_key = f"NOSLOT:{_ns['sym']}"
+            _now_t = time.time()
+            if _now_t - _TREND_SKIP_LOG_CD.get(_skip_key, 0) > _TREND_SKIP_LOG_CD_SEC:
+                _TREND_SKIP_LOG_CD[_skip_key] = _now_t
                 print(f"[TREND_SCORE_SKIP] NOSLOT {_ns['sym']} score={_ns['score']:.1f} "
                       f"(1.0~2.0 필터) ← {_ns['sig_sym']}")
                 try:
@@ -1211,277 +1273,9 @@ def plan_open(
 
 
 # ═════════════════════════════════════════════════════════════════
-# DCA Planner
+# ★ V10.31c: plan_dca 함수 제거 — V10.30부터 generate_all_intents에서 호출 중단.
+# DCA는 _place_dca_preorders(LIMIT) 단일 경로로 통일. 호출부 0건 확인 후 제거.
 # ═════════════════════════════════════════════════════════════════
-def plan_dca(
-    snapshot: MarketSnapshot,
-    st: Dict,
-    cooldowns: Dict,
-    system_state: Dict = None,
-) -> List[Intent]:
-    intents: List[Intent] = []
-    now = time.time()
-
-    # ★ V10.29c: DCA 제한 데드코드 정리 — killswitch만 유지
-    _killswitch_dca = float(getattr(snapshot, "margin_ratio", 0.0) or 0.0) >= 0.8
-
-    # _hard_sl_history TTL 정리 (24시간 초과 제거, force_close에서 append됨)
-    _hsl_raw = (system_state or {}).get("_hard_sl_history", [])
-    if _hsl_raw and len(_hsl_raw) > 50:
-        _cutoff = now - 86400
-        system_state["_hard_sl_history"] = [e for e in _hsl_raw if isinstance(e, dict) and e.get("ts", 0) > _cutoff]
-
-    # ★ V10.29e: 스큐 기반 DCA 로직 전면 제거 — TREND 진입이 스큐 해소
-    _dca_positions = list(_pos_items(st))
-
-    for symbol, p in _dca_positions:
-
-        # ★ V10.29d: BC/CB는 자체 관리 — MR DCA 제외
-        if p.get("role") in ("BC", "CB"):
-            continue
-        # ★ V10.29e: DCA 선주문 활성이면 plan_dca 스킵 (중복 방지)
-        # DCA는 기존 포지션 평단 개선이므로 슬롯 균형과 무관하게 허용
-        # 스큐 완화는 진입 차단 + TP 할인으로 충분
-
-        # ★ V10.28: heavy side DCA 차단 제거 — MR 핵심 기능(평단 압축) 보존
-        # 차단 시 T1 고립 → HARD_SL 확률↑ → 작은 돈으로 자주 짐
-        # DCA 허용 + 독립 Trim(tier별 +2% 익절)이 중간 손절 역할
-        # 스큐 완화는 진입 ATR 패널티 + TP 할인 + light block으로 충분
-        # (기존 urgency ≥10/15/20 단계별 heavy DCA 차단 삭제)
-
-        # ★ V10.27: ATR LOW DCA 게이트 제거 (MR 전략은 횡보장에서 유리, DCA 제한 역효과)
-
-        # ★ V10.22: DCA 하드가드 (4단)
-        # 1) dca_level >= 3 이면 스킵 (3단 DCA 구조)
-        if int(p.get("dca_level", 1) or 1) >= 3:
-            continue
-        # 2) max_dca_reached 플래그 (dca_level 리셋 버그 방어)
-        if p.get("max_dca_reached"):
-            continue
-        # ★ V10.30: DCA 선주문 LIMIT 활성이면 스킵, stale이면 정리
-        _dca_pre = p.get("dca_preorders", {})
-        if _dca_pre:
-            _any_live = False
-            try:
-                from v9.execution.order_router import _PENDING_LIMITS
-                for _dt, _di in list(_dca_pre.items()):
-                    if _di.get("oid") and _di["oid"] in _PENDING_LIMITS:
-                        _any_live = True
-                    else:
-                        _dca_pre.pop(_dt, None)  # stale 정리
-            except Exception:
-                _dca_pre.clear()
-            if _any_live:
-                continue  # LIMIT 대기 중 → plan_dca 스킵
-        # ★ V10.29b: 노셔널 95% 캡 제거 — DCA 무조건 허용
-
-        # pending_dca 타임아웃: 3분 초과 시 자동 해제
-        # ★ v10.14: pending limit가 아직 활성이면 해제하지 않음 (중복 DCA 방지)
-        pd = p.get("pending_dca")
-        if pd:
-            pd_ts = pd.get("ts", 0) if isinstance(pd, dict) else 0
-            pd_tier = pd.get("tier", 0) if isinstance(pd, dict) else 0
-            if time.time() - pd_ts < 180:
-                continue
-            # 180초 초과 — pending limit 레지스트리 확인
-            _has_pending_limit = False
-            try:
-                from v9.execution.order_router import get_pending_limits
-                for _pl_info in get_pending_limits().values():
-                    if (_pl_info.get("sym") == symbol and _pl_info.get("side") == p.get("side", "")
-                            and _pl_info.get("intent_type") == "DCA"
-                            and _pl_info.get("tier") == pd_tier):
-                        _has_pending_limit = True
-                        break
-            except Exception:
-                pass
-            if _has_pending_limit:
-                continue  # limit 주문 아직 활성 → pending_dca 유지
-            p["pending_dca"] = None
-
-        dca_targets = p.get("dca_targets", [])
-        if not dca_targets:
-            # ★ v10.11b: dca_targets 비어있으면 자동 재생성 (hedge→MR 전환 포지션 방어)
-            _rb_ep = float(p.get("ep", 0) or 0)
-            _rb_side = p.get("side", "buy")
-            _rb_amt = float(p.get("amt", 0) or 0)
-            _rb_dca = int(p.get("dca_level", 1) or 1)
-            if _rb_ep > 0 and _rb_amt > 0 and _rb_dca < 4:
-                _rb_notional = _rb_ep * _rb_amt
-                # ★ v10.11b: 누적 weight로 grid 추정 (dca_level까지 소화한 비중)
-                _cum_w = sum(DCA_WEIGHTS[:_rb_dca]) if _rb_dca <= len(DCA_WEIGHTS) else sum(DCA_WEIGHTS)
-                _total_w = sum(DCA_WEIGHTS)
-                _rb_grid = _rb_notional / (_cum_w / _total_w) if _cum_w > 0 else _rb_notional * 5
-                _rb_regime = p.get("locked_regime", "LOW")
-                _all_targets = _build_dca_targets(_rb_ep, _rb_side, _rb_grid, _rb_regime)
-                # 이미 완료된 tier 제외
-                p["dca_targets"] = [t for t in _all_targets if t.get("tier", 0) > _rb_dca]
-                dca_targets = p["dca_targets"]
-                print(f"[DCA] {symbol} dca_targets 자동 재생성: {len(dca_targets)}개 (dca_level={_rb_dca}, T{_rb_dca+1}부터, grid=${_rb_grid:.0f})")
-            if not dca_targets:
-                continue
-
-        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
-        if curr_p <= 0:
-            continue
-        # ★ v10.2: 소스 포지션에 HEDGE가 붙어있으면 T3/T4 DCA 차단
-        # 동일 심볼 반대방향에 role=HEDGE 포지션이 있는지 확인
-        _sym_st = st.get(symbol, {})
-        _opp_side = "sell" if p.get("side") == "buy" else "buy"
-        _opp_p = get_p(_sym_st, _opp_side)
-        _has_hedge = isinstance(_opp_p, dict) and _opp_p.get("role") == "HEDGE"
-
-        is_long       = p.get("side", "") == "buy"
-        # ★ v9.9: 티어별 쿨다운 — 루프 내부(tier_now 기준)에서 계산 (PATCH BUG3)
-        time_since_last = now - p.get("last_dca_time", p.get("time", now))
-        # ★ v10.13: 쿨다운 early-exit 제거 → ROI 도달 후 보험 시그널용으로 사용
-
-        # ★ v10.13: corr 체크를 DCA 진입 직전으로 이동 (보험 플래그는 corr 무관)
-        corr = (snapshot.correlations or {}).get(symbol, 1.0)
-
-        pool      = (snapshot.ohlcv_pool or {}).get(symbol, {})
-        ohlcv_1m  = pool.get("1m", [])
-        closes_1m = [float(x[4]) for x in ohlcv_1m] if ohlcv_1m else []
-        rsi_now   = calc_rsi(closes_1m,      period=14) if len(closes_1m) >= 15 else 50.0
-        rsi_prev  = calc_rsi(closes_1m[:-1], period=14) if len(closes_1m) >= 16 else 50.0
-
-        # ★ v10.1: Pullback DCA2 전용 — EMA20_5m 실시간 계산
-        ohlcv_5m_dca  = pool.get("5m", [])
-        ema20_5m_live = 0.0
-        if len(ohlcv_5m_dca) >= 21:
-            closes_5m_dca = [float(c[4]) for c in ohlcv_5m_dca]
-            ema20_5m_live = calc_ema(closes_5m_dca, period=20)
-
-        # ★ V10.28b: Entry 기준 DCA — 이전 tier entry에서 -1.8% ROI
-        _ref_ep = float(p.get("ep", 0.0) or 0.0)
-        roi_now = calc_roi_pct(_ref_ep, curr_p, p.get("side", ""), LEVERAGE) if _ref_ep > 0 else 0.0
-
-        for target in dca_targets:
-            tier_now = target.get("tier", 2)
-
-            # ★ V10.28b FIX: 순차 DCA만 허용 — 반드시 다음 tier만 (T1→T2→T3→T4)
-            _curr_dca_level = int(p.get("dca_level", 1) or 1)
-            if tier_now != _curr_dca_level + 1:
-                continue
-
-            # ★ V10.28b: 이전 tier entry 기준 ROI로 트리거
-            if DCA_ENTRY_BASED:
-                _prev_tier_ep_map = {
-                    2: float(p.get("original_ep", p.get("ep", 0)) or 0),
-                    3: float(p.get("t2_entry_price", 0) or 0),
-                    4: float(p.get("t3_entry_price", 0) or 0),
-                }
-                _prev_ep = _prev_tier_ep_map.get(tier_now, 0)
-                # ★ V10.28b FIX: 이전 tier entry 없으면 스킵 (blended EP fallback 제거)
-                if _prev_ep <= 0:
-                    continue
-                _entry_roi = calc_roi_pct(_prev_ep, curr_p, p.get("side", ""), LEVERAGE)
-                # ★ V10.29: 티어별 DCA 거리 (T3/T4 두배)
-                _dca_roi_thresh = DCA_ENTRY_ROI_BY_TIER.get(tier_now, DCA_ENTRY_ROI)
-                is_hit = _entry_roi <= _dca_roi_thresh
-            else:
-                roi_trig = DCA_ROI_TRIGGERS.get(tier_now, -8.0)
-                is_hit = roi_now <= roi_trig
-            if not is_hit:
-                continue
-
-            # ★ PATCH BUG3: 루프 내부에서 tier_now 기준 쿨다운 계산
-            tier_cooldown = DCA_COOLDOWN_BY_TIER.get(tier_now, DCA_COOLDOWN_SEC)
-
-            # ★ V10.29b: DCA 차단 로직 전면 제거 — 스윙 T3 진입 보장
-            # killswitch만 유지 (수동 비상 정지)
-            _block = None
-            if _killswitch_dca:
-                _block = "KILLSWITCH"
-            if _block:
-                print(f"[DCA_BLOCKED] {symbol} DCA T{tier_now} ROI hit "
-                      f"(ep={_ref_ep:.4f} roi={roi_now:.2f}%) "
-                      f"but blocked ({_block})")
-                break  # 차단 → 다음 심볼
-
-            # ── 차단 아님 → DCA 진입 ──
-            # ★ V10.30: 노셔널 기반 DCA sizing — 목표 대비 부족분만 주문
-            from v9.config import calc_tier_notional
-            _dca_bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-            _target_notional = calc_tier_notional(tier_now, _dca_bal)
-            _current_notional = float(p.get("amt", 0) or 0) * curr_p
-            _dca_notional = _target_notional - _current_notional
-            if _dca_notional <= 0:
-                print(f"[DCA_GUARD] {symbol} T{tier_now} 이미 목표 도달 "
-                      f"(보유${_current_notional:.0f} ≥ 목표${_target_notional:.0f}) → skip")
-                continue
-            qty = _dca_notional / curr_p if curr_p > 0 else 0.0
-            if qty <= 0:
-                continue
-
-            MIN_NOTIONAL = 20.0
-            if qty * curr_p < MIN_NOTIONAL:
-                if target.get("tier") == 4:
-                    p["dca_level"] = 4
-                continue
-
-            # 동일 tier pending_dca 중복 차단
-            _pend_existing = p.get("pending_dca") or {}
-            if _pend_existing.get("tier") == target["tier"]:
-                continue
-            p["pending_dca"] = {"tier": target["tier"], "ts": time.time()}
-
-            # ★ V10.22: T4 체결가 기록 (최종 단계)
-            if target["tier"] == 4:
-                p["t4_entry_price"] = curr_p
-
-            # ★ v10.15: HIGH 레짐에서 DCA는 시장가 (체결 지연 방지)
-            _dca_regime = _btc_vol_regime(snapshot)
-            _force_mkt = (_dca_regime == "HIGH")
-
-            intents.append(Intent(
-                trace_id=_tid(),
-                intent_type=IntentType.DCA,
-                symbol=symbol,
-                side=p.get("side", ""),
-                qty=qty,
-                price=curr_p,
-                reason=f"DCA_T{target['tier']}",
-                metadata={"tier": target["tier"], "target": target,
-                          "locked_regime": _dca_regime,
-                          "_expected_role": p.get("role", "CORE_MR"),
-                          "force_market": _force_mkt},
-            ))
-
-            # ★ v10.9: ML 피처 로깅
-            try:
-                from v9.logging.logger_ml import (
-                    log_ml_features, calc_btc_returns,
-                    calc_skew as _calc_skew_ml, calc_vol_ratio_5m
-                )
-                _ml_regime = _btc_vol_regime(snapshot)
-                _ml_btc5, _ml_btc15, _ml_btc1h = calc_btc_returns(snapshot)
-                _ml_skew, _ml_skew_side = _calc_skew_ml(st, float(getattr(snapshot, "real_balance_usdt", 0) or 0), LEVERAGE)
-                _ml_atr_1m = atr_from_ohlcv(ohlcv_1m[-15:], period=10) if len(ohlcv_1m) >= 15 else 0.0
-                _ml_atr_5m = atr_from_ohlcv(ohlcv_5m_dca[-15:], period=10) if len(ohlcv_5m_dca) >= 15 else 0.0
-                _ml_rsi5 = calc_rsi([float(c[4]) for c in ohlcv_5m_dca], period=14) if len(ohlcv_5m_dca) >= 15 else 50.0
-                _ml_ema15 = calc_ema([float(c[4]) for c in pool.get("15m", [])], period=20) if len(pool.get("15m", [])) >= 20 else 0.0
-                log_ml_features(
-                    trace_id=intents[-1].trace_id,
-                    event_type=f"DCA_T{target['tier']}",
-                    symbol=symbol, side=p.get("side", ""), dca_level=target["tier"],
-                    regime=_ml_regime, ema_pctl=_regime_ema_pctl or 0.0,
-                    atr_pctl_raw=0.0, atr_5m_pct=_ml_atr_5m/curr_p if curr_p>0 else 0,
-                    atr_1m_pct=_ml_atr_1m/curr_p if curr_p>0 else 0,
-                    skew=_ml_skew, skew_side=_ml_skew_side,
-                    rsi_5m=_ml_rsi5, rsi_1m=rsi_now,
-                    btc_ret_5m=_ml_btc5, btc_ret_15m=_ml_btc15, btc_ret_1h=_ml_btc1h,
-                    curr_roi=roi_now, max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
-                    hold_sec=time.time()-float(p.get("time", time.time()) or time.time()),
-                    vol_ratio_5m=calc_vol_ratio_5m(ohlcv_5m_dca),
-                    src_ep=_ref_ep, curr_p=curr_p, ema20_15m=_ml_ema15, ema20_5m=ema20_5m_live,
-                )
-            except Exception as _ml_e:
-                print(f"[ML_LOG] DCA 피처 기록 오류(무시): {_ml_e}")
-            break
-
-    return intents
-
 
 
 # ★ V10.22: _calc_tp_lock, plan_bilateral_tp 삭제 — _skew_tp_adjustment()로 대체
@@ -2180,13 +1974,12 @@ def generate_all_intents(
     system_state: Dict,
 ) -> List[Intent]:
     """
-    ★ V10.29e 실행 순서:
-      1. plan_force_close       → HARD_SL / ZOMBIE / TIMECUT
-      2. plan_tp1               → TP1 Skew-Aware 부분익절
-      3. plan_trail_on          → 트레일링 스탑
-      4. plan_dca               → DCA 4단 진입
-      5. plan_counter           → BB Squeeze 브레이크아웃
-      6. plan_open              → MR 신규 진입
+    ★ V10.31c 실행 순서:
+      1. plan_pre_market_clear → 미장전 포지션 정리 (ET 08:30, 최우선)
+      2. plan_force_close       → HARD_SL / ZOMBIE / TIMECUT
+      3. plan_tp1 / plan_trim_trail / plan_trail_on  → 청산 관리
+      4. plan_counter / plan_insurance_sh / plan_open  → 신규 진입
+    ★ DCA는 별도 경로: runner._place_dca_preorders (LIMIT 선주문)
     """
     import time as _time
     _snap_ts = _time.time()
@@ -2215,8 +2008,7 @@ def generate_all_intents(
     intents += plan_tp1(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_trim_trail(snapshot, st, exclude_syms=_fc_syms)
     intents += plan_trail_on(snapshot, st)
-    # ★ V10.30: plan_dca 제거 — _place_dca_preorders(LIMIT)로 통일 (시장가/LIMIT 중복 방지)
-    # intents += plan_dca(snapshot, st, cooldowns, system_state)
+    # ★ V10.31c: plan_dca 호출 제거 완료 (함수 자체도 삭제됨)
     # ★ V10.31b: 미장전 신규 진입 차단 (08:00-09:30 ET)
     if not system_state.get("_pmc_block_entry"):
         intents += plan_counter(snapshot, st, system_state)

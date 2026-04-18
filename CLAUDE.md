@@ -1,4 +1,4 @@
-# Trinity V10.30 — AI 제어 규칙
+# Trinity V10.31c — AI 제어 규칙
 
 ## 필수 작업 규칙
 - 함수 삭제/이동 전 `grep -rn "함수명" --include="*.py"` 실행하여 외부 참조 확인
@@ -9,10 +9,13 @@
 - trail close는 p["amt"] 전량 — 잔량 남으면 바이낸스 유령 포지션 발생
 - pending 구조는 fill 이벤트 없으면 영원히 발사 안 됨 → 즉시 발사 필요 시 intents.append
 - **★ V10.30: .md 파일 읽고 수정 후 반드시 업데이트**
-- **★ V10.30: DCA는 단일 경로(_place_dca_preorders LIMIT만). plan_dca 호출 금지**
+- **★ V10.30: DCA는 단일 경로(_place_dca_preorders LIMIT만). plan_dca 함수 자체 제거됨 (V10.31c)**
 - **★ V10.30: DCA 주문 전 calc_tier_notional - 현재보유 검증 필수 (과주문 방지)**
 - **★ V10.30: FC/TRAIL_ON 시 거래소 잔존 주문 즉시 취소 (_FC_EXCHANGE_CANCEL)**
 - **★ V10.31b: 미장전 포지션 정리. ET08:00 진입차단 → ET08:30 전포지션 시장가정리. DST자동, 주말/공휴일 스킵**
+- **★ V10.31c: ROI 계산은 `v9.utils.utils_math.calc_roi_pct()` 단일 경로 (인라인 계산 금지)**
+- **★ V10.31c: SYM_MIN_QTY는 부팅 시 ccxt load_markets에서 동적 채움 (`_load_sym_limits_from_ccxt`). 하드코딩은 fallback**
+- **★ V10.31c: precision/notional 에러(`-1111`, `-4003`, `-4005`, "minimum amount precision", "minimum notional")도 exit_fail_cooldown 트리거**
 
 ## 모듈별 상세 문서 (관련 수정 시 반드시 참조)
 - 슬롯/리스크 수정 → `docs/SLOTS.md`
@@ -68,3 +71,10 @@
 | 04-17 | BC 활성 시 MR 레버리지 초과 | BC가 잔고 사용 중인데 MR이 전체 잔고 기준 사이징 → 실질 레버리지 초과 | V10.31b: _mr_available_balance() — BC 노셔널 차감 후 MR 사이징 (진입/DCA/trim 전부) |
 | 04-17 | PnL 과장 (내부계산 vs 바이낸스) | OrderResult에 realized_pnl 미포함 → 내부 (exit-ep)×qty 계산이 trim 과다매도 등으로 부풀림 | V10.31b: OrderResult.realized_pnl 추가 + order_router/runner에서 바이낸스 trades realizedPnl 추출 |
 | 04-17 | trim PnL 3배 뻥튀기 | `filled_qty × price_diff × LEVERAGE` — qty가 이미 레버리지 반영 수량인데 LEVERAGE(3) 추가 곱셈 | V10.31b: `× LEVERAGE` 제거 + realizedPnl 우선 사용 |
+| 04-18 | RESIDUAL_CLEANUP 무한재시도 (재발) | `_record_fail_cooldown`이 `-2022/ReduceOnly`만 체크 → Binance precision 에러(`-1111` 등)는 쿨다운 미세팅 → 3초마다 무한재시도. 추가로 SYM_MIN_QTY 하드코딩에 대다수 심볼 누락 → `_res_min_qty=1.0 fallback` → `amt < min*2` 오판으로 의미있는 수량을 dust로 청산 | V10.31c: (a) order_router + runner 이중 방어 — precision/notional 에러군 쿨다운 60초 (b) `_load_sym_limits_from_ccxt` — 부팅 시 ccxt load_markets에서 동적 채움 |
+| 04-18 | TREND_SCORE_SKIP 3초 스팸 | `setattr(plan_open, ...)` 방식 쿨다운이 실제 작동 안 함 → 동일 sym+sig 조합 매 틱 로깅 | V10.31c: 모듈 레벨 `_TREND_SKIP_LOG_CD: Dict[str, float]`로 교체 |
+| 04-18 | log_skew.csv 죽은 로깅 | 스큐 로직은 V10.30에서 전면 제거되었으나 logger 호출부 잔존 → 969KB/주 누적 | V10.31c: log_skew 함수/호출/schema/config 전부 제거. _urgency_score 계산은 유지 |
+| 04-18 | ROI 인라인 중복 | strategy_core._log_pos / runner 포지션 스냅샷에서 `(curr_p-ep)/ep * LEV * 100` 인라인 계산 — calc_roi_pct와 중복, 수정 시 동기화 위험 | V10.31c: 두 위치 모두 `calc_roi_pct()` 호출로 통일 |
+| 04-18 | plan_dca 죽은 코드 | V10.30에서 호출 제거되었으나 함수 정의(276줄) 잔존 | V10.31c: 함수 삭제 + docstring 정정 |
+| 04-18 | TREND_MIN_SCORE 미사용 config | config.py에 정의되고 import만 되어 있음. 실제 조건 체크는 `_TR_MIN=0.5` 하드코딩 사용 | V10.31c: config 제거 + import 제거 + _calc_trend_score docstring 정정 |
+| 04-18 | BTC 방향성 필터 효과 불명 | 로그만 보고 "역방향 MR이 T3 FC 원인"이라 가정했으나 결과론적. 실측 필요 | V10.31c: TREND_FILTER_SIM shadow logging 신설. Strict(1h≤-1.5%/6h≤-4%/dev≤-3%) + Loose(1h≤-0.7%/6h≤-2%/dev≤-1.5%) 두 임계값 병렬 기록. MR 청산 시점에 "필터가 차단했다면 놓쳤을 ROI" 집계. 실전 진입은 차단하지 않음 (shadow only) |

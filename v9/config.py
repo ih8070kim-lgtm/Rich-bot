@@ -259,7 +259,7 @@ LOG_ORDERS_FILE    = "log_orders.csv"
 LOG_FILLS_FILE     = "log_fills.csv"
 LOG_POSITIONS_FILE = "log_positions.csv"
 LOG_UNIVERSE_FILE  = "log_universe.csv"
-LOG_SKEW_FILE      = "log_skew.csv"      # ★ v10.17: 스큐 모니터링
+# ★ V10.31c: LOG_SKEW_FILE 제거 (스큐 로직 V10.30에서 전면 삭제 — 죽은 로깅)
 STATE_FILE         = "v9_state.json"
 HEARTBEAT_FILE     = "heartbeat.txt"
 
@@ -424,7 +424,8 @@ def calc_dca_trigger_price(ep: float, side: str, tier: int) -> float:
 # TREND COMPANION (v10.29c — MR 진입 시 반대 방향 추세 심볼 동시 진입)
 # ═══════════════════════════════════════════════════════════════
 TREND_ENABLED        = True
-TREND_MIN_SCORE      = 1.5     # 추세 점수 최소값 (EMA이격 × VS × RSI가중)
+# ★ V10.31c: TREND_MIN_SCORE 제거 — 실제 필터는 _TR_MIN=0.5 (planners.py:1073)
+# 하드코딩이 유일 사용처였음. config import만 남아있었음.
 TREND_MAX_SCORE      = 5.0     # ★ V10.30: score 상한 (과열 역전 방지)
 TREND_COOLDOWN_SEC   = 0       # ★ V10.30: 쿨다운 제거 (_open_dir_cd 10분이 제약)
 

@@ -594,16 +594,11 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
                     step       = int(p.get("step", 0) or 0)
                     hedge_mode = bool(p.get("hedge_mode", False))
 
-                # ROI 계산 (레버리지 반영)
+                # ROI 계산 (레버리지 반영) — ★ V10.31c: calc_roi_pct() 통일
                 cur_price = (snapshot.all_prices or {}).get(sym, ep) if snapshot else ep
-                if ep > 0 and cur_price > 0:
-                    from v9.config import LEVERAGE as _LEV
-                    if side_raw == "buy":
-                        roi_pct = (cur_price - ep) / ep * _LEV * 100.0
-                    else:
-                        roi_pct = (ep - cur_price) / ep * _LEV * 100.0
-                else:
-                    roi_pct = 0.0
+                from v9.config import LEVERAGE as _LEV
+                from v9.utils.utils_math import calc_roi_pct as _calc_roi
+                roi_pct = _calc_roi(ep, cur_price, side_raw, _LEV)
 
                 positions.append({
                     "symbol":       sym,
@@ -680,6 +675,49 @@ def _make_exchange() -> ccxt.Exchange:
         'enableRateLimit': True,
         'options': {'defaultType': 'future'},
     })
+
+
+def _load_sym_limits_from_ccxt(ex):
+    """★ V10.31c: Binance markets에서 각 심볼의 실제 min amount를 로드하여
+    config.SYM_MIN_QTY dict를 갱신.
+    
+    근본 원인: config.SYM_MIN_QTY 하드코딩에 ETH/BNB/SOL/BTC/AVAX만 있고
+    나머지(SUI/XLM/LINK/NEAR/UNI/AAVE 등)는 DEFAULT=1.0으로 fallback됨.
+    이로 인해 hedge_engine.py의 RESIDUAL_CLEANUP 조건
+    `_res_amt < _res_min_qty * 2`가 부정확하게 평가되어 의미있는 수량이
+    dust로 오판되거나, 반대로 실제 dust가 무한재시도됨.
+    
+    load_markets 실패 시 기존 하드코딩 + DEFAULT=1.0 fallback 유지 (비파괴).
+    """
+    try:
+        markets = ex.load_markets()
+    except Exception as e:
+        print(f"[BOOT] load_markets 실패(SYM_MIN_QTY 기본값 유지): {e}")
+        return
+    
+    from v9.config import MAJOR_UNIVERSE
+    import v9.config as _cfg
+    _loaded = 0
+    _skipped = []
+    for sym in MAJOR_UNIVERSE:
+        # ccxt Binance USDT-M perpetual 심볼 키: "ETH/USDT:USDT" 또는 "ETH/USDT"
+        mkt = markets.get(sym)
+        if not mkt:
+            # 퍼페츄얼 suffix 시도
+            mkt = markets.get(sym + ":USDT")
+        if not mkt:
+            _skipped.append(sym)
+            continue
+        try:
+            _min_amt = float((mkt.get('limits', {}).get('amount') or {}).get('min') or 0)
+            if _min_amt > 0:
+                _cfg.SYM_MIN_QTY[sym] = _min_amt
+                _loaded += 1
+        except Exception:
+            _skipped.append(sym)
+    print(f"[BOOT] SYM_MIN_QTY 동적 로드: {_loaded}/{len(MAJOR_UNIVERSE)} 심볼")
+    if _skipped:
+        print(f"[BOOT] SYM_MIN_QTY 스킵 (default={_cfg.SYM_MIN_QTY_DEFAULT} 유지): {_skipped[:10]}{'...' if len(_skipped)>10 else ''}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1649,7 +1687,7 @@ async def _place_dca_preorders(ex, st, snapshot):
     흐름:
     1. ROI ≤ -0.8% (activation) → LIMIT 배치 @-1.8%
     2. ROI > -0.3% (deactivation) → LIMIT 취소 (가격 반등, 마진 회수)
-    3. ROI < -2.8% (blowthrough) → LIMIT 취소 (가격 관통, plan_dca 시장가 대응)
+    3. ROI < -2.8% (blowthrough) → LIMIT 취소 (가격 관통, 다음 틱 재평가)
     4. 체결 → maker 수수료
     """
     from v9.execution.position_book import iter_positions
@@ -2067,6 +2105,10 @@ async def _main_loop(ex_init, dry_run: bool):
     """V9 메인 루프"""
     print(f"[V9 Runner] 시작 (dry_run={dry_run})")
     ex = ex_init  # 재연결 시 교체 가능
+
+    # ★ V10.31c: SYM_MIN_QTY 동적 로드 (하드코딩 누락 심볼 보정)
+    # BC/CB init 이전에 호출 — 이들도 SYM_MIN_QTY 참조
+    _load_sym_limits_from_ccxt(ex)
 
     # ★ Beta Cycle 초기화
     if _BC_ENABLED:
@@ -2734,11 +2776,22 @@ async def _main_loop(ex_init, dry_run: bool):
                         )
                     )
 
-            # ── -2022 ReduceOnly 거절 처리 ────────────────────────
+            # ── -2022 ReduceOnly + precision 에러 처리 ────────────
             for result in results:
                 if not result.success and result.error:
                     err_str = str(result.error)
-                    if "REDUCE_ONLY_REJECTED" in err_str or "-2022" in err_str:
+                    _err_low = err_str.lower()
+                    _reduce_like = ("REDUCE_ONLY_REJECTED" in err_str or "-2022" in err_str)
+                    # ★ V10.31c: precision / min-notional 에러도 동일 처리
+                    _precision_like = (
+                        "minimum amount precision" in _err_low
+                        or ("precision" in _err_low and "must be greater" in _err_low)
+                        or "-1111" in err_str
+                        or "-4003" in err_str
+                        or "-4005" in err_str
+                        or ("minimum" in _err_low and "notional" in _err_low)
+                    )
+                    if _reduce_like or _precision_like:
                         sym_fail = result.symbol
                         ensure_slot(st, sym_fail)
                         # [BUG-3 FIX] 청산 인텐트 실패 → exit_fail_cooldown 300초
@@ -2748,10 +2801,13 @@ async def _main_loop(ex_init, dry_run: bool):
                             getattr(_intent_fail, 'intent_type', None), 'value', ''
                         )
                         _exit_types = ('TRAIL_ON', 'FORCE_CLOSE', 'CLOSE', 'TP1', 'TP2')
+                        # precision은 60초, reduce-only는 300초
+                        _cd_sec = 60 if (_precision_like and not _reduce_like) else 300
                         if _itype_val in _exit_types:
-                            st[sym_fail]['exit_fail_cooldown_until'] = now + 300
-                            print(f"[V9 Runner] -2022 청산실패: {sym_fail} "
-                                  f"exit_fail_cooldown 300초 ({_itype_val})")
+                            st[sym_fail]['exit_fail_cooldown_until'] = now + _cd_sec
+                            _tag = "precision" if (_precision_like and not _reduce_like) else "-2022"
+                            print(f"[V9 Runner] {_tag} 청산실패: {sym_fail} "
+                                  f"exit_fail_cooldown {_cd_sec}초 ({_itype_val})")
                         else:
                             st[sym_fail]['open_fail_cooldown_until'] = now + 5
                             print(f"[V9 Runner] -2022 진입실패: {sym_fail} "
@@ -2770,34 +2826,7 @@ async def _main_loop(ex_init, dry_run: bool):
                 last_save_ts = now
                 # ★ V10.28b: 일별 PnL 리포트 (00:05 UTC)
                 await _daily_pnl_report(st)
-                # ★ v10.17: 스큐 상태 로그 (log_skew.csv)
-                try:
-                    from v9.engines.hedge_core import (
-                        calc_skew as _cs, _skew_stage2_enter_ts as _s2ts,
-                        _is_hedge_required as _ihr,
-                    )
-                    from v9.logging.logger_csv import log_skew as _lskew
-                    from v9.config import SKEW_STAGE2_TRIGGER as _s2t
-                    _tc = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                    if _tc > 0:
-                        _sk, _lm, _sm = _cs(st, _tc)
-                        _hvy = "buy" if _lm > _sm else "sell"
-                        _hact = any(
-                            isinstance(get_p(ss, s), dict)
-                            and (get_p(ss, s) or {}).get("role") == "CORE_HEDGE"
-                            for ss in st.values() if isinstance(ss, dict)
-                            for s in ("buy", "sell")
-                        )
-                        _hreq = _ihr(st, snapshot, _sk, _hvy) if _sk >= _s2t else False
-                        _s2m = (now - _s2ts) / 60 if _s2ts > 0 else 0.0
-                        _lc = (2 if _sk >= _s2t else 1) if _sk >= 0.10 else 0
-                        _lskew(
-                            skew=_sk, long_mr=_lm, short_mr=_sm, heavy_side=_hvy,
-                            lock_count=_lc, hedge_active=_hact, hedge_required=_hreq,
-                            stage2_min=_s2m, mr=float(getattr(snapshot, "margin_ratio", 0) or 0),
-                        )
-                except Exception as _lse:
-                    pass  # 로그 실패는 무시
+                # ★ V10.31c: log_skew 호출 제거 (스큐 로직 자체가 V10.30에서 제거됨 — 죽은 로깅)
                 # ★ v10.15: minroi 30초마다 저장
                 if now - _last_minroi_save_ts >= 30:
                     save_minroi(_minroi)
@@ -2817,36 +2846,18 @@ async def _main_loop(ex_init, dry_run: bool):
             # ── system_state.json 갱신 (텔레그램 봇 호환) ────────
             _write_system_state_compat(snapshot, system_state, st)
 
-            # ★ V10.27f: log_skew CSV 기록 (30초 주기)
-            if now - system_state.get("_last_skew_log_ts", 0) >= 30:
+            # ★ V10.31c: log_skew 블록 제거 (스큐 로직 V10.30에서 제거됨 — 죽은 로깅)
+            # 단 _urgency_score / _heavy_avg_roi 는 telegram/status에서 참조 가능하므로
+            # 계산만 유지 (_calc_urgency 호출은 보존).
+            if now - system_state.get("_last_urgency_calc_ts", 0) >= 30:
                 try:
                     from v9.strategy.planners import _calc_urgency
-                    from v9.engines.hedge_core import calc_skew, _skew_stage2_enter_ts
-                    from v9.logging.logger_csv import log_skew
-                    _total_cap_log = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
-                    if _total_cap_log > 0:
-                        _sk, _lm, _sm = calc_skew(st, _total_cap_log)
-                        _urg_log = _calc_urgency(st, snapshot)
-                        _heavy = "buy" if _lm > _sm else "sell"
-                        _mr_log = float(getattr(snapshot, "margin_ratio", 0) or 0)
-                        _s2_min = (now - _skew_stage2_enter_ts) / 60 if _skew_stage2_enter_ts > 0 else 0
-                        _lock_cnt = sum(1 for _s in st if isinstance(st.get(_s), dict)
-                                        for _sd in ("buy", "sell")
-                                        if isinstance(get_p(st[_s], _sd), dict)
-                                        and get_p(st[_s], _sd).get("role") == "CORE_HEDGE")
-                        log_skew(
-                            skew=_sk, long_mr=_lm, short_mr=_sm,
-                            heavy_side=_heavy, lock_count=_lock_cnt,
-                            hedge_active=_lock_cnt > 0, hedge_required=_sk >= 0.15,
-                            stage2_min=_s2_min, mr=_mr_log,
-                            urgency=_urg_log["urgency"],
-                            heavy_avg_roi=_urg_log["heavy_avg_roi"],
-                        )
-                        system_state["_urgency_score"] = _urg_log["urgency"]
-                        system_state["_heavy_avg_roi"] = _urg_log["heavy_avg_roi"]
-                except Exception as _skew_log_e:
-                    print(f"[log_skew] 실패(무시): {_skew_log_e}")
-                system_state["_last_skew_log_ts"] = now
+                    _urg_log = _calc_urgency(st, snapshot)
+                    system_state["_urgency_score"] = _urg_log["urgency"]
+                    system_state["_heavy_avg_roi"] = _urg_log["heavy_avg_roi"]
+                except Exception as _urg_e:
+                    print(f"[urgency] 계산 실패(무시): {_urg_e}")
+                system_state["_last_urgency_calc_ts"] = now
 
         except Exception as e:
             consecutive_errors = system_state.get('_consecutive_errors', 0) + 1

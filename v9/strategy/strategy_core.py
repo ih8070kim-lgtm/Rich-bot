@@ -72,6 +72,39 @@ def _check_hedge_sim_exit(sym: str, pos_side: str, exit_price: float,
         pass
 
 
+def _check_trend_filter_sim_exit(sym: str, pos_side: str, exit_price: float,
+                                 system_state: dict, roi_pct: float = 0.0):
+    """★ V10.31c: BTC 방향성 필터 shadow logging — MR 청산 시 "필터 적용 시
+    차단되었을 포지션"의 실현 ROI를 기록.
+    
+    목적: 필터가 실전에 들어가면 이득/손해였을지 사후 집계.
+    양쪽 임계값(strict/loose)을 병렬 기록하여 어느 쪽이 유효한지 비교.
+    """
+    if not system_state:
+        return
+    _key = f"{sym}:{pos_side}"
+    for _tag, _store_key in (("STRICT", "_trend_filter_sim_strict"),
+                             ("LOOSE",  "_trend_filter_sim_loose")):
+        _store = system_state.get(_store_key, {})
+        _sim = _store.pop(_key, None)
+        if not _sim:
+            continue
+        _hold_h = (time.time() - _sim.get("ts", time.time())) / 3600
+        _btc_dir_at_entry = _sim.get("btc_dir", "?")
+        _etype = _sim.get("entry_type", "?")
+        # roi_pct는 실제 MR 포지션의 청산 ROI — 필터가 차단했다면 이 수익/손실은 없었음
+        print(f"[TREND_FILTER_SIM_EXIT] 📊 {_tag} {sym} {pos_side} "
+              f"blocked_roi={roi_pct:+.1f}% btc_was={_btc_dir_at_entry} "
+              f"hold={_hold_h:.1f}h entry={_etype}")
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system("TREND_FILTER_SIM_EXIT",
+                       f"{_tag} {sym} {pos_side} blocked_roi={roi_pct:+.1f}% "
+                       f"btc_was={_btc_dir_at_entry} hold={_hold_h:.1f}h entry={_etype}")
+        except Exception:
+            pass
+
+
 def apply_order_results(
     results: list[OrderResult],
     intents_map: dict,
@@ -361,6 +394,9 @@ def apply_order_results(
                     # ★ V10.29e: 헷지 시뮬 종료 체크
                     _check_hedge_sim_exit(sym, pos_side, avg_px, system_state,
                                          roi_pct=meta.get("roi_gross", 0.0))
+                    # ★ V10.31c: BTC 방향성 필터 shadow 종료 체크
+                    _check_trend_filter_sim_exit(sym, pos_side, avg_px, system_state,
+                                                 roi_pct=meta.get("roi_gross", 0.0))
                     clear_position(st, sym, pos_side)
                     _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
                     continue
@@ -518,6 +554,9 @@ def apply_order_results(
             # ★ V10.29e: 헷지 시뮬 종료 체크
             _check_hedge_sim_exit(sym, pos_side, avg_px, system_state,
                                  roi_pct=float(meta.get("roi_pct", 0.0) or 0.0))
+            # ★ V10.31c: BTC 방향성 필터 shadow 종료 체크
+            _check_trend_filter_sim_exit(sym, pos_side, avg_px, system_state,
+                                         roi_pct=float(meta.get("roi_pct", 0.0) or 0.0))
             clear_position(st, sym, pos_side)
             _log_pos_closed(result.trace_id, sym, pos_side, snapshot)
 
@@ -529,15 +568,10 @@ def _log_pos(trace_id: str, sym: str, p: dict, snapshot: MarketSnapshot):
     try:
         curr_p = (snapshot.all_prices or {}).get(sym, p.get("ep", 0.0))
         ep = p.get("ep", 0.0)
-        if ep > 0 and curr_p > 0:
-            from v9.config import LEVERAGE
-            raw_roi = (
-                (curr_p - ep) / ep if p.get("side") == "buy"
-                else (ep - curr_p) / ep
-            )
-            roi_pct = raw_roi * LEVERAGE * 100
-        else:
-            roi_pct = 0.0
+        # ★ V10.31c: 인라인 ROI 계산 → calc_roi_pct() 통일
+        from v9.config import LEVERAGE
+        from v9.utils.utils_math import calc_roi_pct
+        roi_pct = calc_roi_pct(ep, curr_p, p.get("side", ""), LEVERAGE)
         log_position(
             trace_id=trace_id, symbol=sym, side=p.get("side", ""),
             ep=ep, amt=p.get("amt", 0.0),

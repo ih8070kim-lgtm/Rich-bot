@@ -4,6 +4,7 @@
 - DCA 체결 시 tp1_limit_oid / tp1_preorder_id 미클리어 → trim 영구 차단 (04-12 버그)
 - ★ V10.30: plan_dca(시장가) 제거 — _place_dca_preorders(LIMIT)로 단일화
 - ★ V10.30: DCA 주문 전 목표 노셔널 대비 부족분만 주문 (과주문 방지)
+- ★ V10.31c: **plan_dca 함수 자체도 삭제됨** (V10.30 호출 제거 후 함수 정의만 잔존하던 죽은 코드 276줄)
 - T4/T5 코드 잔존하나 DCA_WEIGHTS=[25,25,50] 3티어라 도달 불가 (죽은 코드, 무해)
 
 ## DCA 경로 (V10.30)

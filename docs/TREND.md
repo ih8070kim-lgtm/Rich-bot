@@ -7,6 +7,9 @@
 - ★ V10.30: score cap 5.0 — abs(score) > 5.0이면 과열로 판단, 진입 차단
 - ★ V10.30: TREND_COOLDOWN_SEC = 0 — _open_dir_cd(10분)가 실질 제약
 - ★ V10.30: trigger_side=None 시 반드시 continue (side=None crash 방지)
+- ★ V10.31b: score 1.0~2.0 밴드는 발사 직전 필터로 블록 (애매한 트렌드)
+- ★ V10.31c: **실제 후보 풀 진입 기준은 `_TR_MIN=0.5` 하드코딩** (planners.py 내부). `TREND_MIN_SCORE` config는 미사용 죽은 코드였음 — V10.31c에서 제거
+- ★ V10.31c: TREND_SCORE_SKIP 로그는 모듈 dict `_TREND_SKIP_LOG_CD`로 심볼당 5분 1회 제한 (setattr 방식 무효화 수정)
 
 ## 수정 시 체크
 - [ ] NOSLOT이 intents.append 사용

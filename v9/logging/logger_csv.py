@@ -15,7 +15,6 @@ from v9.logging.schemas import (
     RISK_COLUMNS,
     TRADES_COLUMNS,
     UNIVERSE_COLUMNS,
-    SKEW_COLUMNS,
 )
 
 
@@ -270,40 +269,9 @@ def log_trade(
     _append_csv(_log_path("log_trades.csv"), TRADES_COLUMNS, row)
 
 
-# ── log_skew (★ v10.17) ─────────────────────────────────────────
-def log_skew(
-    skew: float,
-    long_mr: float,
-    short_mr: float,
-    heavy_side: str,
-    lock_count: int,
-    hedge_active: bool,
-    hedge_required: bool,
-    stage2_min: float,
-    mr: float,
-    urgency: float = 0.0,
-    heavy_avg_roi: float = 0.0,
-):
-    """스큐 상태 기록 — 30초마다 호출 (log_skew.csv)."""
-    from v9.config import LOG_SKEW_FILE
-    _append_csv(
-        _log_path(LOG_SKEW_FILE),
-        SKEW_COLUMNS,
-        {
-            "time":           _now_str(),
-            "skew":           round(skew, 4),
-            "long_mr":        round(long_mr, 4),
-            "short_mr":       round(short_mr, 4),
-            "heavy_side":     heavy_side,
-            "lock_count":     lock_count,
-            "hedge_active":   int(hedge_active),
-            "hedge_required": int(hedge_required),
-            "stage2_min":     round(stage2_min, 1),
-            "mr":             round(mr, 4),
-            "urgency":        round(urgency, 1),
-            "heavy_avg_roi":  round(heavy_avg_roi, 2),
-        },
-    )
+# ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)
+# 기존 log_skew 함수는 969KB 누적 중이던 죽은 로깅이라 삭제.
+# 외부에서 import 하는 코드는 없어야 함. (grep으로 검증 완료)
 
 
 # ── log_universe ────────────────────────────────────────────────

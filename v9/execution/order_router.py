@@ -347,6 +347,26 @@ def _record_fail_cooldown(st, sym, intent, now_t, err_s=""):
         if err_s and ("-2022" in err_s or "ReduceOnly" in err_s):
             sym_st["reduce_fail_cooldown_until"] = now_t + 10
 
+        # ★ V10.31c: precision / min-notional 에러도 쿨다운 (무한재시도 방지)
+        # 청산 intent (TP1/TRAIL_ON/FORCE_CLOSE 등)가 precision 오류로 거부되면
+        # 60초간 재시도 차단. dust는 가격 변동으로도 해결되므로 짧은 쿨다운 충분.
+        if err_s:
+            _err_low = err_s.lower()
+            _precision_like = (
+                "minimum amount precision" in _err_low
+                or ("precision" in _err_low and "must be greater" in _err_low)
+                or "-1111" in err_s
+                or "-4003" in err_s
+                or "-4005" in err_s
+                or ("minimum" in _err_low and "notional" in _err_low)
+            )
+            if _precision_like:
+                _exit_types = ("FORCE_CLOSE", "CLOSE", "TP1", "TP2", "TRAIL_ON")
+                if intent.intent_type.name in _exit_types:
+                    sym_st["exit_fail_cooldown_until"] = now_t + 60
+                else:
+                    sym_st["open_fail_cooldown_until"] = now_t + 60
+
         st[sym] = sym_st
     except Exception as _rfc_e:
         print(f"[order_router] _record_fail_cooldown 오류(무시): {_rfc_e}")

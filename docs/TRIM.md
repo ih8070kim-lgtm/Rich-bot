@@ -2,8 +2,7 @@
 
 ## 함정
 - ★ V10.31b: 전 tier trail 통합 — T1/T2/T3 모두 동일한 trail 메커니즘
-- ★ V10.31b: tp1_preorder_id / tp1_limit_oid 필드 완전 제거 — plan_tp1이 잔존 시 자동 취소+정리
-- ★ V10.31b: _manage_tp1_preorders 비활성화 — 선주문 시스템 전면 제거
+- ★ V10.31c: `_manage_tp1_preorders`는 **LOW/NORMAL 레짐에서 활성 유지** (runner.py:2628에서 호출 중). V10.31b의 "선주문 시스템 전면 제거" 기재는 틀렸음 — 실제로는 HIGH에서만 trail 사용, LOW/NORMAL은 TP1 선주문 유지
 - plan_tp1은 T1 전용 (trail → partial close → step=1 → TRAIL_ON)
 - plan_trim_trail은 T2+ 전용 (trail → trim → tier 감소)
 

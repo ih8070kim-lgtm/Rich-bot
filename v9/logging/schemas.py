@@ -67,15 +67,8 @@ TRADES_COLUMNS = [
     "source_sym",    # HEDGE일 때 소스 심볼
 ]
 
-# ── log_skew (★ v10.17) ─────────────────────────────────────────
-SKEW_COLUMNS = [
-    "time", "skew", "long_mr", "short_mr", "heavy_side",
-    "lock_count", "hedge_active", "hedge_required",
-    "stage2_min",   # stage2 진입 후 경과 분 (0=비활성)
-    "mr",           # 전체 margin_ratio
-    "urgency",      # ★ V10.27f: urgency 점수
-    "heavy_avg_roi",  # ★ V10.27f: heavy side 평균 ROI
-]
+# ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)
+# SKEW_COLUMNS는 더 이상 사용되지 않음.
 
 # ── log_universe ────────────────────────────────────────────────
 UNIVERSE_COLUMNS = [
