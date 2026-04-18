@@ -9,7 +9,10 @@ import time
 from datetime import datetime
 
 
-_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+# ★ V10.31c: 경로 버그 수정 — status_server.py(프로젝트 루트)와 파일 경로 일치
+# 수정 전: _BASE_DIR = v9/ → v9/v9_status.json (status_server는 프로젝트 루트를 봄)
+# 수정 후: _BASE_DIR = 프로젝트 루트 → v9_status.json (일치)
+_BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 _STATUS_PATH = os.path.join(_BASE_DIR, "v9_status.json")
 _LOG_DIR = os.path.join(_BASE_DIR, "v9_logs")
 _BAL_HISTORY = os.path.join(_LOG_DIR, "log_balance.csv")
