@@ -333,6 +333,12 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
         hold_hours = (time.time() - entry_ts) / 3600
         roi = (ep - price) / ep  # 숏: 양수=수익
 
+        # ★ V10.31c: peak_roi shadow tracking — 청산 시 giveback 분석용
+        _bc_peak_roi = float(p.get("bc_peak_roi", 0.0) or 0.0)
+        if roi > _bc_peak_roi:
+            _bc_peak_roi = roi
+            p["bc_peak_roi"] = _bc_peak_roi
+
         # 1h high (ohlcv_pool에서)
         ohlcv = (snapshot.ohlcv_pool or {}).get(sym, {}).get('1h', [])
         h_1h = float(ohlcv[-2][2]) if ohlcv and len(ohlcv) >= 2 else price
@@ -363,8 +369,10 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
         elif price <= ep * (1 - CFG.BC_SHORT_TP / 100):
             reason = "BC_TP"
         elif trail_active:
+            # ★ V10.31c: wick(h_1h) 제거 — trail은 "추세 꺾임 확인"이므로 순간
+            # 스파이크(wick)로 발동하면 노이즈 과민반응. SL은 wick 유지(손실 방어).
             trail_stop = trail_low * (1 + trail_offset)
-            if price >= trail_stop or h_1h >= trail_stop:
+            if price >= trail_stop:
                 reason = "BC_TRAIL"
         elif hold_hours >= CFG.BC_MAX_HOLD_HOURS:
             reason = "BC_TIMEOUT"
@@ -396,8 +404,17 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
             ))
             cd_hours = getattr(CFG, 'BC_COOLDOWN_HOURS', 72)
             _cooldown_until[sym] = time.time() + cd_hours * 3600
+            # ★ V10.31c: 청산 시점 peak/giveback 로깅 (trail 예민함 분석용)
+            _giveback = _bc_peak_roi - roi
             print(f"[BC] {'✅' if roi > 0 else '❌'} {reason} {sym} "
-                  f"roi={roi:+.1%} hold={hold_hours:.0f}h")
+                  f"roi={roi:+.1%} peak={_bc_peak_roi:+.1%} giveback={_giveback:+.1%} "
+                  f"hold={hold_hours:.0f}h")
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("BC_EXIT",
+                    f"{sym} {reason} exit={roi:+.1%} peak={_bc_peak_roi:+.1%} "
+                    f"giveback={_giveback:+.1%} hold={hold_hours:.0f}h")
+            except Exception: pass
 
     return intents
 

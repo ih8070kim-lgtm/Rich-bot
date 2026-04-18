@@ -78,3 +78,4 @@
 | 04-18 | plan_dca 죽은 코드 | V10.30에서 호출 제거되었으나 함수 정의(276줄) 잔존 | V10.31c: 함수 삭제 + docstring 정정 |
 | 04-18 | TREND_MIN_SCORE 미사용 config | config.py에 정의되고 import만 되어 있음. 실제 조건 체크는 `_TR_MIN=0.5` 하드코딩 사용 | V10.31c: config 제거 + import 제거 + _calc_trend_score docstring 정정 |
 | 04-18 | BTC 방향성 필터 효과 불명 | 로그만 보고 "역방향 MR이 T3 FC 원인"이라 가정했으나 결과론적. 실측 필요 | V10.31c: TREND_FILTER_SIM shadow logging 신설. Strict(1h≤-1.5%/6h≤-4%/dev≤-3%) + Loose(1h≤-0.7%/6h≤-2%/dev≤-1.5%) 두 임계값 병렬 기록. MR 청산 시점에 "필터가 차단했다면 놓쳤을 ROI" 집계. 실전 진입은 차단하지 않음 (shadow only) |
+| 04-18 | BC trail 조기 청산 의심 | AAVE 3.5%/FIL 3.6% 마감 — activation 3%/floor 1.5% 설계 예민함 체감. 근데 peak_roi 미로깅이라 실제 giveback 측정 불가 | V10.31c: (a) TRAIL 평가에서 `h_1h` wick 제거 — trail은 "추세 꺾임 확인"이므로 wick 스파이크로 발동하면 노이즈 과민반응. SL은 wick 유지(손실 방어). (b) `bc_peak_roi` 추적 + `BC_EXIT` 로그에 exit/peak/giveback 기록 — 2~3주 데이터 수집 후 activation/floor 재검토 |

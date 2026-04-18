@@ -31,3 +31,12 @@ REHEAT: 1h excess ≥ 5% → 손절 (thesis 실패)
 - [ ] _calc_baseline_excess가 72h 구간 계산하는지
 - [ ] ARM 시 baseline이 _armed dict에 저장되는지
 - [ ] 진입 시 bc_baseline이 position metadata에 저장되는지
+
+## ★ V10.31c 변경
+- **TRAIL에서 wick(h_1h) 제거** — `price >= trail_stop`만 체크. SL은 wick 유지(손실 방어).
+  - 변경 전: 1시간봉 고가가 trail_stop 넘으면 즉시 청산 → 순간 스파이크로 과민반응
+  - 변경 후: 현재가가 trail_stop 넘을 때만 청산 → 노이즈 감소
+- **peak_roi / giveback shadow logging 추가** (`BC_EXIT` 이벤트)
+  - `p["bc_peak_roi"]`: 매 틱 갱신되는 최고 ROI
+  - 청산 시: `exit=±x% peak=+y% giveback=+z% hold=nh`
+  - 2~3주 데이터 수집 후 activation 3%/floor 1.5% 재검토
