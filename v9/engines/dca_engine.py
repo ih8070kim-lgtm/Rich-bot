@@ -8,6 +8,9 @@ from typing import List, Dict
 
 from v9.types import Intent, IntentType, MarketSnapshot
 from v9.execution.position_book import iter_positions
+# ★ V10.31c: LEVERAGE module-level — 함수 내 비-alias 중복 import 제거용
+from v9.config import LEVERAGE
+from v9.utils.utils_math import calc_roi_pct
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -90,10 +93,11 @@ def plan_counter(
 ) -> List[Intent]:
     """BB Squeeze 브레이크아웃 → MR OR 진입.
     role=CORE_MR → DCA/TP/SL 전부 기존 MR과 동일."""
+    # ★ V10.31c: LEVERAGE module-level 사용 (중복 제거)
     from v9.config import (
         COUNTER_ENABLED, COUNTER_COOLDOWN_SEC, COUNTER_MAX,
         COUNTER_SIZE_RATIO,
-        DCA_WEIGHTS, LEVERAGE, GRID_DIVISOR,
+        DCA_WEIGHTS, GRID_DIVISOR,
     )
     if not COUNTER_ENABLED:
         return []

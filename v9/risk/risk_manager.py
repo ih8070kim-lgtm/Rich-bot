@@ -36,6 +36,8 @@ from v9.config import (
 )
 from v9.logging.logger_csv import log_risk
 from v9.risk.slot_manager import can_open_side, can_open_hard, count_slots
+# ★ V10.31c: calc_roi_pct module-level (함수 내 중복 제거용)
+from v9.utils.utils_math import calc_roi_pct
 from v9.risk.exposure import (
     calc_directional_exposure,
     check_exposure_cap,
@@ -203,7 +205,7 @@ def evaluate_intent(
         curr_p = float((snapshot.all_prices or {}).get(sym, 0.0))
         ep     = float(p.get("ep", 0.0))
         if ep > 0 and curr_p > 0:
-            from v9.utils.utils_math import calc_roi_pct
+            # ★ V10.31c: calc_roi_pct module-level 사용 (중복 제거)
             roi_r5 = calc_roi_pct(ep, curr_p, side, LEVERAGE)
             if roi_r5 <= -(T4_MAX_LOSS_PCT * 100):
                 return _reject(RejectCode.FORCE_T4_MAXLOSS_BREACH, f"roi={roi_r5:.2f}%")
@@ -308,7 +310,7 @@ def generate_corrguard_intents(
     - corr < 0.5 AND roi ≤ -4% AND 5분 주기 breach 기록 → 60초 후 limit
     - 60초 경과 → market fallback
     """
-    from v9.utils.utils_math import calc_roi_pct
+    # ★ V10.31c: calc_roi_pct module-level 사용 (중복 제거)
 
     intents  = []
     now_ts   = time.time()

@@ -17,6 +17,13 @@ from v9.execution.position_book import (
 from v9.logging.logger_csv import log_position
 from v9.types import IntentType, MarketSnapshot, OrderResult
 
+# ★ V10.31c: LEVERAGE / calc_roi_pct module-level import
+# 과거 함수 내부에서 조건부(if/elif 내부) import했던 패턴 — 분기에 따라
+# 특정 경로로 들어오면 NameError 발생 (예: apply_order_results line 467)
+# 근본 해결: module-level에 고정하여 어느 실행 경로에서든 참조 가능
+from v9.config import LEVERAGE
+from v9.utils.utils_math import calc_roi_pct
+
 # ★ V10.28b: Trim 선주문 취소 큐 (포지션 청산 시 runner가 처리)
 _TRIM_CANCEL_QUEUE = []
 # ★ V10.30: FC 시 거래소 전체 주문 취소 큐 (DCA_PRE 좀비 방지)
@@ -53,7 +60,7 @@ def _check_hedge_sim_exit(sym: str, pos_side: str, exit_price: float,
         return
     _sim_ep = _sim["ep"]
     _sim_side = _sim["side"]
-    from v9.config import LEVERAGE
+    # ★ V10.31c: LEVERAGE module-level에서 import (line 24). 함수 내 중복 제거.
     if _sim_side == "buy":
         _sim_roi = (exit_price - _sim_ep) / _sim_ep * LEVERAGE * 100
     else:
@@ -115,10 +122,9 @@ def apply_order_results(
 ) -> None:
     """주문 결과를 포지션 북에 반영."""
     now = time.time()
-    # ★ V10.31b FIX: calc_roi_pct를 함수 최상단에서 import
-    # line 447 TRAIL_ON 블록 내 로컬 import가 Python에 의해 함수 전체 로컬 변수로 인식
-    # → TP1 블록(line 417)에서 UnboundLocalError 발생 → 롱 포지션 소실
-    from v9.utils.utils_math import calc_roi_pct
+    # ★ V10.31c: calc_roi_pct / LEVERAGE module-level에서 import (line 24-25)
+    # 이전엔 함수 내 조건부 import로 UnboundLocalError/NameError 자주 터짐.
+    # 근본 해결: module-level 단일 import → 함수 내 중복 제거
 
     # ★ CORE 포지션을 HEDGE보다 먼저 처리
     def _apply_order_key(r):
@@ -276,8 +282,8 @@ def apply_order_results(
                         # 미니게임 즉시 시작
                         _opp_cp = float((snapshot.all_prices or {}).get(sym, 0.0) or 0.0)
                         if not _opp_p.get("t5_mini_active") and _opp_cp > 0:
-                            from v9.utils.utils_math import calc_roi_pct as _crp
-                            _opp_roi = _crp(
+                            # ★ V10.31c: module-level calc_roi_pct 사용 (alias 제거)
+                            _opp_roi = calc_roi_pct(
                                 float(_opp_p.get("ep", 0) or 0),
                                 _opp_cp,
                                 _opp_p.get("side", "buy"),
@@ -491,14 +497,13 @@ def apply_order_results(
             # ★ v10.10: INSURANCE_SH — 소스 영향 없음, 그냥 닫기
             if p:
                 try:
-                    from v9.config import LEVERAGE as _LEV
-                    from v9.utils.utils_math import calc_roi_pct
+                    # ★ V10.31c: LEVERAGE / calc_roi_pct module-level import 사용
                     from v9.logging.logger_csv import log_trade
                     _ep   = float(p.get("ep", 0.0) or 0.0)
                     _amt  = float(p.get("amt", 0.0) or 0.0)
                     _side = p.get("side", pos_side)
                     _cpx  = float(avg_px if avg_px > 0 else (snapshot.all_prices or {}).get(sym, _ep))
-                    _roi  = calc_roi_pct(_ep, _cpx, _side, _LEV) if _ep > 0 and _cpx > 0 else 0.0
+                    _roi  = calc_roi_pct(_ep, _cpx, _side, LEVERAGE) if _ep > 0 and _cpx > 0 else 0.0
                     # ★ V10.29e: 바이낸스 realizedPnl 우선 사용 (수수료 포함 정확한 PnL)
                     _rpnl = getattr(result, 'realized_pnl', 0.0) or 0.0
                     if _rpnl != 0.0:
@@ -568,9 +573,7 @@ def _log_pos(trace_id: str, sym: str, p: dict, snapshot: MarketSnapshot):
     try:
         curr_p = (snapshot.all_prices or {}).get(sym, p.get("ep", 0.0))
         ep = p.get("ep", 0.0)
-        # ★ V10.31c: 인라인 ROI 계산 → calc_roi_pct() 통일
-        from v9.config import LEVERAGE
-        from v9.utils.utils_math import calc_roi_pct
+        # ★ V10.31c: module-level LEVERAGE / calc_roi_pct 사용 (line 24-25)
         roi_pct = calc_roi_pct(ep, curr_p, p.get("side", ""), LEVERAGE)
         log_position(
             trace_id=trace_id, symbol=sym, side=p.get("side", ""),

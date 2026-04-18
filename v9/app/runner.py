@@ -19,6 +19,8 @@ from v9.config import (
     LEVERAGE, FEE_RATE,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
 )
+# ★ V10.31c: module-level calc_roi_pct — 함수 내 중복 import 제거용
+from v9.utils.utils_math import calc_roi_pct
 from v9.types import MarketSnapshot, IntentType
 from v9.datafeed.market_snapshot import fetch_market_snapshot
 from v9.datafeed.universe_asym_v2 import update_universe
@@ -740,8 +742,8 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
       - worst_roi + alpha 기반 target price 계산
       - 선주문 없으면 배치, target 변경 시 재배치, 부적격 시 취소
     """
-    from v9.config import LEVERAGE, TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
-    from v9.utils.utils_math import calc_roi_pct
+    # ★ V10.31c: LEVERAGE/calc_roi_pct module-level import 사용 (중복 제거)
+    from v9.config import TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
 
     prices = snapshot.all_prices or {}
 
@@ -1053,7 +1055,7 @@ async def _manage_pending_limits(ex, st, snapshot):
     )
     from v9.logging.logger_csv import log_fill
     from v9.execution.position_book import ensure_slot, get_p, set_p
-    from v9.utils.utils_math import calc_roi_pct
+    # ★ V10.31c: calc_roi_pct module-level 사용
 
     pending = get_pending_limits()
     if not pending:
@@ -1297,7 +1299,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
     DCA: role 교차검증, tier 정확 적용, t5_split, locked_regime 갱신
     """
     from v9.execution.position_book import ensure_slot, get_p, set_p, iter_positions
-    from v9.config import DCA_WEIGHTS, LEVERAGE
+    # ★ V10.31c: LEVERAGE module-level 사용 (중복 제거)
+    from v9.config import DCA_WEIGHTS
 
     sym = info["sym"]
     side = info["side"]
@@ -1504,7 +1507,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
     elif itype == "TP1":
         # ★ v10.21: TP1 지정가 체결 → 포지션 amt 감소 + step=1 전환
         # ★ V10.26b: side 수정 — TP1 주문 side(청산방향)의 반대가 포지션 side
-        from v9.utils.utils_math import calc_roi_pct
+        # ★ V10.31c: calc_roi_pct module-level 사용 (중복 import 제거)
         pos_side = "sell" if side == "buy" else "buy"  # ★ FIX: 포지션은 주문 반대방향
         p = get_p(sym_st, pos_side)
         if not (p and isinstance(p, dict)):
@@ -1665,10 +1668,10 @@ async def _place_dca_preorders(ex, st, snapshot):
     """
     from v9.execution.position_book import iter_positions
     from v9.execution.order_router import _PENDING_LIMITS
-    from v9.config import (SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT, LEVERAGE,
+    # ★ V10.31c: LEVERAGE / calc_roi_pct는 module-level import 사용 (중복 제거)
+    from v9.config import (SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
                            DCA_WEIGHTS, GRID_DIVISOR, DCA_ENTRY_ROI_BY_TIER,
                            calc_dca_trigger_price)
-    from v9.utils.utils_math import calc_roi_pct
     import asyncio
 
     bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
@@ -1849,7 +1852,8 @@ async def _place_trim_preorders(ex, st, snapshot):
     """DCA 체결 후 trim_to_place 플래그 → 바이낸스 limit 주문 + pending_limits 등록."""
     from v9.execution.position_book import ensure_slot, get_p, iter_positions
     from v9.execution.order_router import _PENDING_LIMITS
-    from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT, LEVERAGE
+    # ★ V10.31c: LEVERAGE module-level 사용 (중복 제거)
+    from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT
     import asyncio
 
     for sym, sym_st in st.items():

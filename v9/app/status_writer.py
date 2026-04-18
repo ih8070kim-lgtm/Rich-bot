@@ -8,6 +8,12 @@ import os
 import time
 from datetime import datetime
 
+# ★ V10.31c: try 블록 내부 import → module-level 승격
+# 함수 내 조건부 import는 UnboundLocalError/NameError 위험
+from v9.execution.position_book import iter_positions
+from v9.utils.utils_math import calc_roi_pct
+from v9.config import LEVERAGE
+
 
 # ★ V10.31c: 경로 버그 수정 — status_server.py(프로젝트 루트)와 파일 경로 일치
 # 수정 전: _BASE_DIR = v9/ → v9/v9_status.json (status_server는 프로젝트 루트를 봄)
@@ -89,9 +95,7 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
     _LAST_WRITE = now
 
     try:
-        from v9.execution.position_book import iter_positions
-        from v9.utils.utils_math import calc_roi_pct
-        from v9.config import LEVERAGE
+        # ★ V10.31c: 위 3개 import는 module-level로 이동됨
 
         bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
         mr = float(getattr(snapshot, 'margin_ratio', 0) or 0) if snapshot else 0
