@@ -209,3 +209,122 @@ def calc_vol_ratio_5m(ohlcv_5m: list) -> float:
         return vol_now / vol_ma if vol_ma > 0 else 1.0
     except Exception:
         return 1.0
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.31c: 편의 헬퍼 — 호출부에서 최소 인자만 넘기면 피처 자동 수집
+# ═══════════════════════════════════════════════════════════════
+
+def record_ml_event(
+    trace_id: str,
+    event_type: str,          # "DCA_T2", "DCA_T3", "BC_OPEN", "BC_TP", "BC_SL" 등
+    p: dict,                  # 포지션 dict
+    sym: str,
+    snapshot,
+    st: dict = None,
+    real_balance: float = 0.0,
+    leverage: int = 3,
+    log_dir: str = "v9_logs",
+):
+    """snapshot과 position dict에서 28개 피처를 자동 추출하여 기록.
+    
+    호출부는 trace_id, event_type, p, sym, snapshot만 알면 됨.
+    """
+    try:
+        from v9.utils.utils_math import calc_roi_pct
+
+        # BTC 수익률 3종
+        btc_5m, btc_15m, btc_1h = calc_btc_returns(snapshot)
+
+        # 스큐
+        if st and real_balance > 0:
+            skew_abs, heavy = calc_skew(st, real_balance, leverage)
+        else:
+            skew_abs, heavy = 0.0, "neutral"
+
+        # 5m OHLCV 기반 vol_ratio
+        sym_pool = (snapshot.ohlcv_pool or {}).get(sym, {})
+        ohlcv_5m = sym_pool.get("5m", []) or []
+        ohlcv_1m = sym_pool.get("1m", []) or []
+        vol_ratio = calc_vol_ratio_5m(ohlcv_5m)
+
+        # ATR (기존 헬퍼 사용)
+        try:
+            from v9.utils.utils_math import atr_from_ohlcv
+            atr_5m_pct = atr_from_ohlcv(ohlcv_5m[-20:], period=14) / (float(ohlcv_5m[-1][4]) if ohlcv_5m and len(ohlcv_5m[-1]) > 4 else 1) if ohlcv_5m else 0.0
+            atr_1m_pct = atr_from_ohlcv(ohlcv_1m[-20:], period=14) / (float(ohlcv_1m[-1][4]) if ohlcv_1m and len(ohlcv_1m[-1]) > 4 else 1) if ohlcv_1m else 0.0
+        except Exception:
+            atr_5m_pct = atr_1m_pct = 0.0
+
+        # RSI (기존 헬퍼 사용)
+        try:
+            from v9.utils.utils_math import rsi_from_ohlcv
+            rsi_5m = rsi_from_ohlcv(ohlcv_5m[-20:], period=14) if ohlcv_5m else 50.0
+            rsi_1m = rsi_from_ohlcv(ohlcv_1m[-20:], period=14) if ohlcv_1m else 50.0
+        except Exception:
+            rsi_5m = rsi_1m = 50.0
+
+        # EMA
+        try:
+            from v9.utils.utils_math import ema_from_ohlcv
+            ohlcv_15m = sym_pool.get("15m", []) or []
+            ema20_5m_val = ema_from_ohlcv(ohlcv_5m[-30:], period=20) if len(ohlcv_5m) >= 20 else 0.0
+            ema20_15m_val = ema_from_ohlcv(ohlcv_15m[-30:], period=20) if len(ohlcv_15m) >= 20 else 0.0
+        except Exception:
+            ema20_5m_val = ema20_15m_val = 0.0
+
+        # 포지션 정보
+        ep = float(p.get("ep", 0) or 0)
+        side = p.get("side", "")
+        dca_level = int(p.get("dca_level", 1) or 1)
+        amt = float(p.get("amt", 0) or 0)
+        prices = snapshot.all_prices or {}
+        curr_p = float(prices.get(sym, ep) or ep)
+
+        # 현재 ROI (BC/CB는 x1, 나머지 x3)
+        role = p.get("role", "")
+        _lev = 1 if role in ("BC", "CB") else leverage
+        curr_roi = calc_roi_pct(ep, curr_p, side, _lev) if ep > 0 and curr_p > 0 else 0.0
+
+        max_roi = float(p.get("max_roi_seen", 0) or 0)
+
+        # Hold 시간
+        import time as _t
+        entry_ts = float(p.get("time", _t.time()) or _t.time())
+        hold_sec = _t.time() - entry_ts
+
+        # regime (system_state에서)
+        regime = str((snapshot.ohlcv_pool or {}).get("_regime", "NORMAL"))
+        # 더 신뢰할 수 있는 경로: p.get("locked_regime", "")
+        regime = str(p.get("locked_regime", "") or regime)
+
+        log_ml_features(
+            trace_id=trace_id,
+            event_type=event_type,
+            symbol=sym,
+            side=side,
+            dca_level=dca_level,
+            regime=regime,
+            ema_pctl=0.0,          # 추후 확장
+            atr_pctl_raw=0.0,      # 추후 확장
+            atr_5m_pct=atr_5m_pct,
+            atr_1m_pct=atr_1m_pct,
+            skew=skew_abs,
+            skew_side=heavy,
+            rsi_5m=rsi_5m,
+            rsi_1m=rsi_1m,
+            btc_ret_5m=btc_5m,
+            btc_ret_15m=btc_15m,
+            btc_ret_1h=btc_1h,
+            curr_roi=curr_roi,
+            max_roi_seen=max_roi,
+            hold_sec=hold_sec,
+            vol_ratio_5m=vol_ratio,
+            src_ep=ep,
+            curr_p=curr_p,
+            ema20_15m=ema20_15m_val,
+            ema20_5m=ema20_5m_val,
+            log_dir=log_dir,
+        )
+    except Exception as _e:
+        print(f"[ML_LOG] record_ml_event 오류(무시): {_e}")

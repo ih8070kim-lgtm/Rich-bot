@@ -299,6 +299,25 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                   f"pb={pullback:.1%} β↑={arm.get('beta',0):.2f} "
                   f"qty={qty:.4f} ${notional:.0f} [{_daily_entry_count}/{CFG.BC_ENTRY_PER_DAY}]")
 
+            # ★ V10.31c: BC 진입 시점 ML 피처 기록
+            try:
+                from v9.logging.logger_ml import record_ml_event
+                _bc_pseudo_p = {
+                    "ep": price, "side": "sell", "amt": qty,
+                    "dca_level": 1, "role": "BC",
+                    "time": time.time(), "max_roi_seen": 0,
+                    "locked_regime": "",
+                }
+                _bc_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                record_ml_event(
+                    trace_id=intent.trace_id,
+                    event_type="BC_OPEN",
+                    p=_bc_pseudo_p, sym=sym, snapshot=snapshot, st=st,
+                    real_balance=_bc_bal, leverage=1,  # BC는 x1
+                )
+            except Exception as _bc_ml_e:
+                print(f"[ML_LOG] BC_OPEN 기록 실패(무시): {_bc_ml_e}")
+
         # ARMED 만료 — ★ V10.29e: 1h/1d 별도 만료
         if sym in _armed:
             age_h = (time.time() - _armed[sym]["ts"]) / 3600
@@ -388,6 +407,21 @@ def _manage_positions(snapshot, st: Dict) -> List[Intent]:
             amt = float(p.get("amt", 0) or 0)
             if amt <= 0:
                 continue
+            # ★ V10.31c: BC 청산 시점 ML 피처 기록 (reason 그대로 event_type)
+            try:
+                from v9.logging.logger_ml import record_ml_event
+                # reason 파생: "BC_TRAIL", "BC_TP", "BC_SL", "BC_REHEAT(...)", "BC_TIMEOUT"
+                _evt = reason.split("(")[0]  # 괄호 앞까지만
+                _bc_exit_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                record_ml_event(
+                    trace_id=f"BC_{uuid.uuid4().hex[:8]}",
+                    event_type=_evt,
+                    p=p, sym=sym, snapshot=snapshot, st=st,
+                    real_balance=_bc_exit_bal, leverage=1,
+                )
+            except Exception as _bc_exit_ml_e:
+                print(f"[ML_LOG] {reason} 기록 실패(무시): {_bc_exit_ml_e}")
+
             intents.append(Intent(
                 trace_id=f"BC_{uuid.uuid4().hex[:8]}",
                 intent_type=IntentType.FORCE_CLOSE,

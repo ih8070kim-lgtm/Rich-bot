@@ -327,6 +327,18 @@ def apply_order_results(
                 print(f"[DCA_APPLIED] {sym} {pos_side} T{tier}: "
                       f"qty {_dca_pre_amt:.1f}+{filled:.1f}={p['amt']:.1f} "
                       f"ep {_dca_pre_ep:.4f}→{p['ep']:.4f}")
+                # ★ V10.31c: ML 피처 로깅 복구 (plan_dca 제거 전엔 여기서 기록됨)
+                try:
+                    from v9.logging.logger_ml import record_ml_event
+                    _real_bal_ml = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
+                    record_ml_event(
+                        trace_id=result.trace_id,
+                        event_type=f"DCA_T{tier}",
+                        p=p, sym=sym, snapshot=snapshot, st=st,
+                        real_balance=_real_bal_ml, leverage=LEVERAGE,
+                    )
+                except Exception as _ml_e:
+                    print(f"[ML_LOG] DCA 기록 실패(무시): {_ml_e}")
                 # ★ V10.26: DCA 체결 → worst_roi/max_roi 0 리셋 (새 출발)
                 # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
                 p["worst_roi"] = 0.0
