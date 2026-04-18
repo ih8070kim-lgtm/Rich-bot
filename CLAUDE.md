@@ -67,3 +67,4 @@
 | 04-17 | TREND score 1.0~2.0 구간 손실 | 애매한 트렌드 세기 → DCA까지 끌려감 → T3 FC | V10.31b: score 1.0~2.0 TREND 진입 차단 (COMP+NOSLOT 모두) |
 | 04-17 | BC 활성 시 MR 레버리지 초과 | BC가 잔고 사용 중인데 MR이 전체 잔고 기준 사이징 → 실질 레버리지 초과 | V10.31b: _mr_available_balance() — BC 노셔널 차감 후 MR 사이징 (진입/DCA/trim 전부) |
 | 04-17 | PnL 과장 (내부계산 vs 바이낸스) | OrderResult에 realized_pnl 미포함 → 내부 (exit-ep)×qty 계산이 trim 과다매도 등으로 부풀림 | V10.31b: OrderResult.realized_pnl 추가 + order_router/runner에서 바이낸스 trades realizedPnl 추출 |
+| 04-17 | trim PnL 3배 뻥튀기 | `filled_qty × price_diff × LEVERAGE` — qty가 이미 레버리지 반영 수량인데 LEVERAGE(3) 추가 곱셈 | V10.31b: `× LEVERAGE` 제거 + realizedPnl 우선 사용 |

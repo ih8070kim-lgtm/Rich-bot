@@ -1537,10 +1537,15 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
                   f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
             if old_ep > 0:
-                if pos_side == "buy":
-                    _trim_pnl = filled_qty * (avg_price - old_ep) * LEVERAGE
+                # ★ V10.31b FIX: LEVERAGE 제거 — qty가 이미 레버리지 반영 수량
+                # 바이낸스 realizedPnl 우선, 없으면 내부 계산
+                _rpnl_trim = float(info.get("_realized_pnl", 0) or 0)
+                if _rpnl_trim != 0.0:
+                    _trim_pnl = _rpnl_trim
+                elif pos_side == "buy":
+                    _trim_pnl = filled_qty * (avg_price - old_ep)
                 else:
-                    _trim_pnl = filled_qty * (old_ep - avg_price) * LEVERAGE
+                    _trim_pnl = filled_qty * (old_ep - avg_price)
                 _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE)
                 _trim_icon = "✅" if _trim_pnl >= 0 else "🔴"
                 print(f"[TRIM_FILL] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
