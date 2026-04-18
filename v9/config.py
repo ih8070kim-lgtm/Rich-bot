@@ -12,9 +12,9 @@ VERSION = "10.29c"  # ★ V10.29c: ATR 3.0 고정 + TREND + T3_DEF_FIX + pending
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
 # ═══════════════════════════════════════════════════════════════════
-TOTAL_MAX_SLOTS = 10   # ★ v10.15: 양방향 합산 (한쪽 5 × 2)
-MAX_LONG        = 5    # ★ v10.15: 한쪽 5 (MR+HEDGE 합산)
-MAX_SHORT       = 5
+TOTAL_MAX_SLOTS = 8    # ★ V10.31c: 5/5 → 4/4 단순화 (실운영은 4/4였음, HEDGE 합산용 여유 제거)
+MAX_LONG        = 4    # ★ V10.31c: 5→4
+MAX_SHORT       = 4    # ★ V10.31c: 5→4
 MAX_MR_PER_SIDE = 4    # ★ v10.15: MR은 방향당 최대 4
 MAX_E30_SLOTS   = 2    # ★ V10.27d: EMA30 A/B 테스트 슬롯 (롱+숏 합산)
 MAX_HEDGE_SLOTS = 1    # ★ 최종 아키텍처: tail-risk 보험 1개만

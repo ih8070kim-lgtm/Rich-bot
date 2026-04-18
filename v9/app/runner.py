@@ -725,38 +725,11 @@ def _load_sym_limits_from_ccxt(ex):
 # ═══════════════════════════════════════════════════════════════
 _TP1_PREORDER_REPRICE_PCT = 0.003  # 0.3% 이상 차이나면 재배치
 
-
+# ★ V10.31c: _cancel_tp1_preorder 함수는 v9/execution/order_router.py로 이동
+# (주문 실행 책임을 단일 모듈에 통합). 내부 호출은 아래 wrapper로 리다이렉트.
 async def _cancel_tp1_preorder(ex, p: dict, sym: str):
-    """기존 TP1 선주문 취소 + 레지스트리 정리."""
-    oid = p.get("tp1_preorder_id")
-    if not oid or oid == "DRY_PREORDER":
-        p["tp1_preorder_id"] = None
-        p["tp1_preorder_price"] = None
-        p["tp1_preorder_ts"] = None
-        return
-    try:
-        import asyncio as _aio
-        await _aio.to_thread(ex.cancel_order, oid, sym)
-        print(f"[TP1_PRE] {sym} 선주문 취소 oid={oid}")
-    except Exception as _e:
-        _err = str(_e)
-        if "Unknown order" in _err or "-2011" in _err:
-            pass  # 이미 체결 또는 만료
-        else:
-            print(f"[TP1_PRE] {sym} 선주문 취소 실패: {_e}")
-    # 레지스트리 정리
-    try:
-        from v9.execution.order_router import remove_pending_limit, _PENDING_ORDERS
-        remove_pending_limit(str(oid))
-        _orders = _PENDING_ORDERS.get(sym, [])
-        _PENDING_ORDERS[sym] = [(o, t) for o, t in _orders if o != str(oid)]
-        if not _PENDING_ORDERS[sym]:
-            _PENDING_ORDERS.pop(sym, None)
-    except Exception:
-        pass
-    p["tp1_preorder_id"] = None
-    p["tp1_preorder_price"] = None
-    p["tp1_preorder_ts"] = None
+    from v9.execution.order_router import cancel_tp1_preorder as _impl
+    return await _impl(ex, p, sym)
 
 
 async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
@@ -2071,34 +2044,9 @@ async def _place_trim_preorders(ex, st, snapshot):
 
 
 async def _cancel_trim_preorders(ex, st, sym, pos_side):
-    """포지션 청산 시 해당 심볼의 trim 선주문 전량 취소."""
-    from v9.execution.position_book import get_p
-    from v9.execution.order_router import _PENDING_LIMITS, remove_pending_limit
-    import asyncio
-
-    sym_st = st.get(sym, {})
-    p = get_p(sym_st, pos_side)
-    if not isinstance(p, dict):
-        return
-
-    trim_orders = p.get("trim_preorders", {})
-    if not trim_orders:
-        return
-
-    for tier, info in list(trim_orders.items()):
-        oid = info.get("oid", "")
-        if not oid:
-            continue
-        try:
-            await asyncio.to_thread(ex.cancel_order, oid, sym)
-            remove_pending_limit(oid)
-            print(f"[TRIM_CANCEL] {sym} {pos_side} T{tier} oid={oid} 취소")
-        except Exception as e:
-            # 이미 체결/취소된 경우 무시
-            remove_pending_limit(oid)
-            print(f"[TRIM_CANCEL] {sym} T{tier} 취소 시도: {e}")
-
-    p["trim_preorders"] = {}
+    # ★ V10.31c: 구현은 v9/execution/order_router.py로 이동 (wrapper 유지)
+    from v9.execution.order_router import cancel_trim_preorders as _impl
+    return await _impl(ex, st, sym, pos_side)
 
 
 async def _main_loop(ex_init, dry_run: bool):

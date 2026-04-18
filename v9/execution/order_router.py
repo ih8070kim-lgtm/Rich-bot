@@ -397,3 +397,76 @@ def _fail(trace_id, sym, side, qty, order_type, tag, error) -> OrderResult:
         avg_price=0.0, filled_qty=0.0,
         order_type=order_type, tag=tag, error=error,
     )
+
+
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.31c: 선주문 취소 헬퍼 (runner.py에서 이동)
+# 주문 실행 책임을 order_router 단일 모듈에 집중
+# ═══════════════════════════════════════════════════════════════
+
+async def cancel_tp1_preorder(ex, p: dict, sym: str):
+    """기존 TP1 선주문 취소 + 레지스트리 정리.
+    
+    ★ V10.31c: runner.py에서 이동. 주문 실행 책임을 order_router에 통합.
+    """
+    oid = p.get("tp1_preorder_id")
+    if not oid or oid == "DRY_PREORDER":
+        p["tp1_preorder_id"] = None
+        p["tp1_preorder_price"] = None
+        p["tp1_preorder_ts"] = None
+        return
+    try:
+        import asyncio as _aio
+        await _aio.to_thread(ex.cancel_order, oid, sym)
+        print(f"[TP1_PRE] {sym} 선주문 취소 oid={oid}")
+    except Exception as _e:
+        _err = str(_e)
+        if "Unknown order" in _err or "-2011" in _err:
+            pass  # 이미 체결 또는 만료
+        else:
+            print(f"[TP1_PRE] {sym} 선주문 취소 실패: {_e}")
+    # 레지스트리 정리
+    try:
+        remove_pending_limit(str(oid))
+        _orders = _PENDING_ORDERS.get(sym, [])
+        _PENDING_ORDERS[sym] = [(o, t) for o, t in _orders if o != str(oid)]
+        if not _PENDING_ORDERS[sym]:
+            _PENDING_ORDERS.pop(sym, None)
+    except Exception:
+        pass
+    p["tp1_preorder_id"] = None
+    p["tp1_preorder_price"] = None
+    p["tp1_preorder_ts"] = None
+
+
+async def cancel_trim_preorders(ex, st, sym, pos_side):
+    """포지션 청산 시 해당 심볼의 trim 선주문 전량 취소.
+    
+    ★ V10.31c: runner.py에서 이동. 주문 실행 책임을 order_router에 통합.
+    """
+    from v9.execution.position_book import get_p
+    import asyncio
+
+    sym_st = st.get(sym, {})
+    p = get_p(sym_st, pos_side)
+    if not isinstance(p, dict):
+        return
+
+    trim_orders = p.get("trim_preorders", {})
+    if not trim_orders:
+        return
+
+    for tier, info in list(trim_orders.items()):
+        oid = info.get("oid", "")
+        if not oid:
+            continue
+        try:
+            await asyncio.to_thread(ex.cancel_order, oid, sym)
+            remove_pending_limit(oid)
+            print(f"[TRIM_CANCEL] {sym} {pos_side} T{tier} oid={oid} 취소")
+        except Exception as e:
+            # 이미 체결/취소된 경우 무시
+            remove_pending_limit(oid)
+            print(f"[TRIM_CANCEL] {sym} T{tier} 취소 시도: {e}")
+
+    p["trim_preorders"] = {}
