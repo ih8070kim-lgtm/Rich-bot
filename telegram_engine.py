@@ -175,6 +175,7 @@ async def report_system_status(snapshot, st: dict):
     prices = getattr(snapshot, "all_prices", {}) or {}
     long_lines = []
     short_lines = []
+    sub_lines   = []  # ★ V10.31c: BC/CB 별도 섹션
     total_unrealized = 0.0
 
     for sym, sym_st in (st or {}).items():
@@ -218,13 +219,17 @@ async def report_system_status(snapshot, st: dict):
                 badge = ""
 
             line = f"{icon}{badge}{short_sym} T{dca}{trail} {roi:+.1f}%"
-            if pos_side == "buy":
+            # ★ V10.31c: BC/CB는 별도 섹션으로 분리 (코어 전략과 구분)
+            if role in ("BC", "CB"):
+                sub_lines.append(line)
+            elif pos_side == "buy":
                 long_lines.append(line)
             else:
                 short_lines.append(line)
 
     long_str = " │ ".join(long_lines) if long_lines else "—"
     short_str = " │ ".join(short_lines) if short_lines else "—"
+    sub_str   = " │ ".join(sub_lines)   if sub_lines   else ""
     upnl_icon = "🟢" if total_unrealized >= 0 else "🔴"
 
     pnl_icon = "🟢" if s["pnl"] >= 0 else "🔴"
@@ -250,6 +255,9 @@ async def report_system_status(snapshot, st: dict):
         for sd, p_ in iter_positions(ss) if sd == "sell" and isinstance(p_, dict)
     ) / LEVERAGE / _real_bal * 100
 
+    # ★ V10.31c: BC/CB는 별도 섹션, 코어(MR/TREND)와 명확히 분리
+    _sub_section = f"🌀 보조 {sub_str}\n━━━━━━━━━━━━━━━━\n" if sub_str else ""
+
     msg = (
         f"<b>Trinity v{VERSION}</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -260,6 +268,7 @@ async def report_system_status(snapshot, st: dict):
         f"📈 {long_str}\n"
         f"📉 {short_str}\n"
         f"━━━━━━━━━━━━━━━━\n"
+        f"{_sub_section}"
         f"{pnl_icon} 금일 <b>${s['pnl']:+.2f}</b> ({wr})\n"
         f"<pre>{hist_str}</pre>"
     )

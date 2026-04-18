@@ -139,6 +139,9 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
 
                 total_unrealized += pnl_est
 
+                # ★ V10.31c: 코어(MR/TREND) vs 보조(BC/CB) 분리
+                is_core = role not in ("BC", "CB")
+
                 positions.append({
                     "sym": sym.replace("/USDT", ""),
                     "side": "LONG" if side == "buy" else "SHORT",
@@ -154,6 +157,7 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                     "step": step,
                     "entry_type": entry_type,
                     "hold_min": round((now - float(p.get("time", now) or now)) / 60, 0),
+                    "is_core": is_core,  # ★ V10.31c
                 })
 
         # ── 스큐/어전시 ──
@@ -192,6 +196,112 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 today_trades += 1
                 if t["pnl"] > 0:
                     today_wins += 1
+
+        # ── ★ V10.31c: "오늘" 탭용 — 최근 7일 일별 + 전략별 + 시간대별 ──
+        daily_list = []
+        strat_pnl = {"MR": 0.0, "TREND": 0.0, "BC": 0.0, "CB": 0.0, "OTHER": 0.0}
+        hour_pnl = [0.0] * 24  # 오늘 시간대별 (UTC)
+        try:
+            tail_week = _tail_lines(trades_file, 2000)
+            _daily_map = {}
+            for line in tail_week:
+                t = _parse_trade_line(line)
+                if not t:
+                    continue
+                d = t["date"]
+                if d not in _daily_map:
+                    _daily_map[d] = {"pnl": 0.0, "trades": 0, "wins": 0}
+                _daily_map[d]["pnl"]    += t["pnl"]
+                _daily_map[d]["trades"] += 1
+                if t["pnl"] > 0:
+                    _daily_map[d]["wins"] += 1
+                # 전략별 분류 (role 기반)
+                role = (t.get("role", "") or "").upper()
+                if role == "BC":
+                    strat_pnl["BC"] += t["pnl"]
+                elif role == "CB":
+                    strat_pnl["CB"] += t["pnl"]
+                elif role in ("CORE_MR", "CORE_BREAKOUT", ""):
+                    # entry_type 있으면 TREND 분리, 없으면 MR
+                    # log_trades에 entry_type 칼럼이 없으므로 기본 MR로
+                    strat_pnl["MR"] += t["pnl"]
+                else:
+                    strat_pnl["OTHER"] += t["pnl"]
+                # 시간대별 (오늘만)
+                if d == today_str:
+                    try:
+                        hh = int(t["time"][6:8])  # "MM-DD HH:MM" → HH
+                        if 0 <= hh < 24:
+                            hour_pnl[hh] += t["pnl"]
+                    except Exception:
+                        pass
+            # 최근 7일만 정렬
+            _sorted_dates = sorted(_daily_map.keys())[-7:]
+            for d in _sorted_dates:
+                dd = _daily_map[d]
+                daily_list.append({
+                    "date": d[5:],  # MM-DD
+                    "pnl": round(dd["pnl"], 2),
+                    "trades": dd["trades"],
+                    "wins": dd["wins"],
+                    "wr": round(dd["wins"] / dd["trades"] * 100, 0) if dd["trades"] else 0,
+                })
+            strat_pnl = {k: round(v, 2) for k, v in strat_pnl.items()}
+        except Exception:
+            pass
+
+        # ── ★ V10.31c: "인사이트" 탭용 — 규칙 기반 경고/관찰 ──
+        insights = []
+        try:
+            core_pos = [p for p in positions if p.get("is_core", True)]
+            t3_longs  = [p for p in core_pos if p["side"] == "LONG"  and p["tier"] >= 3]
+            t3_shorts = [p for p in core_pos if p["side"] == "SHORT" and p["tier"] >= 3]
+            t3_count = len(t3_longs) + len(t3_shorts)
+            # 규칙 1: T3 포화
+            if len(t3_longs) >= 4:
+                insights.append({"level": "warn", "text": f"롱 T3 {len(t3_longs)}/4 포화 — 추가 롱 진입 차단됨"})
+            if len(t3_shorts) >= 4:
+                insights.append({"level": "warn", "text": f"숏 T3 {len(t3_shorts)}/4 포화 — 추가 숏 진입 차단됨"})
+            # 규칙 2: L/S notional 편중
+            if long_notional > 0 and short_notional > 0:
+                ratio = max(long_notional, short_notional) / min(long_notional, short_notional)
+                if ratio >= 2.5:
+                    heavy = "롱" if long_notional > short_notional else "숏"
+                    insights.append({"level": "warn",
+                        "text": f"{heavy} 편중 {ratio:.1f}:1 (L ${long_notional:.0f} / S ${short_notional:.0f})"})
+            # 규칙 3: URGENCY
+            urg = skew_data.get("urgency", 0)
+            if urg >= 30:
+                insights.append({"level": "warn", "text": f"URGENCY {urg:.0f} — 고위험 구간"})
+            elif urg >= 15:
+                insights.append({"level": "info", "text": f"URGENCY {urg:.0f} — 주의"})
+            # 규칙 4: 실현 vs 미실현 갭
+            net_today = today_pnl + total_unrealized
+            if today_pnl > 10 and total_unrealized < -today_pnl:
+                insights.append({"level": "warn",
+                    "text": f"실현 +${today_pnl:.0f} 이나 미실현 ${total_unrealized:+.0f} → 실손익 ${net_today:+.0f}"})
+            # 규칙 5: 깊게 물린 T3
+            for p in sorted(t3_longs + t3_shorts, key=lambda x: x["roi"])[:3]:
+                if p["roi"] <= -6:
+                    insights.append({"level": "info",
+                        "text": f"{p['sym']} {p['side']} T3 {p['roi']:+.1f}% — HARD_SL 접근"})
+            # 규칙 6: 마진 비율
+            if mr >= 0.80:
+                insights.append({"level": "crit", "text": f"MR {mr*100:.1f}% — Killswitch 발동 임박"})
+            elif mr >= 0.65:
+                insights.append({"level": "warn", "text": f"MR {mr*100:.1f}% — 마진 관리 주의"})
+            # 규칙 7: 코어/보조 포지션 요약
+            sub_pos = [p for p in positions if not p.get("is_core", True)]
+            if sub_pos:
+                sub_pnl = sum(p["pnl"] for p in sub_pos)
+                insights.append({"level": "info",
+                    "text": f"보조(BC/CB) {len(sub_pos)}건 미실현 ${sub_pnl:+.1f}"})
+            # 긍정 신호도 추가
+            if today_wins >= 10 and today_wins / max(today_trades, 1) >= 0.9:
+                insights.append({"level": "good",
+                    "text": f"오늘 WR {today_wins}/{today_trades} ({today_wins/today_trades*100:.0f}%) 유지 중"})
+        except Exception:
+            pass
 
         # ── 잔고 히스토리 (최근 24h = 1440줄) ──
         bal_history = []
@@ -235,6 +345,11 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
             },
             "recent_trades": recent_trades[-15:],
             "bal_history": bal_history,
+            # ★ V10.31c: 신규 필드 — 오늘 탭 / 인사이트 탭용
+            "daily": daily_list,        # 최근 7일 일별 PnL
+            "strat_pnl": strat_pnl,     # 전략별 누적 기여도 (7일 창)
+            "hour_pnl": hour_pnl,       # 오늘 시간대별 PnL (24시간)
+            "insights": insights,       # 규칙 기반 경고/관찰
         }
 
         tmp = _STATUS_PATH + ".tmp"

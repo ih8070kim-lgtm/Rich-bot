@@ -78,6 +78,8 @@ body{background:var(--bg);color:var(--t);font-family:-apple-system,system-ui,san
   <div class="tab active" onclick="setTab('pos')" id="tab-pos">포지션</div>
   <div class="tab" onclick="setTab('trades')" id="tab-trades">트레이드</div>
   <div class="tab" onclick="setTab('skew')" id="tab-skew">리스크</div>
+  <div class="tab" onclick="setTab('today')" id="tab-today">오늘</div>
+  <div class="tab" onclick="setTab('insight')" id="tab-insight">인사이트</div>
 </div>
 <div id="content"></div>
 <div class="refresh-note">3초마다 자동 갱신</div>
@@ -132,6 +134,8 @@ function render(){
   // Tab content
   if(currentTab==='pos') renderPositions();
   else if(currentTab==='trades') renderTrades();
+  else if(currentTab==='today') renderToday();
+  else if(currentTab==='insight') renderInsight();
   else renderSkew();
 }
 
@@ -140,28 +144,49 @@ function renderPositions(){
     $('content').innerHTML='<div class="card"><h3>오픈 포지션 없음</h3></div>';
     return;
   }
-  let html='<div class="card"><h3>오픈 포지션 ('+data.positions.length+')</h3>';
-  for(const p of data.positions){
+  // ★ V10.31c: 코어 / 보조(BC/CB) 분리
+  const corePos = data.positions.filter(p=>p.is_core!==false);
+  const subPos  = data.positions.filter(p=>p.is_core===false);
+
+  function renderRow(p){
     const isNeg=p.roi<0;
     const w=Math.min(Math.abs(p.roi)*10,100);
     const tc={1:'t1',2:'t2',3:'t3'}[p.tier]||'t1';
     const sc=p.side==='LONG'?'side-l':'side-s';
     const stepIcon=p.step>=1?'🔄':'';
-    html+=`<div class="pos">
-      <span class="sym">${p.sym}</span>
+    const roleBadge=p.role==='BC'?' 🌀':p.role==='CB'?' ⚡':'';
+    return `<div class="pos">
+      <span class="sym">${p.sym}${roleBadge}</span>
       <span class="badge ${sc}">${p.side}</span>
       <span class="badge ${tc}">T${p.tier}</span>
       <div class="bar-wrap"><div class="bar" style="width:${w}%;background:${isNeg?'var(--r)':'var(--g)'};opacity:.7"></div></div>
       <span class="roi" style="color:${c(p.roi)}">${p.roi>0?'+':''}${p.roi.toFixed(1)}%${stepIcon}</span>
     </div>`;
   }
-  // Summary row
+
+  let html='<div class="card"><h3>코어 포지션 ('+corePos.length+')</h3>';
+  if(corePos.length){
+    for(const p of corePos) html+=renderRow(p);
+  } else {
+    html+='<div style="color:var(--m);font-size:11px;padding:6px">없음</div>';
+  }
+  // Summary row (코어 + 보조 합산 — 기존 유지)
   const s=data.summary;
   html+=`<div style="margin-top:8px;padding:6px 10px;background:#1e293b;border-radius:6px;display:flex;justify-content:space-between;font-size:11px">
     <span style="color:var(--m)">L $${s.long_notional.toFixed(0)} / S $${s.short_notional.toFixed(0)}</span>
     <span style="color:${c(s.unrealized_pnl)};font-weight:700;font-family:'SF Mono',monospace">${s.unrealized_pnl>0?'+':''}$${s.unrealized_pnl.toFixed(1)}</span>
-  </div>`;
-  html+='</div>';
+  </div></div>`;
+
+  // ★ V10.31c: 보조 전략(BC/CB) 별도 섹션
+  if(subPos.length){
+    html+='<div class="card"><h3>보조 전략 🌀 BC / ⚡ CB ('+subPos.length+')</h3>';
+    for(const p of subPos) html+=renderRow(p);
+    const subPnl = subPos.reduce((a,p)=>a+p.pnl, 0);
+    html+=`<div style="margin-top:8px;padding:6px 10px;background:#1e293b;border-radius:6px;text-align:right;font-size:11px">
+      <span style="color:${c(subPnl)};font-weight:700;font-family:'SF Mono',monospace">미실현 ${subPnl>0?'+':''}$${subPnl.toFixed(1)}</span>
+    </div></div>`;
+  }
+
   $('content').innerHTML=html;
 }
 
@@ -181,6 +206,97 @@ function renderTrades(){
     </div>`;
   }
   html+='</div></div>';
+  $('content').innerHTML=html;
+}
+
+// ★ V10.31c: 오늘 탭 — 7일 일별 PnL + 전략별 기여 + 시간대별
+function renderToday(){
+  const daily = data.daily || [];
+  const sp = data.strat_pnl || {};
+  const hr = data.hour_pnl || [];
+
+  // 일별 7일 막대 + 누적선
+  let html='<div class="card"><h3>최근 7일 일별 PnL</h3>';
+  if(!daily.length){
+    html+='<div style="color:var(--m);font-size:11px;padding:10px">기록 없음</div>';
+  } else {
+    const maxAbs = Math.max(1, ...daily.map(d=>Math.abs(d.pnl)));
+    let cum=0;
+    for(const d of daily){
+      cum += d.pnl;
+      const w = Math.min(Math.abs(d.pnl)/maxAbs*100, 100);
+      const bc = d.pnl>=0?'var(--g)':'var(--r)';
+      html+=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px">
+        <span style="width:42px;color:var(--m);font-family:'SF Mono',monospace">${d.date}</span>
+        <div class="bar-wrap" style="flex:1"><div class="bar" style="width:${w}%;background:${bc};opacity:.7"></div></div>
+        <span style="width:62px;text-align:right;color:${c(d.pnl)};font-family:'SF Mono',monospace">${d.pnl>0?'+':''}$${d.pnl.toFixed(1)}</span>
+        <span style="width:44px;text-align:right;color:var(--m);font-size:10px">${d.wr}%</span>
+      </div>`;
+    }
+    html+=`<div style="margin-top:8px;padding:6px 10px;background:#1e293b;border-radius:6px;display:flex;justify-content:space-between;font-size:11px">
+      <span style="color:var(--m)">7일 누적</span>
+      <span style="color:${c(cum)};font-weight:700;font-family:'SF Mono',monospace">${cum>0?'+':''}$${cum.toFixed(1)}</span>
+    </div>`;
+  }
+  html+='</div>';
+
+  // 전략별 기여도
+  html+='<div class="card"><h3>전략별 기여도 (7일)</h3>';
+  const strats=[['MR','코어 MR'],['TREND','🔀 TREND'],['BC','🌀 BC'],['CB','⚡ CB'],['OTHER','기타']];
+  const total = Object.values(sp).reduce((a,b)=>a+b, 0);
+  for(const [k,label] of strats){
+    const v = sp[k] || 0;
+    if(v===0) continue;
+    const pct = total!==0 ? (v/Math.max(...Object.values(sp).map(Math.abs),1))*100 : 0;
+    const w = Math.min(Math.abs(pct), 100);
+    const bc = v>=0?'var(--g)':'var(--r)';
+    html+=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px">
+      <span style="width:76px;color:var(--t)">${label}</span>
+      <div class="bar-wrap" style="flex:1"><div class="bar" style="width:${w}%;background:${bc};opacity:.7"></div></div>
+      <span style="width:62px;text-align:right;color:${c(v)};font-family:'SF Mono',monospace">${v>0?'+':''}$${v.toFixed(1)}</span>
+    </div>`;
+  }
+  html+='</div>';
+
+  // 시간대별 (오늘만, non-zero hour만)
+  const nonZeroHours = hr.map((v,i)=>[i,v]).filter(([,v])=>v!==0);
+  if(nonZeroHours.length){
+    html+='<div class="card"><h3>오늘 시간대별 PnL (UTC)</h3>';
+    const maxAbs = Math.max(1, ...nonZeroHours.map(([,v])=>Math.abs(v)));
+    for(const [h,v] of nonZeroHours){
+      const w = Math.min(Math.abs(v)/maxAbs*100, 100);
+      const bc = v>=0?'var(--g)':'var(--r)';
+      html+=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:11px">
+        <span style="width:32px;color:var(--m);font-family:'SF Mono',monospace">${String(h).padStart(2,'0')}h</span>
+        <div class="bar-wrap" style="flex:1"><div class="bar" style="width:${w}%;background:${bc};opacity:.7"></div></div>
+        <span style="width:58px;text-align:right;color:${c(v)};font-family:'SF Mono',monospace">${v>0?'+':''}$${v.toFixed(1)}</span>
+      </div>`;
+    }
+    html+='</div>';
+  }
+
+  $('content').innerHTML=html;
+}
+
+// ★ V10.31c: 인사이트 탭 — 규칙 기반 경고/관찰
+function renderInsight(){
+  const ins = data.insights || [];
+  let html='<div class="card"><h3>현재 상태 인사이트</h3>';
+  if(!ins.length){
+    html+='<div style="color:var(--m);font-size:12px;padding:10px">특이사항 없음 — 안정적 운영 중</div>';
+  } else {
+    const iconMap = {crit:'🚨', warn:'⚠️', info:'📊', good:'✅'};
+    const colorMap = {crit:'var(--r)', warn:'var(--a)', info:'var(--c)', good:'var(--g)'};
+    for(const it of ins){
+      const lv = it.level || 'info';
+      html+=`<div style="padding:8px 10px;margin-bottom:6px;background:#1e293b;border-left:3px solid ${colorMap[lv]};border-radius:4px;font-size:12px;display:flex;gap:8px;align-items:flex-start">
+        <span>${iconMap[lv]}</span>
+        <span style="flex:1;color:var(--t);line-height:1.4">${it.text}</span>
+      </div>`;
+    }
+  }
+  html+='</div>';
+  html+='<div class="refresh-note" style="margin-top:8px">규칙 기반 자동 생성 · 3초마다 갱신</div>';
   $('content').innerHTML=html;
 }
 
