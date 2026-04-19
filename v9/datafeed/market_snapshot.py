@@ -8,6 +8,12 @@ import time
 from v9.types import MarketSnapshot
 
 
+# ★ V10.31c: Balance 캐시 (15초) — 429 rate limit 방어
+# fetch_balance는 매 tick(3초) 호출 불필요. 15초 캐시로 1/5 감축.
+_BAL_CACHE = {"ts": 0.0, "real": 0.0, "free": 0.0}
+_BAL_CACHE_TTL = 15.0
+
+
 async def fetch_market_snapshot(
     ex,
     active_symbols: list,
@@ -17,24 +23,39 @@ async def fetch_market_snapshot(
     """
     거래소에서 전체 시장 스냅샷을 수집.
     - tickers: 전체 fetch_tickers (정규화)
-    - balance: USDT 잔고 + margin_ratio
+    - balance: USDT 잔고 + margin_ratio (★ V10.31c: 15초 캐시)
     - ohlcv_pool: active_symbols + BTC/USDT (1m/5m/15m/1h)
     - btc 지표: 1h/6h change, dev_ma
     """
     ts = time.time()
 
     # ── 잔고 조회 ────────────────────────────────────────────────
+    # ★ V10.31c: 15초 캐시 + 실패 시 prev fallback (기존 동작 유지)
     real_balance = 0.0
     free_balance = 0.0
-    try:
-        balance = await asyncio.to_thread(ex.fetch_balance)
-        real_balance = float(balance['USDT']['total'])
-        free_balance = float(balance['USDT']['free'])
-    except Exception as e:
-        print(f"[market_snapshot] balance 조회 실패: {e}")
-        if prev_snapshot:
-            real_balance = prev_snapshot.real_balance_usdt
-            free_balance = prev_snapshot.free_balance_usdt
+    _cache_age = ts - _BAL_CACHE["ts"]
+    if _cache_age < _BAL_CACHE_TTL and _BAL_CACHE["real"] > 0:
+        # 캐시 히트
+        real_balance = _BAL_CACHE["real"]
+        free_balance = _BAL_CACHE["free"]
+    else:
+        # 캐시 만료 → API 호출
+        try:
+            balance = await asyncio.to_thread(ex.fetch_balance)
+            real_balance = float(balance['USDT']['total'])
+            free_balance = float(balance['USDT']['free'])
+            _BAL_CACHE["ts"] = ts
+            _BAL_CACHE["real"] = real_balance
+            _BAL_CACHE["free"] = free_balance
+        except Exception as e:
+            print(f"[market_snapshot] balance 조회 실패: {e}")
+            # 실패 시 stale 캐시 우선, 없으면 prev snapshot
+            if _BAL_CACHE["real"] > 0:
+                real_balance = _BAL_CACHE["real"]
+                free_balance = _BAL_CACHE["free"]
+            elif prev_snapshot:
+                real_balance = prev_snapshot.real_balance_usdt
+                free_balance = prev_snapshot.free_balance_usdt
 
     margin_ratio = 1.0 - (free_balance / real_balance) if real_balance > 0 else 0.0
 
@@ -46,6 +67,9 @@ async def fetch_market_snapshot(
             tickers_raw = {}
     except Exception as e:
         print(f"[market_snapshot] fetch_tickers 실패: {e}")
+        # ★ V10.31c: tickers 실패 시 prev snapshot에서 tickers 복원 (아래 norm_tickers 생성부에서 fallback)
+        if prev_snapshot and hasattr(prev_snapshot, 'tickers'):
+            tickers_raw = prev_snapshot.tickers or {}
 
     norm_tickers = {}
     all_prices = {}
