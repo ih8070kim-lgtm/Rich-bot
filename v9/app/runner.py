@@ -1021,23 +1021,22 @@ def _rotate_logs() -> None:
 
 
 def _migrate_log_trades_schema() -> None:
-    """★ V10.31d: log_trades.csv 헤더 마이그레이션.
+    """★ V10.31d~e: log_trades.csv 헤더 마이그레이션.
 
-    V10.31d에서 TRADES_COLUMNS에 fee_usdt(맨 뒤) 추가. 기존 파일은 18컬럼,
-    신규는 19컬럼. 파싱 인덱스는 유지되지만 헤더는 구버전이라 분석 시 혼란.
+    V10.31d: fee_usdt 컬럼 추가
+    V10.31e: t1_max_roi_pre_dca 컬럼 추가
 
-    부팅 시 첫 줄(헤더) 검사하여 fee_usdt 누락 시 기존 파일을 rename
-    (.pre_v10_31d.csv) 후 새 헤더로 재시작.
+    부팅 시 첫 줄(헤더)이 최신 스키마가 아니면 기존 파일을 rename
+    (.pre_v{version}.csv) 후 새 헤더로 재시작.
 
     **부작용 없음**: status_writer의 split(",")[N] 방식 파싱은 인덱스 기반이라
-    기존/신규 모두 동작. 이 마이그레이션은 순전히 분석 편의용.
+    기존 컬럼 순서는 유지되므로 앞쪽 파싱은 그대로 동작. 신규 컬럼만 누락됨.
     """
     import shutil
     from v9.config import LOG_DIR
     from v9.logging.schemas import TRADES_COLUMNS
     fpath = os.path.join(LOG_DIR, "log_trades.csv")
     if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
-        # ★ V10.31d 보강: early return 사유 명시 (사용자 제보로 마이그레이션 조용한 통과 원인 추적 필요)
         _why = "파일 없음" if not os.path.exists(fpath) else "size=0"
         print(f"[V9 Runner] log_trades 마이그레이션 스킵: {_why} (신규 파일로 시작됨)", flush=True)
         return
@@ -1048,17 +1047,20 @@ def _migrate_log_trades_schema() -> None:
             print("[V9 Runner] log_trades 마이그레이션 스킵: 헤더 빈 줄", flush=True)
             return
         existing_cols = first_line.split(",")
-        if "fee_usdt" in existing_cols:
-            print(f"[V9 Runner] log_trades 마이그레이션 스킵: 이미 신규 스키마 ({len(existing_cols)}컬럼)", flush=True)
-            return  # 이미 신규 스키마
+        # ★ V10.31e: 최신 스키마 = TRADES_COLUMNS 전부 포함
+        missing = [c for c in TRADES_COLUMNS if c not in existing_cols]
+        if not missing:
+            print(f"[V9 Runner] log_trades 마이그레이션 스킵: 이미 최신 스키마 ({len(existing_cols)}컬럼)", flush=True)
+            return
         # 구 스키마 → backup + 새로 시작
-        bak = fpath.replace('.csv', '.pre_v10_31d.csv')
-        # 이미 bak 있으면 타임스탬프 추가
+        _vtag = "pre_v10_31e" if "fee_usdt" in existing_cols else "pre_v10_31d"
+        bak = fpath.replace('.csv', f'.{_vtag}.csv')
         if os.path.exists(bak):
-            bak = fpath.replace('.csv', f'.pre_v10_31d_{int(time.time())}.csv')
+            bak = fpath.replace('.csv', f'.{_vtag}_{int(time.time())}.csv')
         shutil.move(fpath, bak)
+        print(f"[V9 Runner] log_trades 마이그레이션: {os.path.basename(bak)} 백업 "
+              f"(누락 컬럼: {missing})", flush=True)
         # 새 파일은 _append_csv가 자동으로 신규 헤더로 생성
-        # ★ V10.31d: 성공 print는 앞으로 트리거될 일 없어 제거 (V10.31e 정리)
     except Exception as _mig_e:
         print(f"[V9 Runner] log_trades 마이그레이션 실패(무시): {_mig_e}", flush=True)
 
@@ -1511,6 +1513,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["step"] = 0
         p["trailing_on_time"] = None
         p["worst_roi"] = 0.0
+        # ★ V10.31e: DCA 전 max_roi를 tier별로 보존 (측정 인프라, 로직 영향 없음)
+        _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
+        _pre_tier = int(p.get("dca_level", 1) or 1)
+        p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
         p["max_roi_seen"] = 0.0
         if _stale_tp1_oid:
             from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
@@ -1635,6 +1641,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 try:
                     from v9.logging.logger_csv import log_trade as _lt_trim
                     _hold = now - float(p.get("time", now) or now)
+                    # ★ V10.31e: T1 DCA 직전 max_roi 추출
+                    _t1_pre_trim = float(p.get("max_roi_by_tier", {}).get("1", 0.0) or 0.0)
                     _lt_trim(
                         trace_id=f"trim_T{_old_tier}_{sym.replace('/','_')}",
                         symbol=sym, side=pos_side,
@@ -1648,6 +1656,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                         entry_type=str(p.get("entry_type", "MR") or "MR"),
                         role=str(p.get("role", "") or ""),
                         source_sym="",
+                        t1_max_roi_pre_dca=_t1_pre_trim,  # ★ V10.31e
                     )
                 except Exception as _lt_e:
                     print(f"[TRIM_FILL] log_trade 실패(무시): {_lt_e}")
@@ -1676,6 +1685,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)
+            # ★ V10.31e: T1 DCA 직전 max_roi 추출
+            _t1_pre_tp1 = float(p.get("max_roi_by_tier", {}).get("1", 0.0) or 0.0)
             log_trade(
                 trace_id=info["trace_id"], symbol=sym, side=pos_side,
                 ep=old_ep, exit_price=avg_price, amt=filled_qty,
@@ -1689,6 +1700,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 role=str(p.get("role", "") or ""),
                 source_sym=str(p.get("source_sym", "") or ""),
                 fee_usdt=float(info.get("_commission", 0) or 0),  # ★ V10.31d
+                t1_max_roi_pre_dca=_t1_pre_tp1,  # ★ V10.31e
             )
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")

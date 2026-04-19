@@ -67,6 +67,10 @@ TRADES_COLUMNS = [
     "source_sym",    # HEDGE일 때 소스 심볼
     # ★ V10.31d: 수수료 (맨 뒤 추가 — 기존 파싱 인덱스 유지)
     "fee_usdt",      # 청산 거래 수수료 합계 ($)
+    # ★ V10.31e: T1 → T2 DCA 직전의 max_roi 보존 (측정 인프라)
+    # 기존 max_roi_seen은 DCA 시 0 리셋되어 "DCA 이후 구간의 max"만 기록.
+    # 이 컬럼은 T1 시점에 얼마나 반등 찍었는지 추적해 조기 익절 시나리오 검증용.
+    "t1_max_roi_pre_dca",
 ]
 
 # ── log_funding (★ V10.31d: 펀딩비 별도 로깅) ────────────────────

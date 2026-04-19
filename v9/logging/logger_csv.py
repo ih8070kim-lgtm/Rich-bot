@@ -247,6 +247,7 @@ def log_trade(
     role: str = "",
     source_sym: str = "",
     fee_usdt: float = 0.0,  # ★ V10.31d: 청산 수수료 합계
+    t1_max_roi_pre_dca: float = 0.0,  # ★ V10.31e: T1 DCA 직전 max_roi 보존값
 ):
     row = {
         "time": _now_str(),
@@ -268,6 +269,7 @@ def log_trade(
         "entry_type": entry_type,
         "role": role,
         "source_sym": source_sym,
+        "t1_max_roi_pre_dca": round(t1_max_roi_pre_dca, 4),  # ★ V10.31e
     }
     _append_csv(_log_path("log_trades.csv"), TRADES_COLUMNS, row)
 

@@ -266,6 +266,10 @@ def apply_order_results(
                 p.pop("tp1_done", None)
                 p["step"] = 0
                 p["trailing_on_time"] = None
+                # ★ V10.31e: DCA 전 max_roi tier별 보존 (측정 인프라)
+                _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
+                _pre_tier = int(p.get("dca_level", 1) or 1)
+                p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
                 p["max_roi_seen"] = 0.0
                 p["worst_roi"] = 0.0
                 if _stale_tp1_oid:
@@ -341,6 +345,10 @@ def apply_order_results(
                     print(f"[ML_LOG] DCA 기록 실패(무시): {_ml_e}")
                 # ★ V10.26: DCA 체결 → worst_roi/max_roi 0 리셋 (새 출발)
                 # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
+                # ★ V10.31e: 리셋 전 tier별 max_roi 보존 (측정 인프라)
+                _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
+                _pre_tier = int(p.get("dca_level", 1) or 1)
+                p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
                 p["worst_roi"] = 0.0
                 p["max_roi_seen"] = 0.0
                 # ★ V10.29e FIX: market DCA도 trim_to_place 세팅
@@ -537,6 +545,8 @@ def apply_order_results(
                                   f"→ self 사용 (rpnl 부분값 의심)", flush=True)
                     # ★ V10.31d: 수수료 — OrderResult.fee_usdt에서 읽기
                     _fee = float(getattr(result, 'fee_usdt', 0.0) or 0.0)
+                    # ★ V10.31e: T1 DCA 직전 max_roi 추출 (max_roi_by_tier["1"])
+                    _t1_pre = float(p.get("max_roi_by_tier", {}).get("1", 0.0) or 0.0)
                     log_trade(
                         trace_id=result.trace_id,
                         symbol=sym,
@@ -556,6 +566,7 @@ def apply_order_results(
                         role=str(p.get("role", "") or ""),
                         source_sym=str(p.get("source_sym", "") or ""),
                         fee_usdt=_fee,
+                        t1_max_roi_pre_dca=_t1_pre,  # ★ V10.31e
                     )
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
