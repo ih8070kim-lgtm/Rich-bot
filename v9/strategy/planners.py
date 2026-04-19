@@ -280,13 +280,9 @@ OPEN_SYMBOL_COOLDOWN_SEC = 10 * 60
 OPEN_WAIT_NEXT_BAR       = False
 OPEN_PENDING_TTL_SEC     = 5 * 60
 
-# ★ V10.27: 방향별 글로벌 진입 쿨다운 (연타 방지)
-# ★ V10.31d: 10분→0. 실측상 이 쿨다운이 시간당 방향당 6건 상한선을 만들어
-# HF_MR 부재 + 롱 풀 포화 상태에서 숏 진입까지 차단하고 있었음. 제거.
-# 04-18 연쇄 FC 방어 효과는 [실측] 확인 안 된 상태에서 제거 결정 (Kim 판단).
-# 로직/변수는 유지 (0이면 체크 즉시 통과). dead code 정리는 Phase 3에서.
-OPEN_DIR_COOLDOWN_SEC    = 0
-_open_dir_cd = {"buy": 0.0, "sell": 0.0}  # {side: next_allowed_ts}
+# ★ V10.31d-3: 방향별 글로벌 진입 쿨다운 완전 제거 (Phase 3 dead code 정리)
+# V10.31d에서 값=0으로 무력화했던 것을 변수/체크/세팅 전부 삭제.
+# 이전 주석(V10.27~V10.31d) 기록은 CLAUDE.md 히스토리 참조.
 
 # ★ V10.27: 통합 ATR base + slot 불균형 ±패널티
 _ATR_BASE = 3.0           # ★ V10.29b: 백테스트 최적 (2.4→3.0)
@@ -911,9 +907,7 @@ def plan_open(
             # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → 최고 score 1개만 진입
             if _trend_signal_side:
                 _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
-                # ★ 방향 쿨다운 체크 (이전 NOSLOT/MR 연타 방지)
-                if now_ts < _open_dir_cd.get(_tr_opp_side, 0.0):
-                    continue
+                # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
                 _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
                 if _tr_opp_slots < MAX_MR_PER_SIDE:
                     _tr_best_sym = None
@@ -931,6 +925,13 @@ def plan_open(
                             continue
                         if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                             continue
+                        # ★ V10.31e: 심볼 실적 쿨다운
+                        try:
+                            from v9.strategy.symbol_stats import is_symbol_cooldown as _sc
+                            if _sc(_tr_sym):
+                                continue
+                        except Exception:
+                            pass
                         _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
                         if _tr_corr < OPEN_CORR_MIN:
                             continue
@@ -965,9 +966,7 @@ def plan_open(
                     print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
             # ★ V10.30 FIX: trigger_side=None → MR 진입 코드 도달 차단
             continue
-        # ★ V10.27: 방향별 글로벌 진입 쿨다운 (연타 방지)
-        if now_ts < _open_dir_cd.get(trigger_side, 0.0):
-            continue
+        # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
         # ★ V10.17 Rule A: Slot Balance Gate — 반대=0 AND 이쪽≥3 → 차단
         if trigger_side == "buy":
             if _open_shorts == 0 and _open_longs >= 3:
@@ -978,6 +977,14 @@ def plan_open(
 
         if float(sym_st.get("open_fail_cooldown_until",   0.0)) > time.time(): continue
         if float(sym_st.get("reduce_fail_cooldown_until", 0.0)) > time.time(): continue
+
+        # ★ V10.31e: 심볼별 실적 쿨다운 (최근 7일 손실 심볼 OPEN 차단)
+        try:
+            from v9.strategy.symbol_stats import is_symbol_cooldown
+            if is_symbol_cooldown(symbol):
+                continue
+        except Exception:
+            pass
 
         # corr 최종 게이트
         corr = (getattr(snapshot, "correlations", None) or {}).get(symbol, 1.0)
@@ -1087,8 +1094,7 @@ def plan_open(
                 "locked_regime":    _btc_regime,
             },
         ))
-        # ★ V10.27: 방향별 글로벌 쿨다운 기록
-        _open_dir_cd[trigger_side] = now_ts + OPEN_DIR_COOLDOWN_SEC
+        # ★ V10.31d-3: _open_dir_cd 세팅 제거 (쿨다운 자체 삭제)
         # ★ V10.27d: E30 슬롯 카운터 증가 (루프 내 중복 방지)
         if entry_type_tag == "15mE30":
             _active_e30 += 1
@@ -1119,6 +1125,13 @@ def plan_open(
                         continue
                     if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                         continue
+                    # ★ V10.31e: 심볼 실적 쿨다운
+                    try:
+                        from v9.strategy.symbol_stats import is_symbol_cooldown as _sc
+                        if _sc(_tr_sym):
+                            continue
+                    except Exception:
+                        pass
                     # ★ V10.29d: corr 선체크 (risk_manager REJECT_CORR_LOW 방지)
                     _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
                     if _tr_corr < OPEN_CORR_MIN:
@@ -1266,8 +1279,7 @@ def plan_open(
                 _ns_corr = (getattr(snapshot, "correlations", None) or {}).get(_ns["sym"], 0)
                 print(f"[TREND_NOSLOT] ⚡ {_ns['sym']} {_ns['side']} score={_ns['score']:.1f} "
                       f"corr={_ns_corr:.2f} ← {_ns['sig_sym']} (최고score 발사)")
-                # ★ V10.29e: MR과 동일 방향 쿨다운 — 같은 시그널 연타 방지
-                _open_dir_cd[_ns["side"]] = time.time() + OPEN_DIR_COOLDOWN_SEC
+                # ★ V10.31d-3: _open_dir_cd 세팅 제거
                 try:
                     from v9.logging.logger_csv import log_system
                     log_system("TREND_NOSLOT", f"{_ns['sym']} {_ns['side']} score={_ns['score']:.1f} corr={_ns_corr:.2f} FIRE")
@@ -1998,7 +2010,7 @@ def generate_all_intents(
 # ═════════════════════════════════════════════════════════════════
 def save_strategy_state(system_state: dict):
     """모듈 글로벌 → system_state (save_position_book 직전 호출)."""
-    system_state["_open_dir_cd"] = _open_dir_cd
+    # ★ V10.31d-3: _open_dir_cd 제거 (쿨다운 자체 삭제)
     system_state["_bad_regime_active"] = _bad_regime_active
     # ★ V10.29e: 분리 모듈 위임
     save_exit_state(system_state)
@@ -2007,8 +2019,8 @@ def save_strategy_state(system_state: dict):
 
 def restore_strategy_state(system_state: dict):
     """system_state → 모듈 글로벌 (부팅 시 호출)."""
-    global _open_dir_cd, _bad_regime_active
-    _open_dir_cd = system_state.get("_open_dir_cd", {"buy": 0.0, "sell": 0.0})
+    global _bad_regime_active
+    # ★ V10.31d-3: _open_dir_cd restore 제거
     _bad_regime_active = system_state.get("_bad_regime_active", False)
     # ★ V10.29e: 분리 모듈 위임
     restore_exit_state(system_state)

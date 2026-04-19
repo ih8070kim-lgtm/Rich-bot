@@ -481,6 +481,33 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
         except Exception:
             pass
 
+        # ── ★ V10.31e: 심볼별 실적 (7일 창) + 쿨다운 상태 ──
+        symbol_stats_list = []
+        cooldown_syms = []
+        try:
+            from v9.strategy.symbol_stats import compute_symbol_stats, is_symbol_cooldown
+            _sstats = compute_symbol_stats()
+            for _ssym, _sd in _sstats.items():
+                _ss_entry = {
+                    "sym": _ssym.replace("/USDT", ""),
+                    "n": _sd["n"],
+                    "pnl": _sd["pnl"],
+                    "avg": _sd["avg"],
+                    "wr": int(_sd["wr"] * 100),
+                    "cooldown": is_symbol_cooldown(_ssym),
+                }
+                symbol_stats_list.append(_ss_entry)
+                if _ss_entry["cooldown"]:
+                    cooldown_syms.append(_ss_entry["sym"])
+            # PnL 내림차순
+            symbol_stats_list.sort(key=lambda x: x["pnl"], reverse=True)
+            # 인사이트: 쿨다운 심볼 있으면 알림
+            if cooldown_syms:
+                insights.append({"level": "info",
+                    "text": f"실적 쿨다운 중: {', '.join(cooldown_syms)} (7d PnL<0, n≥5)"})
+        except Exception:
+            pass
+
         # 샘플링 후 대시보드용 bal_history (5분 간격 최대 288포인트)
         if len(bal_history) > 288:
             bal_history = bal_history[::5]
@@ -520,6 +547,8 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 "fee": round(fee_7d, 2),
                 "funding": round(funding_7d, 2),  # 음수=지불, 양수=수취
             },
+            # ★ V10.31e: 심볼별 7일 실적 + 쿨다운 상태
+            "symbol_stats": symbol_stats_list,
         }
 
         tmp = _STATUS_PATH + ".tmp"

@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31d"  # ★ V10.31d: Phase 1 dead code 정리 (TRIM_TRAIL_FLOOR, trail gap 주석 오타) + Phase 2 fee/funding 로깅 + MDD/Sharpe 대시보드
+VERSION = "10.31e"  # ★ V10.31e: Phase 3b — 심볼별 실적 tracker + 쿨다운 + 선발 tiebreaker
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
@@ -186,6 +186,21 @@ LONG_BETA_MAX   = 2.00
 SHORT_MIN_CORR  = 0.40   # ★ V10.27f: 0.50→0.40 (숏 유니버스 확대)
 SHORT_BETA_MIN  = 0.50   # ★ V10.27f: 0.70→0.50 (저베타 숏 허용)
 SHORT_BETA_MAX  = 2.00
+
+# ═══════════════════════════════════════════════════════════════
+# ★ V10.31e: 심볼별 실적 기반 동적 조정 (Phase 3b)
+# 과거 실적 = 후행지표(lagging). 과적합 리스크 인지한 상태에서
+# 사용자 판단으로 진행. 문제시 SYMBOL_STATS_ENABLED=False로 즉시 원복 가능.
+# ═══════════════════════════════════════════════════════════════
+SYMBOL_STATS_ENABLED       = True    # 전체 feature 스위치
+SYMBOL_STATS_WINDOW_DAYS   = 7       # 실적 집계 창 (일)
+SYMBOL_STATS_MIN_SAMPLES   = 5       # 최소 거래 건수 (이하는 중립 판단)
+# 손실 심볼 쿨다운
+SYMBOL_COOLDOWN_PNL_THRESH = 0.0     # 총 PnL < 0 이면 쿨다운 후보
+SYMBOL_COOLDOWN_DAYS       = 3       # 쿨다운 기간 (일)
+# 선발 tiebreaker
+SYMBOL_PNL_WEIGHT          = 0.20    # ATR 랭킹 대비 PnL 가중치 (0.0=비활성)
+# ═══════════════════════════════════════════════════════════════
 
 # ★ v10.15: HIGH 레짐 sticky
 HIGH_STICKY_SEC = 300   # HIGH 진입 후 5분간 유지
@@ -427,7 +442,7 @@ TREND_ENABLED        = True
 # ★ V10.31c: TREND_MIN_SCORE 제거 — 실제 필터는 _TR_MIN=0.5 (planners.py:1073)
 # 하드코딩이 유일 사용처였음. config import만 남아있었음.
 TREND_MAX_SCORE      = 5.0     # ★ V10.30: score 상한 (과열 역전 방지)
-TREND_COOLDOWN_SEC   = 0       # ★ V10.30: 쿨다운 제거 (_open_dir_cd 10분이 제약)
+TREND_COOLDOWN_SEC   = 0       # ★ V10.30: 쿨다운 제거. V10.31d-3에서 _open_dir_cd도 전면 제거됨
 
 # ═══════════════════════════════════════════════════════════════
 # Beta Cycle (v10.29d — 1h Signal, Short-Only)

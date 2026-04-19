@@ -334,6 +334,32 @@ function renderInsight(){
     }
   }
   html+='</div>';
+
+  // ── ★ V10.31e: 심볼별 7일 실적 카드 ──
+  const symStats = data.symbol_stats || [];
+  if(symStats.length > 0){
+    html+='<div class="card"><h3>심볼별 실적 <span style="font-size:10px;color:var(--m);font-weight:400">7일 창</span></h3>';
+    html+='<div style="font-size:11px">';
+    html+=`<div style="display:grid;grid-template-columns:70px 40px 70px 60px 50px 40px;gap:4px;padding:4px 6px;color:var(--m);border-bottom:1px solid var(--d);font-weight:600">
+      <span>심볼</span><span>n</span><span>PnL</span><span>건당</span><span>WR</span><span></span>
+    </div>`;
+    for(const s of symStats){
+      const pnlColor = s.pnl >= 0 ? 'var(--g)' : 'var(--r)';
+      const cdBadge = s.cooldown ? '<span style="color:var(--r);font-size:9px">🔴 CD</span>' : '';
+      html+=`<div style="display:grid;grid-template-columns:70px 40px 70px 60px 50px 40px;gap:4px;padding:4px 6px;border-bottom:1px solid var(--d);font-family:'SF Mono',monospace;align-items:center">
+        <span style="color:${s.cooldown?'var(--m)':'var(--t)'}">${s.sym}</span>
+        <span>${s.n}</span>
+        <span style="color:${pnlColor}">${s.pnl>0?'+':''}$${s.pnl.toFixed(1)}</span>
+        <span style="color:${pnlColor}">${s.avg>0?'+':''}$${s.avg.toFixed(2)}</span>
+        <span>${s.wr}%</span>
+        <span>${cdBadge}</span>
+      </div>`;
+    }
+    html+='</div>';
+    html+='<div style="font-size:10px;color:var(--m);margin-top:8px;line-height:1.4">🔴 CD = 쿨다운 중 (7d PnL<0, n≥5). OPEN 자동 차단</div>';
+    html+='</div>';
+  }
+
   html+='<div class="refresh-note" style="margin-top:8px">규칙 기반 자동 생성 · 3초마다 갱신</div>';
   $('content').innerHTML=html;
 }

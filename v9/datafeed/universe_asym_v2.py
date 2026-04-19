@@ -225,14 +225,34 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
                 except Exception:
                     continue
 
-            cands.sort(key=lambda x: x["atr_pct"], reverse=True)
+            # ★ V10.31e: PnL score tiebreaker — ATR 랭킹에 최근 실적 가중치
+            # 과거 실적은 후행지표. 과적합 리스크 인지한 상태에서 SYMBOL_PNL_WEIGHT 0.2로 소폭 적용.
+            # PnL score 범위 -1.0 ~ +1.0. combined_score = atr_pct * (1 + weight * pnl_score)
+            # weight=0 이면 기존 ATR 랭킹 동일 (즉시 원복 가능)
+            try:
+                from v9.config import SYMBOL_STATS_ENABLED, SYMBOL_PNL_WEIGHT
+                if SYMBOL_STATS_ENABLED and SYMBOL_PNL_WEIGHT > 0:
+                    from v9.strategy.symbol_stats import get_pnl_score
+                    for c in cands:
+                        _psc = get_pnl_score(c["sym"])
+                        c["pnl_score"] = _psc
+                        c["combined"] = c["atr_pct"] * (1.0 + SYMBOL_PNL_WEIGHT * _psc)
+                    cands.sort(key=lambda x: x.get("combined", x["atr_pct"]), reverse=True)
+                else:
+                    cands.sort(key=lambda x: x["atr_pct"], reverse=True)
+            except Exception:
+                cands.sort(key=lambda x: x["atr_pct"], reverse=True)
+
             cands = cands[UNIVERSE_EXCLUDE_TOP_ATR:]
             cands = cands[:UNIVERSE_TOP_N]
             selected = [x["sym"] for x in cands[:target_n]]
 
             # ★ V10.30: 선발 심볼 beta/corr 로그
+            # ★ V10.31e: PnL score도 표시 (SYMBOL_PNL_WEIGHT>0일 때만)
             _sel_info = " ".join(
-                f"{x['sym'].replace('/USDT','')}(β={x['beta']:.2f},c={x['corr_24h']:.2f})"
+                f"{x['sym'].replace('/USDT','')}(β={x['beta']:.2f},c={x['corr_24h']:.2f}"
+                + (f",p={x['pnl_score']:+.2f}" if 'pnl_score' in x else "")
+                + ")"
                 for x in cands[:target_n]
             )
             print(f"[Universe V10.15] {pool_name}: pool={len(pool_syms)} "

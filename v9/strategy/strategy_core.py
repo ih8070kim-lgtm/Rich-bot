@@ -516,13 +516,25 @@ def apply_order_results(
                     _side = p.get("side", pos_side)
                     _cpx  = float(avg_px if avg_px > 0 else (snapshot.all_prices or {}).get(sym, _ep))
                     _roi  = calc_roi_pct(_ep, _cpx, _side, LEVERAGE) if _ep > 0 and _cpx > 0 else 0.0
-                    # ★ V10.29e: 바이낸스 realizedPnl 우선 사용 (수수료 포함 정확한 PnL)
+                    # ★ V10.31d-3 FIX: realizedPnl 부분값 오류 방어
+                    # 배경: V10.31b에서 order_router가 order['trades']에서 realizedPnl 추출.
+                    # 그러나 FORCE_CLOSE/TRAIL_ON 대량 체결 시 trades 배열에 첫 1~2 조각만
+                    # 담겨 전체 PnL의 일부만 합산되는 케이스 확인 (APT T3_DEF_TRAIL: 실제 -$22 → 로그 -$0.64).
+                    # 해법: 자체계산(_self)과 대조 — realizedPnl이 50% 미만이면 부분값으로 판단, _self 사용.
                     _rpnl = getattr(result, 'realized_pnl', 0.0) or 0.0
-                    if _rpnl != 0.0:
+                    _raw = (_cpx - _ep) / _ep if _side == "buy" else (_ep - _cpx) / _ep
+                    _self_pnl = _raw * _amt * _cpx
+                    if _rpnl != 0.0 and abs(_rpnl) >= abs(_self_pnl) * 0.5:
+                        # realizedPnl이 합리적 범위 → 정확(수수료·펀딩 반영)하므로 우선
                         _pnl = _rpnl
+                        _pnl_source = "rpnl"
                     else:
-                        _raw = (_cpx - _ep) / _ep if _side == "buy" else (_ep - _cpx) / _ep
-                        _pnl = _raw * _amt * _cpx
+                        # realizedPnl이 없거나 부분값 → 자체계산 사용 (gross, 수수료 별도)
+                        _pnl = _self_pnl
+                        _pnl_source = "self"
+                        if _rpnl != 0.0:
+                            print(f"[PNL_FIX] {sym} {pos_side} rpnl={_rpnl:.2f} vs self={_self_pnl:.2f} "
+                                  f"→ self 사용 (rpnl 부분값 의심)", flush=True)
                     # ★ V10.31d: 수수료 — OrderResult.fee_usdt에서 읽기
                     _fee = float(getattr(result, 'fee_usdt', 0.0) or 0.0)
                     log_trade(

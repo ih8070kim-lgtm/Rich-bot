@@ -291,6 +291,8 @@ async def route_order(
 
             # ★ V10.31b: 바이낸스 realizedPnl 추출 (reduce 주문만)
             # ★ V10.31d: commission(수수료)도 함께 추출 — reduce/open 모두
+            # ★ V10.31d-3: limit 5→50 확대 — FORCE_CLOSE 대량 체결이 다수 조각으로 쪼개질 때
+            #   첫 5건만 잡혀 realizedPnl 부분값 기록 문제 완화. strategy_core에 50% 검증 로직도 추가됨.
             _rpnl = 0.0
             _fee = 0.0
             try:
@@ -298,7 +300,7 @@ async def route_order(
                 if not _order_trades:
                     # ccxt가 trades 안 줬으면 fetch
                     _order_trades = await asyncio.to_thread(
-                        ex.fetch_my_trades, sym, limit=5)
+                        ex.fetch_my_trades, sym, limit=50)
                     _order_trades = [t for t in _order_trades
                                      if str(t.get('order', '')) == str(order_id)]
                 for _t in _order_trades:

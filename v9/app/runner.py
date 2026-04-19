@@ -1037,14 +1037,19 @@ def _migrate_log_trades_schema() -> None:
     from v9.logging.schemas import TRADES_COLUMNS
     fpath = os.path.join(LOG_DIR, "log_trades.csv")
     if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
+        # ★ V10.31d 보강: early return 사유 명시 (사용자 제보로 마이그레이션 조용한 통과 원인 추적 필요)
+        _why = "파일 없음" if not os.path.exists(fpath) else "size=0"
+        print(f"[V9 Runner] log_trades 마이그레이션 스킵: {_why} (신규 파일로 시작됨)", flush=True)
         return
     try:
         with open(fpath, 'r', encoding='utf-8') as f:
             first_line = f.readline().strip()
         if not first_line:
+            print("[V9 Runner] log_trades 마이그레이션 스킵: 헤더 빈 줄", flush=True)
             return
         existing_cols = first_line.split(",")
         if "fee_usdt" in existing_cols:
+            print(f"[V9 Runner] log_trades 마이그레이션 스킵: 이미 신규 스키마 ({len(existing_cols)}컬럼)", flush=True)
             return  # 이미 신규 스키마
         # 구 스키마 → backup + 새로 시작
         bak = fpath.replace('.csv', '.pre_v10_31d.csv')
@@ -1053,10 +1058,9 @@ def _migrate_log_trades_schema() -> None:
             bak = fpath.replace('.csv', f'.pre_v10_31d_{int(time.time())}.csv')
         shutil.move(fpath, bak)
         # 새 파일은 _append_csv가 자동으로 신규 헤더로 생성
-        print(f"[V9 Runner] log_trades.csv 헤더 마이그레이션: "
-              f"{os.path.basename(bak)} 백업 후 신규 19컬럼 시작")
+        # ★ V10.31d: 성공 print는 앞으로 트리거될 일 없어 제거 (V10.31e 정리)
     except Exception as _mig_e:
-        print(f"[V9 Runner] log_trades 마이그레이션 실패(무시): {_mig_e}")
+        print(f"[V9 Runner] log_trades 마이그레이션 실패(무시): {_mig_e}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2118,6 +2122,7 @@ async def _funding_fetch_loop(ex):
     from datetime import datetime
 
     last_ts_ms = 0
+    _restore_note = "파일 없음 (최초 실행)"
 
     # ── 재시작 시 복원 ──────────────────────────────────────────
     try:
@@ -2130,13 +2135,20 @@ async def _funding_fetch_loop(ex):
                 try:
                     _dt = datetime.strptime(_t, "%Y-%m-%d %H:%M:%S")
                     last_ts_ms = int(_dt.timestamp() * 1000)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                    _restore_note = f"복원 성공 (last_ts={_t}, {len(_rows)}건)"
+                except Exception as _te:
+                    _restore_note = f"복원 실패 — 시간 파싱 에러: {_te}"
+            else:
+                _restore_note = f"파일 존재하나 행 없음 ({_fp})"
+    except Exception as _re:
+        _restore_note = f"복원 예외: {_re}"
+
+    # ★ V10.31d 보강: 복원 결과 로그 (첫 실행 직전)
+    print(f"[FUNDING] 복원: {_restore_note}", flush=True)
 
     # 첫 실행: 최근 48시간 조회. 이후 1시간 주기
     _first_run = True
+    _cycle_count = 0
     while True:
         try:
             # since: 중복 방지 + 초기 부팅 시 과거 48시간까지만
@@ -2170,11 +2182,16 @@ async def _funding_fetch_loop(ex):
                 )
                 last_ts_ms = _ts_ms
                 _new_cnt += 1
+            # ★ V10.31d 보강: 첫 주기는 0건이라도 로그 (API 호출 자체 성공 확인용)
             if _new_cnt > 0:
-                print(f"[FUNDING] {_new_cnt}건 기록 (last_ts={last_ts_ms})")
+                print(f"[FUNDING] {_new_cnt}건 기록 (last_ts={last_ts_ms})", flush=True)
+            elif _first_run is False and _cycle_count <= 1:
+                # 바로 위에서 _first_run = False 됐음. _cycle_count=1이 첫 주기 완료
+                print(f"[FUNDING] 첫 주기 완료 — 신규 0건 (복원 last_ts 이후 이벤트 없음)", flush=True)
         except Exception as _e:
-            print(f"[FUNDING] fetch 실패(무시): {_e}")
+            print(f"[FUNDING] fetch 실패(무시): {_e}", flush=True)
 
+        _cycle_count += 1
         await asyncio.sleep(3600)  # 1시간
 
 
@@ -2221,9 +2238,9 @@ async def _main_loop(ex_init, dry_run: bool):
     # ★ V10.31d: 펀딩비 백그라운드 fetch task (1시간 주기)
     try:
         asyncio.create_task(_funding_fetch_loop(ex))
-        print("[V9 Runner] 펀딩비 fetch loop 활성화 (1h 주기)")
+        print("[V9 Runner] 펀딩비 fetch loop 활성화 (1h 주기)", flush=True)
     except Exception as _fe:
-        print(f"[V9 Runner] 펀딩 fetch loop 기동 실패(무시): {_fe}")
+        print(f"[V9 Runner] 펀딩 fetch loop 기동 실패(무시): {_fe}", flush=True)
 
     # ★ V10.27e: 글로벌 전략/헷지 state 복원
     from v9.strategy.planners import restore_strategy_state
