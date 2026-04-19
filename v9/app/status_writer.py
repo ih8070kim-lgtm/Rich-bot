@@ -153,6 +153,13 @@ def _compute_perf_metrics(bal_history_full: list) -> dict:
         result["warning"] = f"n={n}일 — 신뢰도 낮음 (최소 30일 권장)"
     elif n < 90:
         result["warning"] = f"n={n}일 — 참고용 (90일+ 권장)"
+
+    # ★ V10.31d 핫픽스: NaN/Inf 방어 — JSON 직렬화 실패 방지
+    import math
+    for _k in ("mdd_pct", "mdd_abs", "sharpe", "total_return_pct"):
+        _v = result.get(_k, 0.0)
+        if not isinstance(_v, (int, float)) or math.isnan(_v) or math.isinf(_v):
+            result[_k] = 0.0
     return result
 
 
@@ -516,10 +523,22 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
         }
 
         tmp = _STATUS_PATH + ".tmp"
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(status, f, ensure_ascii=False)
+        # ★ V10.31d 핫픽스: allow_nan=False로 NaN/Inf 감지. 실패 시 perf/costs 제거 fallback
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(status, f, ensure_ascii=False, allow_nan=False)
+        except (ValueError, TypeError) as _je:
+            # NaN/Inf 또는 직렬화 실패 → perf/costs 제거하고 재시도 (대시보드 전체 먹통 방지)
+            print(f"[status_writer] JSON dump 실패(perf 제거 후 재시도): {_je}")
+            status.pop("perf", None)
+            status.pop("costs_7d", None)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(status, f, ensure_ascii=False, allow_nan=False, default=str)
         os.replace(tmp, _STATUS_PATH)
 
     except Exception as e:
-        # 대시보드 오류가 봇 전체를 죽이면 안 됨
-        pass
+        # ★ V10.31d 핫픽스: 대시보드 먹통 진단용 — 에러를 silent로 삼키지 않음
+        import traceback
+        print(f"[status_writer] write_status 예외: {e}")
+        print(traceback.format_exc())
+        # 봇 전체를 죽이진 않음 (return만)
