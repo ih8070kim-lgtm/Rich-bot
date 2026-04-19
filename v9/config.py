@@ -76,7 +76,7 @@ DCA_DISTANCES = {
 #   T1=scout(15%) → T2=확인(20%) → T3=본격물타기(30%) → T4=최종구제(35%)
 #   누적: 15/35/65/100  |  T3에서 이미 65% → 강한 단가 압축 + T4 탄약 유지
 # ═══════════════════════════════════════════════════════════════════
-DCA_WEIGHTS = [25, 25, 50]  # ★ V10.29b: T1 스캘핑 / T2 버퍼 / T3 스윙(50%)
+DCA_WEIGHTS = [33, 33, 34]  # ★ V10.31c: 균등 배분 — T3 50% 몰빵 → T1/T2 사이즈 증가로 수익원 강화, T3 최악손실 감소
 
 DCA_LIMIT_TIMEOUT_SEC = 60
 DCA_MIN_CORR          = 0.5
@@ -90,7 +90,7 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
 # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
-TRIM_BLENDED_ROI_BY_TIER = {3: 1.0, 2: 1.5}  # ★ V10.29b: 왕복 수익 확보 (0.5/1.0 → 1.0/1.5)
+TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.5}  # ★ V10.31c: T3 1.0 → 0.5 (DCA 33/33/34 전환으로 blended ROI 약 1%p 더 깊어지는 것 보정)
 TRIM_TRAIL_FLOOR = 0.5   # ★ V10.30: TRIM 안전 하한
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
@@ -136,7 +136,7 @@ TP_ATR_POWER    = 0.3
 TP_ATR_MIN_MULT = 0.7
 TP_ATR_MAX_MULT = 1.5
 
-TP1_PARTIAL_RATIO  = 0.40
+TP1_PARTIAL_RATIO  = 1.0  # ★ V10.31c: 100% 전량 청산 (40% 부분청산 → 남은 60% trail 이중처리 제거)
 # ★ V10.29e: TP2 제거 — planners에서 TP2 미생성, 죽은 코드
 TRAILING_TIMEOUT_MIN = 45
 

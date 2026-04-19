@@ -188,7 +188,8 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                     if _rv_notional <= _rv_grid * _rv_cum * 1.15:
                         _rv_dca = _wi + 1; break
                     _rv_dca = _wi + 1
-                _rv_dca = min(_rv_dca, 5)
+                # ★ V10.31c: DCA_WEIGHTS 길이로 clamp (기존 min=5는 죽은 T4/T5 허용)
+                _rv_dca = min(_rv_dca, len(_DW))
             # ★ v10.15c: pending_limit dca가 있으면 역추정 대신 사용
             _final_dca = _rv_dca
             if _pl_dca is not None and _pl_dca > _rv_dca:
@@ -1384,9 +1385,19 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             return
 
         # ★ v10.14: tier를 info에서 정확히 가져옴 (current+1 아닌 intent tier)
+        # ★ V10.31c: T4 버그 수정 — fallback이 dca_level+1로 무한증가 가능했음
+        # 4월 5일 SUI/SOL/ETH 3건 DCA_T4 기록 확인 → DCA_WEIGHTS=[25,25,50] 3티어 초과.
+        # 근본 해결: DCA_WEIGHTS 길이 기준으로 tier 상한 강제
+        # DCA_WEIGHTS [25,25,50] = T1(스캘핑)/T2(버퍼)/T3(스윙) 분배 → 유효 tier 1~3, DCA 유효 2~3
+        from v9.config import DCA_WEIGHTS as _DW_MAX
+        _MAX_TIER = len(_DW_MAX)  # [25,25,50] → 3
         tier = info.get("tier", 0)
         if tier <= 0:
             tier = int(p.get("dca_level", 1) or 1) + 1  # fallback
+        # ★ V10.31c: tier 상한 강제 (T4+ 도달 차단)
+        if tier > _MAX_TIER:
+            print(f"[DCA_TIER_CLAMP] {sym} {side} tier={tier} > MAX={_MAX_TIER} → 차단 (pending 불일치)")
+            return
 
         # ★ v10.14: 이미 완료된 tier 가드
         _curr_dca = int(p.get("dca_level", 1) or 1)

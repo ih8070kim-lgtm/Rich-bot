@@ -1379,28 +1379,16 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             p["trim_trail_max"] = roi_gross
             _max = roi_gross
 
-        # ── ATR 기반 gap ──
-        _pool = (snapshot.ohlcv_pool or {}).get(symbol, {})
-        _15m = _pool.get("15m", [])
-        _atr = atr_from_ohlcv(_15m[-15:], period=10) if len(_15m) >= 15 else 0.0
-        _atr_pct = (_atr / curr_p) if (curr_p > 0 and _atr > 0) else HARD_SL_ATR_BASE * 3
-        if _atr_pct < HARD_SL_ATR_BASE * 2:
-            _gap = 0.2
-        elif _atr_pct < HARD_SL_ATR_BASE * 5:
-            _gap = 0.3
-        else:
-            _gap = 0.5
+        # ★ V10.31c: 모든 trail gap을 fixed 0.5로 통일 (ATR 분기 제거)
+        _gap = 0.3
 
-        # ── 발동 체크 ──
+        # ── 발동 체크 (★ V10.31c: FLOOR 제거, peak 대비 gap만) ──
         _stop = _max - _gap
         _fire = False
         _reason = ""
         if roi_gross <= _stop:
             _fire = True
             _reason = f"TP_TRAIL(max={_max:.1f},gap={_gap:.2f},roi={roi_gross:.1f})"
-        elif roi_gross <= TRIM_TRAIL_FLOOR:
-            _fire = True
-            _reason = f"TP_FLOOR(roi={roi_gross:.1f}≤{TRIM_TRAIL_FLOOR})"
 
         if not _fire:
             continue
@@ -1514,19 +1502,10 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
             p["trim_trail_max"] = roi
             _max = roi
 
-        # ── ATR 기반 gap ──
-        _pool = (snapshot.ohlcv_pool or {}).get(symbol, {})
-        _15m = _pool.get("15m", [])
-        _atr = atr_from_ohlcv(_15m[-15:], period=10) if len(_15m) >= 15 else 0.0
-        _atr_pct = (_atr / curr_p) if (curr_p > 0 and _atr > 0) else HARD_SL_ATR_BASE * 3
-        if _atr_pct < HARD_SL_ATR_BASE * 2:
-            _gap = 0.2
-        elif _atr_pct < HARD_SL_ATR_BASE * 5:
-            _gap = 0.3
-        else:
-            _gap = 0.5
+        # ★ V10.31c: 모든 trail gap을 fixed 0.5로 통일 (ATR 분기 제거)
+        _gap = 0.3
 
-        # ── 발동 체크 ──
+        # ── 발동 체크 (★ V10.31c: FLOOR 제거, peak 대비 gap만) ──
         _stop = _max - _gap
         _fire = False
         _reason = ""
@@ -1534,9 +1513,6 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
         if roi <= _stop:
             _fire = True
             _reason = f"TRIM_TRAIL(max={_max:.1f},gap={_gap:.2f},roi={roi:.1f})"
-        elif roi <= TRIM_TRAIL_FLOOR:
-            _fire = True
-            _reason = f"TRIM_FLOOR(roi={roi:.1f}≤{TRIM_TRAIL_FLOOR})"
 
         if not _fire:
             continue
@@ -1628,16 +1604,8 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             trailing_triggered = False
             trail_reason       = "TRAILING_STOP"
 
-            # ★ V10.30: 15m ATR 구간별 trail gap 선택
-            _t1_15m = pool.get("15m", [])
-            _t1_atr = atr_from_ohlcv(_t1_15m[-15:], period=10) if len(_t1_15m) >= 15 else 0.0
-            _t1_atr_pct = (_t1_atr / curr_p) if (curr_p > 0 and _t1_atr > 0) else HARD_SL_ATR_BASE * 3
-            if _t1_atr_pct < HARD_SL_ATR_BASE * 2:      # 저변동
-                _trail_gap = 0.2
-            elif _t1_atr_pct < HARD_SL_ATR_BASE * 5:     # 정상
-                _trail_gap = 0.3
-            else:                                          # 고변동
-                _trail_gap = 0.5
+            # ★ V10.31c: 모든 trail gap fixed 0.5로 통일 (ATR 분기 제거)
+            _trail_gap = 0.3
             _stop = max_roi - _trail_gap
             if roi_pct <= _stop:
                 trailing_triggered = True
