@@ -145,3 +145,4 @@ class OrderResult:
     tag: str
     error: str | None = None
     realized_pnl: float = 0.0  # ★ V10.31b: 바이낸스 realizedPnl
+    fee_usdt: float = 0.0  # ★ V10.31d: 거래 수수료 합계 (USDT 환산)

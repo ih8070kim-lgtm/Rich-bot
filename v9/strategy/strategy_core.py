@@ -523,6 +523,8 @@ def apply_order_results(
                     else:
                         _raw = (_cpx - _ep) / _ep if _side == "buy" else (_ep - _cpx) / _ep
                         _pnl = _raw * _amt * _cpx
+                    # ★ V10.31d: 수수료 — OrderResult.fee_usdt에서 읽기
+                    _fee = float(getattr(result, 'fee_usdt', 0.0) or 0.0)
                     log_trade(
                         trace_id=result.trace_id,
                         symbol=sym,
@@ -541,6 +543,7 @@ def apply_order_results(
                         entry_type=str(p.get("entry_type", "MR") or "MR"),
                         role=str(p.get("role", "") or ""),
                         source_sym=str(p.get("source_sym", "") or ""),
+                        fee_usdt=_fee,
                     )
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")

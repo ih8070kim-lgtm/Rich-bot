@@ -279,9 +279,47 @@ function renderToday(){
 }
 
 // ★ V10.31c: 인사이트 탭 — 규칙 기반 경고/관찰
+// ★ V10.31d: 성과 지표(MDD/Sharpe) + 7일 비용 카드 추가
 function renderInsight(){
   const ins = data.insights || [];
-  let html='<div class="card"><h3>현재 상태 인사이트</h3>';
+  const perf = data.perf || {};
+  const costs = data.costs_7d || {};
+  let html='';
+
+  // ── 성과 지표 카드 (V10.31d) ──
+  const mddColor = (perf.mdd_pct||0) <= -10 ? 'var(--r)' : (perf.mdd_pct||0) <= -5 ? 'var(--a)' : 'var(--g)';
+  const shColor = (perf.sharpe||0) >= 1 ? 'var(--g)' : (perf.sharpe||0) >= 0 ? 'var(--t)' : 'var(--r)';
+  html+=`<div class="card"><h3>성과 지표 <span style="font-size:10px;color:var(--m);font-weight:400">n=${perf.n_days||0}일</span></h3>`;
+  html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">`;
+  html+=`<div style="padding:10px;background:#1e293b;border-radius:6px">
+    <div style="font-size:10px;color:var(--m);margin-bottom:4px">MDD</div>
+    <div style="font-size:18px;font-weight:700;color:${mddColor};font-family:'SF Mono',monospace">${(perf.mdd_pct||0).toFixed(2)}%</div>
+    <div style="font-size:10px;color:var(--m);margin-top:2px">$${(perf.mdd_abs||0).toFixed(1)}</div>
+  </div>`;
+  html+=`<div style="padding:10px;background:#1e293b;border-radius:6px">
+    <div style="font-size:10px;color:var(--m);margin-bottom:4px">Sharpe (연율)</div>
+    <div style="font-size:18px;font-weight:700;color:${shColor};font-family:'SF Mono',monospace">${(perf.sharpe||0).toFixed(2)}</div>
+    <div style="font-size:10px;color:var(--m);margin-top:2px">rf=0, 365d</div>
+  </div>`;
+  html+=`<div style="padding:10px;background:#1e293b;border-radius:6px">
+    <div style="font-size:10px;color:var(--m);margin-bottom:4px">누적 수익률</div>
+    <div style="font-size:18px;font-weight:700;color:${(perf.total_return_pct||0)>=0?'var(--g)':'var(--r)'};font-family:'SF Mono',monospace">${(perf.total_return_pct||0)>0?'+':''}${(perf.total_return_pct||0).toFixed(2)}%</div>
+  </div>`;
+  html+=`<div style="padding:10px;background:#1e293b;border-radius:6px">
+    <div style="font-size:10px;color:var(--m);margin-bottom:4px">7d 비용</div>
+    <div style="font-size:13px;color:var(--t);font-family:'SF Mono',monospace;line-height:1.3">
+      수수료 <span style="color:var(--r)">$${Math.abs(costs.fee||0).toFixed(2)}</span><br>
+      펀딩 <span style="color:${(costs.funding||0)>=0?'var(--g)':'var(--r)'}">${(costs.funding||0)>=0?'+':''}$${(costs.funding||0).toFixed(2)}</span>
+    </div>
+  </div>`;
+  html+=`</div>`;
+  if(perf.warning){
+    html+=`<div style="margin-top:8px;padding:6px 10px;background:#1e293b;border-left:3px solid var(--a);border-radius:4px;font-size:11px;color:var(--m)">⚠️ ${perf.warning}</div>`;
+  }
+  html+='</div>';
+
+  // ── 기존 인사이트 카드 ──
+  html+='<div class="card"><h3>현재 상태 인사이트</h3>';
   if(!ins.length){
     html+='<div style="color:var(--m);font-size:12px;padding:10px">특이사항 없음 — 안정적 운영 중</div>';
   } else {

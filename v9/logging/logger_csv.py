@@ -9,6 +9,7 @@ from datetime import datetime
 from v9.config import LOG_DIR
 from v9.logging.schemas import (
     FILLS_COLUMNS,
+    FUNDING_COLUMNS,
     INTENTS_COLUMNS,
     ORDERS_COLUMNS,
     POSITIONS_COLUMNS,
@@ -245,6 +246,7 @@ def log_trade(
     entry_type: str = "MR",
     role: str = "",
     source_sym: str = "",
+    fee_usdt: float = 0.0,  # ★ V10.31d: 청산 수수료 합계
 ):
     row = {
         "time": _now_str(),
@@ -255,6 +257,7 @@ def log_trade(
         "exit_price": round(exit_price, 8),
         "amt": round(amt, 8),
         "pnl_usdt": round(pnl_usdt, 4),
+        "fee_usdt": round(fee_usdt, 6),  # ★ V10.31d
         "roi_pct": round(roi_pct, 4),
         "dca_level": dca_level,
         "hold_sec": round(hold_sec),
@@ -267,6 +270,25 @@ def log_trade(
         "source_sym": source_sym,
     }
     _append_csv(_log_path("log_trades.csv"), TRADES_COLUMNS, row)
+
+
+# ── log_funding (★ V10.31d: 펀딩비 누수량 측정) ─────────────────
+def log_funding(
+    symbol: str,
+    funding_usdt: float,
+    funding_rate: float = 0.0,
+    position_amt: float = 0.0,
+    event_time: str = "",
+):
+    """펀딩 이벤트 1건 = 1행. fetch_funding_history에서 받은 각 레코드를 append."""
+    row = {
+        "time": event_time or _now_str(),
+        "symbol": symbol,
+        "funding_usdt": round(funding_usdt, 6),
+        "funding_rate": round(funding_rate, 8),
+        "position_amt": round(position_amt, 8),
+    }
+    _append_csv(_log_path("log_funding.csv"), FUNDING_COLUMNS, row)
 
 
 # ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)

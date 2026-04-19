@@ -1020,6 +1020,45 @@ def _rotate_logs() -> None:
             print(f"[V9 Runner] log rotation 오류(무시): {_rot_e}")
 
 
+def _migrate_log_trades_schema() -> None:
+    """★ V10.31d: log_trades.csv 헤더 마이그레이션.
+
+    V10.31d에서 TRADES_COLUMNS에 fee_usdt(맨 뒤) 추가. 기존 파일은 18컬럼,
+    신규는 19컬럼. 파싱 인덱스는 유지되지만 헤더는 구버전이라 분석 시 혼란.
+
+    부팅 시 첫 줄(헤더) 검사하여 fee_usdt 누락 시 기존 파일을 rename
+    (.pre_v10_31d.csv) 후 새 헤더로 재시작.
+
+    **부작용 없음**: status_writer의 split(",")[N] 방식 파싱은 인덱스 기반이라
+    기존/신규 모두 동작. 이 마이그레이션은 순전히 분석 편의용.
+    """
+    import shutil
+    from v9.config import LOG_DIR
+    from v9.logging.schemas import TRADES_COLUMNS
+    fpath = os.path.join(LOG_DIR, "log_trades.csv")
+    if not os.path.exists(fpath) or os.path.getsize(fpath) == 0:
+        return
+    try:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            first_line = f.readline().strip()
+        if not first_line:
+            return
+        existing_cols = first_line.split(",")
+        if "fee_usdt" in existing_cols:
+            return  # 이미 신규 스키마
+        # 구 스키마 → backup + 새로 시작
+        bak = fpath.replace('.csv', '.pre_v10_31d.csv')
+        # 이미 bak 있으면 타임스탬프 추가
+        if os.path.exists(bak):
+            bak = fpath.replace('.csv', f'.pre_v10_31d_{int(time.time())}.csv')
+        shutil.move(fpath, bak)
+        # 새 파일은 _append_csv가 자동으로 신규 헤더로 생성
+        print(f"[V9 Runner] log_trades.csv 헤더 마이그레이션: "
+              f"{os.path.basename(bak)} 백업 후 신규 19컬럼 시작")
+    except Exception as _mig_e:
+        print(f"[V9 Runner] log_trades 마이그레이션 실패(무시): {_mig_e}")
+
+
 # ═══════════════════════════════════════════════════════════════
 # ★ v10.13: TP1 Limit 선주문 (maker 수수료 확보)
 # ═══════════════════════════════════════════════════════════════
@@ -1119,6 +1158,7 @@ async def _manage_pending_limits(ex, st, snapshot):
             except Exception:
                 pass
             info["_realized_pnl"] = _rpnl
+            info["_commission"] = _rcomm  # ★ V10.31d: 수수료 누수 측정용
 
             # ★ 체결 → 포지션북 반영
             _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot)
@@ -1644,6 +1684,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 entry_type=str(p.get("entry_type", "MR") or "MR"),
                 role=str(p.get("role", "") or ""),
                 source_sym=str(p.get("source_sym", "") or ""),
+                fee_usdt=float(info.get("_commission", 0) or 0),  # ★ V10.31d
             )
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
@@ -2064,6 +2105,79 @@ async def _cancel_trim_preorders(ex, st, sym, pos_side):
     return await _impl(ex, st, sym, pos_side)
 
 
+async def _funding_fetch_loop(ex):
+    """★ V10.31d: 펀딩비 주기 수집 — "9일 약손실"의 숨은 비용 측정.
+
+    - 1시간 주기로 fetchFundingHistory 호출 (weight 매우 가벼움)
+    - 중복 방지: log_funding.csv 마지막 timestamp 이후만 기록
+    - 재시작 복원: csv 마지막 줄에서 last_ts_ms 복원
+    """
+    from v9.logging.logger_csv import log_funding
+    from v9.config import LOG_DIR
+    import csv
+    from datetime import datetime
+
+    last_ts_ms = 0
+
+    # ── 재시작 시 복원 ──────────────────────────────────────────
+    try:
+        _fp = os.path.join(LOG_DIR, "log_funding.csv")
+        if os.path.exists(_fp):
+            with open(_fp, newline='') as _f:
+                _rows = list(csv.DictReader(_f))
+            if _rows:
+                _t = _rows[-1].get("time", "")
+                try:
+                    _dt = datetime.strptime(_t, "%Y-%m-%d %H:%M:%S")
+                    last_ts_ms = int(_dt.timestamp() * 1000)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 첫 실행: 최근 48시간 조회. 이후 1시간 주기
+    _first_run = True
+    while True:
+        try:
+            # since: 중복 방지 + 초기 부팅 시 과거 48시간까지만
+            _win_ms = 172_800_000 if _first_run else 7_200_000  # 48h vs 2h
+            _since = max(last_ts_ms + 1, int(time.time() * 1000) - _win_ms)
+            _hist = await asyncio.to_thread(
+                ex.fetchFundingHistory, None, _since, 500
+            )
+            _first_run = False
+            _new_cnt = 0
+            for _h in (_hist or []):
+                _ts_ms = int(_h.get("timestamp", 0) or 0)
+                if _ts_ms <= last_ts_ms:
+                    continue
+                _sym = str(_h.get("symbol", "") or "")
+                # ccxt 표준 'amount' → funding payment (음수=지불)
+                _amt = float(_h.get("amount", 0) or 0)
+                _info = _h.get("info", {}) or {}
+                _rate = 0.0
+                try:
+                    _rate = float(_info.get("fundingRate", 0) or 0)
+                except Exception:
+                    pass
+                _dt = datetime.fromtimestamp(_ts_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                log_funding(
+                    symbol=_sym,
+                    funding_usdt=_amt,
+                    funding_rate=_rate,
+                    position_amt=0.0,  # Binance history에 직접 제공 안 됨
+                    event_time=_dt,
+                )
+                last_ts_ms = _ts_ms
+                _new_cnt += 1
+            if _new_cnt > 0:
+                print(f"[FUNDING] {_new_cnt}건 기록 (last_ts={last_ts_ms})")
+        except Exception as _e:
+            print(f"[FUNDING] fetch 실패(무시): {_e}")
+
+        await asyncio.sleep(3600)  # 1시간
+
+
 async def _main_loop(ex_init, dry_run: bool):
     """V9 메인 루프"""
     print(f"[V9 Runner] 시작 (dry_run={dry_run})")
@@ -2072,6 +2186,9 @@ async def _main_loop(ex_init, dry_run: bool):
     # ★ V10.31c: SYM_MIN_QTY 동적 로드 (하드코딩 누락 심볼 보정)
     # BC/CB init 이전에 호출 — 이들도 SYM_MIN_QTY 참조
     _load_sym_limits_from_ccxt(ex)
+
+    # ★ V10.31d: log_trades.csv 헤더 마이그레이션 (부팅 시 1회)
+    _migrate_log_trades_schema()
 
     # ★ Beta Cycle 초기화
     if _BC_ENABLED:
@@ -2100,6 +2217,13 @@ async def _main_loop(ex_init, dry_run: bool):
 
     # ★ v10.12: 부팅 시각 기록 (INSURANCE_SH 오발동 방지)
     system_state["_boot_ts"] = start_ts
+
+    # ★ V10.31d: 펀딩비 백그라운드 fetch task (1시간 주기)
+    try:
+        asyncio.create_task(_funding_fetch_loop(ex))
+        print("[V9 Runner] 펀딩비 fetch loop 활성화 (1h 주기)")
+    except Exception as _fe:
+        print(f"[V9 Runner] 펀딩 fetch loop 기동 실패(무시): {_fe}")
 
     # ★ V10.27e: 글로벌 전략/헷지 state 복원
     from v9.strategy.planners import restore_strategy_state

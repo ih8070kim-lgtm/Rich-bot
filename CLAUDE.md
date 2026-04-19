@@ -1,4 +1,4 @@
-# Trinity V10.31c — AI 제어 규칙
+# Trinity V10.31d — AI 제어 규칙
 
 ## 필수 작업 규칙
 - 함수 삭제/이동 전 `grep -rn "함수명" --include="*.py"` 실행하여 외부 참조 확인
@@ -27,6 +27,7 @@
 - CB(Crash Bounce) 수정 → `docs/CB.md`
 - TREND 수정 → `docs/TREND.md`
 - 유니버스/데이터 수정 → `docs/UNIVERSE.md`
+- 수익성 지표/로깅 인프라 → `docs/OBSERVABILITY.md` (V10.31d 신규)
 - 전체 아키텍처 → `ARCHITECTURE_V10.26.md`
 
 ## 파일 수정 금지 목록
@@ -84,3 +85,10 @@
 | 04-18 | 대시보드 경로 불일치 | status_writer.py가 `v9/v9_status.json` 쓰고 status_server.py가 `프로젝트루트/v9_status.json` 읽음. 서로 다른 파일 → 대시보드 한 번도 작동 안 함 | V10.31c: status_writer.py `_BASE_DIR`에 `..` 추가하여 프로젝트 루트 가리키게 수정 |
 | 04-18 | status_server 자동 기동 부재 | main.py가 runner만 호출, status_server는 수동 실행 필요 → 기동 안 됨 | V10.31c: main.py에 `_status_server_loop` 백그라운드 thread 추가. 크래시 시 10초 후 재기동 (무한 재시작) |
 | 04-18 | `NameError: LEVERAGE not defined` | 함수 내부에서 `from v9.config import LEVERAGE`를 if/elif 분기 안에서 조건부 import. 특정 경로로 실행 시 LEVERAGE 미정의 → 워치독 에러 | V10.31c: 4개 파일(strategy_core, runner, status_writer, risk_manager, dca_engine) module-level에 LEVERAGE/calc_roi_pct 단일 import 승격. 함수 내 비-alias 중복 import 전수 제거 (local shadow 방지). AST 검증으로 잔존 0건 확인 |
+| 04-20 | Phase 1 dead code 정리 | `TRIM_TRAIL_FLOOR`가 V10.31c에서 로직은 제거됐으나 config 정의 + planners 2곳 import + docs 체크리스트 잔존 (dead symbol) / trail gap 주석 "fixed 0.5" vs 실코드 `0.3` 불일치 4곳 (planners 3, hedge_engine 1) | V10.31d Phase 1: (a) `TRIM_TRAIL_FLOOR` 정의·import·doc 체크리스트 전수 제거 (import chain 검증으로 잔존 0 확인) (b) 주석 "0.5"→"0.3" 4곳 수정 |
+| 04-20 | 수익성 검증 불가 구조 | trades.csv PnL은 gross (수수료 차감 전). `runner.py:1103`에서 `_rcomm` 추출까진 하나 `info["_commission"]`으로 세팅 안 하고 버림 → log_trade 호출부에 fee 도달 불가. 펀딩비는 로깅 자체 부재. 결과: 약손실 원인(수수료·펀딩 누수) 시스템적 측정 차단 | V10.31d: (a) `OrderResult.fee_usdt` 필드 추가 (b) order_router의 trades 루프에서 `fee.cost`/`info.commission` 추출 (c) runner TP1_LIMIT_FULL + strategy_core TRAIL/CLOSE/FC 경로에서 log_trade에 fee 전달 (d) TRADES_COLUMNS에 `fee_usdt` **맨 뒤** 추가 (기존 파싱 인덱스 호환성 유지) |
+| 04-20 | 펀딩비 완전 블랙홀 | 8시간마다 정산되는 펀딩비가 잔고에만 반영되고 분리 로깅 없음 → 특정 심볼/시점 누수 추적 불가 | V10.31d: (a) FUNDING_COLUMNS 신설 (time/symbol/funding_usdt/funding_rate/position_amt) (b) `log_funding()` 헬퍼 (c) `_funding_fetch_loop` 백그라운드 태스크 — 1h 주기 `ex.fetchFundingHistory(None, since, 500)`. 중복 방지 last_ts_ms + csv 마지막 줄 복원. 첫 실행 48h / 이후 2h 창 |
+| 04-20 | trades.csv 스키마 마이그레이션 | `fee_usdt` 컬럼 추가로 기존 18컬럼 → 신규 19컬럼. `_append_csv`는 기존 헤더 유지 → 데이터 19개/헤더 18개 불일치. 파싱 자체는 split index 방식이라 동작하지만 pandas/외부 분석 시 마지막 컬럼 누락 | V10.31d: `_migrate_log_trades_schema()` 부팅 시 1회 실행. 헤더에 `fee_usdt` 없으면 기존 파일을 `.pre_v10_31d.csv`로 rename → `_append_csv`가 자동으로 신규 19컬럼 헤더 생성. **배포 시 재시작 필수** |
+| 04-20 | 대시보드 성과 지표 부재 | MDD/Sharpe/CAGR 없음 → "잘하고 있나"를 감으로만 판단 | V10.31d: `_compute_perf_metrics()` — log_balance.csv 일별 마감 잔고 추출 → MDD(peak 대비 낙폭), Sharpe(daily return std × √365, rf=0), 누적 수익률. 신뢰도 경고 n<7 "무의미"/n<30 "낮음"/n<90 "참고용". 대시보드 인사이트 탭에 카드 + 7d 수수료·펀딩 누수 카드 추가. status_server.py `renderInsight` 확장 |
+| 04-20 | 주의 — Sharpe 조기 신호 오독 위험 | 현재 데이터 n=2~9일. Sharpe 계산은 되지만 통계적 유의성 거의 없음 (±100%+ 오차). 대시보드 표시값을 "잘하고 있다"의 근거로 쓰면 위험 | V10.31d: 설계상 조치 — `warning` 필드로 n 경고 노출, 대시보드에 "n=X일" 부제 병기. **운영 원칙**: 30일 미만 Sharpe로 전략 변경 판단 금지. 90일+ 누적 후에만 유의미 |
+| 04-20 | 신규 진입 throttle 과도 | OPEN_DIR_COOLDOWN_SEC=10분이 시간당 방향당 6건 상한선을 강제. HF_MR 12h 부재 + 롱 풀 L4/4 포화 상태에서 숏 진입까지 차단되어 시간당 0~1건 진입. 로그 실측으로 17:06 ETH 숏 발사 이후 17:16까지 숏 전체 쿨다운 확인. "진입 더디다" 체감의 직접 원인 | V10.31d: OPEN_DIR_COOLDOWN_SEC=0. 체크 로직 3곳(planners.py:915/969 진입 차단, 1091/1270 타임스탬프 세팅) 유지 — 0이면 `now_ts < now_ts`로 즉시 통과. 변수/로직 자체 제거는 Phase 3 dead code 정리로 미룸. **고지된 리스크**: 04-18 연쇄 FC 같은 상황에서 시간당 방향당 진입 상한선이 없어져 heavy side 가속 가능. 하지만 쿨다운이 실제 방어 효과를 냈다는 [실측] 근거는 없었음 (내 이전 주장은 [직관]이었음을 인정) |

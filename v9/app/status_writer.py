@@ -70,6 +70,92 @@ def _parse_trade_line(line: str):
         return None
 
 
+def _compute_perf_metrics(bal_history_full: list) -> dict:
+    """★ V10.31d: MDD / Sharpe / CAGR 계산.
+
+    입력: [{t: "MM-DD HH:MM", b: balance}, ...] — 1분 간격
+    전략: 일별 마감 잔고 추출 → daily return → MDD / Sharpe.
+
+    **경고**: n<30일이면 Sharpe 통계적 의미 거의 없음. 표본 수 함께 리턴.
+    """
+    result = {
+        "mdd_pct": 0.0,          # 최대 낙폭 % (음수)
+        "mdd_abs": 0.0,          # 최대 낙폭 $
+        "sharpe": 0.0,           # annualized Sharpe (rf=0)
+        "n_days": 0,             # 일별 샘플 수
+        "total_return_pct": 0.0, # 누적 수익률 %
+        "warning": "",           # 신뢰도 경고
+    }
+    if not bal_history_full or len(bal_history_full) < 2:
+        result["warning"] = "데이터 부족"
+        return result
+
+    # ── 일별 마감 잔고 추출 (같은 날짜의 마지막 레코드) ──
+    daily_close = {}  # date -> balance
+    for rec in bal_history_full:
+        t = rec.get("t", "")
+        if len(t) < 5:
+            continue
+        date_key = t[:5]  # "MM-DD"
+        daily_close[date_key] = rec.get("b", 0.0)
+
+    if len(daily_close) < 2:
+        result["warning"] = "데이터 부족 (일별 샘플 1개)"
+        return result
+
+    dates = sorted(daily_close.keys())
+    closes = [daily_close[d] for d in dates if daily_close[d] > 0]
+    n = len(closes)
+    result["n_days"] = n
+
+    if n < 2:
+        result["warning"] = "유효 잔고 <2"
+        return result
+
+    # ── MDD ──
+    peak = closes[0]
+    max_dd_pct = 0.0
+    max_dd_abs = 0.0
+    for b in closes:
+        if b > peak:
+            peak = b
+        dd_abs = b - peak
+        dd_pct = dd_abs / peak if peak > 0 else 0.0
+        if dd_pct < max_dd_pct:
+            max_dd_pct = dd_pct
+            max_dd_abs = dd_abs
+    result["mdd_pct"] = round(max_dd_pct * 100, 2)
+    result["mdd_abs"] = round(max_dd_abs, 2)
+
+    # ── 누적 수익률 ──
+    result["total_return_pct"] = round((closes[-1] / closes[0] - 1) * 100, 2)
+
+    # ── Sharpe (일별 단순 수익률 → annualized) ──
+    rets = []
+    for i in range(1, n):
+        if closes[i - 1] > 0:
+            rets.append(closes[i] / closes[i - 1] - 1)
+    if len(rets) < 2:
+        result["warning"] = f"n={n}일, 수익률 샘플 부족"
+        return result
+    mean_r = sum(rets) / len(rets)
+    var_r = sum((r - mean_r) ** 2 for r in rets) / (len(rets) - 1)
+    std_r = var_r ** 0.5
+    if std_r > 0:
+        # 365일 연율화 (crypto 24/7)
+        sharpe = (mean_r / std_r) * (365 ** 0.5)
+        result["sharpe"] = round(sharpe, 2)
+
+    # ── 신뢰도 경고 ──
+    if n < 7:
+        result["warning"] = f"n={n}일 — 통계 무의미 (최소 30일 권장)"
+    elif n < 30:
+        result["warning"] = f"n={n}일 — 신뢰도 낮음 (최소 30일 권장)"
+    elif n < 90:
+        result["warning"] = f"n={n}일 — 참고용 (90일+ 권장)"
+    return result
+
+
 def _record_balance(bal: float):
     """1분마다 잔고를 CSV에 기록 (equity curve용)."""
     global _LAST_BAL_WRITE
@@ -317,9 +403,80 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                         })
                     except ValueError:
                         pass
-            # 대시보드용으로 5분 간격 샘플링 (최대 288포인트)
-            if len(bal_history) > 288:
-                bal_history = bal_history[::5]
+
+        # ── ★ V10.31d: MDD / Sharpe 계산 (전체 잔고 이력 기반) ──
+        # 잔고 이력을 전체 스캔 (최대 30000줄 ≈ 20일 분). 일별 마감으로 압축해 계산
+        perf = {"mdd_pct": 0.0, "mdd_abs": 0.0, "sharpe": 0.0,
+                "n_days": 0, "total_return_pct": 0.0, "warning": ""}
+        try:
+            bal_full = []
+            if os.path.exists(_BAL_HISTORY):
+                for bl in _tail_lines(_BAL_HISTORY, 30000):
+                    parts = bl.strip().split(",")
+                    if len(parts) == 2:
+                        try:
+                            bal_full.append({
+                                "t": parts[0][5:],
+                                "b": float(parts[1]),
+                            })
+                        except ValueError:
+                            pass
+            perf = _compute_perf_metrics(bal_full)
+        except Exception:
+            pass
+
+        # ── ★ V10.31d: 수수료 / 펀딩비 7일 누계 ──
+        fee_7d = 0.0
+        funding_7d = 0.0
+        try:
+            # trades.csv 19번째 컬럼(index 18) = fee_usdt (V10.31d 이후 파일만)
+            tail_fee = _tail_lines(trades_file, 2000)
+            for line in tail_fee:
+                cols = line.strip().split(",")
+                if len(cols) >= 19 and cols[0].startswith("2026"):
+                    try:
+                        fee_7d += float(cols[18] or 0)
+                    except (ValueError, IndexError):
+                        pass
+            # funding.csv
+            funding_file = os.path.join(_LOG_DIR, "log_funding.csv")
+            if os.path.exists(funding_file):
+                # 최근 7일치 추출
+                import datetime as _dt
+                _cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=7)
+                for fl in _tail_lines(funding_file, 10000):
+                    parts = fl.strip().split(",")
+                    if len(parts) >= 3 and parts[0].startswith("2026"):
+                        try:
+                            _t = _dt.datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+                            if _t >= _cutoff:
+                                funding_7d += float(parts[2] or 0)
+                        except (ValueError, IndexError):
+                            pass
+        except Exception:
+            pass
+
+        # MDD/Sharpe 기반 추가 인사이트
+        try:
+            if perf.get("mdd_pct", 0) <= -5:
+                insights.append({"level": "warn",
+                    "text": f"MDD {perf['mdd_pct']}% — 낙폭 주시"})
+            if perf.get("warning"):
+                insights.append({"level": "info",
+                    "text": f"지표 신뢰도: {perf['warning']}"})
+            # 수수료·펀딩 누수 경고
+            total_today_7d = sum(d.get("pnl", 0) for d in daily_list)
+            total_cost = abs(fee_7d) + abs(min(funding_7d, 0))  # funding 지불만
+            if total_today_7d != 0 and total_cost > abs(total_today_7d) * 0.3:
+                insights.append({"level": "warn",
+                    "text": f"7d 비용(수수료+펀딩지불) ${total_cost:.1f} "
+                            f"vs 실현 ${total_today_7d:+.1f} — 비용 비중 과도"})
+        except Exception:
+            pass
+
+        # 샘플링 후 대시보드용 bal_history (5분 간격 최대 288포인트)
+        if len(bal_history) > 288:
+            bal_history = bal_history[::5]
 
         # ── JSON 출력 ──
         status = {
@@ -350,6 +507,12 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
             "strat_pnl": strat_pnl,     # 전략별 누적 기여도 (7일 창)
             "hour_pnl": hour_pnl,       # 오늘 시간대별 PnL (24시간)
             "insights": insights,       # 규칙 기반 경고/관찰
+            # ★ V10.31d: 성과 지표
+            "perf": perf,               # MDD / Sharpe / n_days / warning
+            "costs_7d": {               # 7일 누수 비용
+                "fee": round(fee_7d, 2),
+                "funding": round(funding_7d, 2),  # 음수=지불, 양수=수취
+            },
         }
 
         tmp = _STATUS_PATH + ".tmp"

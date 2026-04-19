@@ -53,7 +53,7 @@ TRADES_COLUMNS = [
     "ep",            # 평단
     "exit_price",    # 청산가
     "amt",           # 청산 수량
-    "pnl_usdt",      # 실현 손익 ($)
+    "pnl_usdt",      # 실현 손익 ($) — 수수료 차감 전
     "roi_pct",       # 레버리지 포함 ROI%
     "dca_level",     # 최종 DCA 레벨 (T1~T4)
     "hold_sec",      # 보유 시간 (초)
@@ -65,6 +65,18 @@ TRADES_COLUMNS = [
     # ★ v10.2: role 분류
     "role",          # CORE_MR | CORE_PULLBACK | BALANCE | HEDGE
     "source_sym",    # HEDGE일 때 소스 심볼
+    # ★ V10.31d: 수수료 (맨 뒤 추가 — 기존 파싱 인덱스 유지)
+    "fee_usdt",      # 청산 거래 수수료 합계 ($)
+]
+
+# ── log_funding (★ V10.31d: 펀딩비 별도 로깅) ────────────────────
+# fetch_funding_history로 주기 수집. 심볼별 펀딩 이벤트 1건 = 1행
+FUNDING_COLUMNS = [
+    "time",            # 펀딩 정산 시각 (거래소 기준, ISO)
+    "symbol",
+    "funding_usdt",    # 정산 금액 ($). 음수면 지불, 양수면 수취
+    "funding_rate",    # 당시 펀딩 비율 (decimal)
+    "position_amt",    # 정산 시점 포지션 수량 (부호=방향)
 ]
 
 # ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)

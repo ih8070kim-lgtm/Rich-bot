@@ -8,7 +8,7 @@
 4. VS (Volume Surge) ≥ 1.0 — 최근 5봉/30봉 거래량 비율
 5. 상관계수 ≥ OPEN_CORR_MIN (0.60)
 6. Falling Knife 아님 (최근 3봉 누적 -2% 이상이면 차단)
-7. 방향별 쿨다운 10분 (_open_dir_cd)
+7. 방향별 쿨다운: ★ V10.31d 제거 (OPEN_DIR_COOLDOWN_SEC=0)
 8. 심볼별 open_fail_cooldown 통과
 ```
 
@@ -37,7 +37,7 @@ MR 슬롯 여유 있음:
 
 MR 슬롯 풀:
   MR 시그널 → 전체 심볼 score 스캔 → 최고 1개 즉시 발사 → TREND_NOSLOT
-  쿨다운: _open_dir_cd 10분 (연타 방지)
+  쿨다운: ★ V10.31d 제거 — 과거 _open_dir_cd 10분은 시간당 방향당 6건 상한선을 만들어 진입 지연 주원인이었음
   제한: 틱당 1개 (상대평가 1위만)
 ```
 
@@ -59,5 +59,4 @@ BC/CB          → market
 ## 수정 시 체크
 - [ ] _core_long/_core_short 카운팅에 새 role 제외 추가했는지
 - [ ] can_long/can_short 조건에 영향 없는지
-- [ ] _open_dir_cd 쿨다운 적용했는지
 - [ ] TREND_NOSLOT에서 intents.append 사용했는지 (pending 아님)

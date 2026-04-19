@@ -237,7 +237,7 @@ def plan_force_close(
                                 if _sl_roi > _t4_peak:
                                     _t4_peak = _sl_roi
                                     p["t4_peak_roi"] = _t4_peak
-                                # ★ V10.31c: trim_trail과 동일한 fixed 0.5%p
+                                # ★ V10.31c: trim_trail과 동일한 fixed 0.3%p
                                 _TRAIL_GAP = 0.3
                                 if _sl_roi <= _t4_peak - _TRAIL_GAP:
                                     force = True

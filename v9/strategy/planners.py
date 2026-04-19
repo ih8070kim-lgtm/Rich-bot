@@ -281,7 +281,11 @@ OPEN_WAIT_NEXT_BAR       = False
 OPEN_PENDING_TTL_SEC     = 5 * 60
 
 # ★ V10.27: 방향별 글로벌 진입 쿨다운 (연타 방지)
-OPEN_DIR_COOLDOWN_SEC    = 10 * 60   # 같은 방향 진입 후 10분 대기
+# ★ V10.31d: 10분→0. 실측상 이 쿨다운이 시간당 방향당 6건 상한선을 만들어
+# HF_MR 부재 + 롱 풀 포화 상태에서 숏 진입까지 차단하고 있었음. 제거.
+# 04-18 연쇄 FC 방어 효과는 [실측] 확인 안 된 상태에서 제거 결정 (Kim 판단).
+# 로직/변수는 유지 (0이면 체크 즉시 통과). dead code 정리는 Phase 3에서.
+OPEN_DIR_COOLDOWN_SEC    = 0
 _open_dir_cd = {"buy": 0.0, "sell": 0.0}  # {side: next_allowed_ts}
 
 # ★ V10.27: 통합 ATR base + slot 불균형 ±패널티
@@ -1292,7 +1296,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
     T1: ROI ≥ TP1_FIXED → trail 활성화 → max-gap 하회 시 partial close → step=1 → TRAIL_ON.
     T2+: plan_trim_trail()이 독립 처리.
     """
-    from v9.config import (TRIM_TRAIL_FLOOR, HARD_SL_ATR_BASE,
+    from v9.config import (HARD_SL_ATR_BASE,
                            calc_tier_notional, notional_to_qty)
     intents: List[Intent] = []
     _tp1_excl = exclude_syms or set()
@@ -1379,7 +1383,7 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
             p["trim_trail_max"] = roi_gross
             _max = roi_gross
 
-        # ★ V10.31c: 모든 trail gap을 fixed 0.5로 통일 (ATR 분기 제거)
+        # ★ V10.31c: 모든 trail gap을 fixed 0.3로 통일 (ATR 분기 제거)
         _gap = 0.3
 
         # ── 발동 체크 (★ V10.31c: FLOOR 제거, peak 대비 gap만) ──
@@ -1438,7 +1442,7 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
     guard 최소화: position이 존재하고 dca_level >= 2이면 무조건 trail 체크.
     tp1_preorder_id, tp1_limit_oid, step, tp1_done 등 T1 전용 필드 무시.
     """
-    from v9.config import (TRIM_BLENDED_ROI_BY_TIER, TRIM_TRAIL_FLOOR,
+    from v9.config import (TRIM_BLENDED_ROI_BY_TIER,
                            HARD_SL_ATR_BASE, calc_trim_qty)
     intents: List[Intent] = []
     _excl = exclude_syms or set()
@@ -1502,7 +1506,7 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
             p["trim_trail_max"] = roi
             _max = roi
 
-        # ★ V10.31c: 모든 trail gap을 fixed 0.5로 통일 (ATR 분기 제거)
+        # ★ V10.31c: 모든 trail gap을 fixed 0.3로 통일 (ATR 분기 제거)
         _gap = 0.3
 
         # ── 발동 체크 (★ V10.31c: FLOOR 제거, peak 대비 gap만) ──
@@ -1604,7 +1608,7 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             trailing_triggered = False
             trail_reason       = "TRAILING_STOP"
 
-            # ★ V10.31c: 모든 trail gap fixed 0.5로 통일 (ATR 분기 제거)
+            # ★ V10.31c: 모든 trail gap fixed 0.3로 통일 (ATR 분기 제거)
             _trail_gap = 0.3
             _stop = max_roi - _trail_gap
             if roi_pct <= _stop:

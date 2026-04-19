@@ -290,20 +290,30 @@ async def route_order(
             log_fill(trace_id, sym, side, avg_price, filled, tag, order_id)
 
             # ★ V10.31b: 바이낸스 realizedPnl 추출 (reduce 주문만)
+            # ★ V10.31d: commission(수수료)도 함께 추출 — reduce/open 모두
             _rpnl = 0.0
-            if _is_reduce(intent):
-                try:
-                    _order_trades = order.get('trades') or []
-                    if not _order_trades:
-                        # ccxt가 trades 안 줬으면 fetch
-                        _order_trades = await asyncio.to_thread(
-                            ex.fetch_my_trades, sym, limit=5)
-                        _order_trades = [t for t in _order_trades
-                                         if str(t.get('order', '')) == str(order_id)]
-                    for _t in _order_trades:
-                        _rpnl += float((_t.get('info') or {}).get('realizedPnl', 0) or 0)
-                except Exception:
-                    pass
+            _fee = 0.0
+            try:
+                _order_trades = order.get('trades') or []
+                if not _order_trades:
+                    # ccxt가 trades 안 줬으면 fetch
+                    _order_trades = await asyncio.to_thread(
+                        ex.fetch_my_trades, sym, limit=5)
+                    _order_trades = [t for t in _order_trades
+                                     if str(t.get('order', '')) == str(order_id)]
+                for _t in _order_trades:
+                    _info = _t.get('info') or {}
+                    # realizedPnl은 reduce 주문에만 의미. open은 0
+                    if _is_reduce(intent):
+                        _rpnl += float(_info.get('realizedPnl', 0) or 0)
+                    # commission: ccxt 'fee.cost' 또는 info.commission
+                    _fee_obj = _t.get('fee') or {}
+                    _fee_cost = float(_fee_obj.get('cost', 0) or 0)
+                    if _fee_cost == 0:
+                        _fee_cost = float(_info.get('commission', 0) or 0)
+                    _fee += _fee_cost
+            except Exception:
+                pass
 
             return OrderResult(
                 trace_id=trace_id, success=True, order_id=order_id,
@@ -311,6 +321,7 @@ async def route_order(
                 avg_price=avg_price, filled_qty=filled,
                 order_type='market', tag=tag,
                 realized_pnl=_rpnl,
+                fee_usdt=_fee,
             )
 
     except Exception as e:

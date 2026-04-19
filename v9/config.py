@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.29c"  # ★ V10.29c: ATR 3.0 고정 + TREND + T3_DEF_FIX + pending cancel
+VERSION = "10.31d"  # ★ V10.31d: Phase 1 dead code 정리 (TRIM_TRAIL_FLOOR, trail gap 주석 오타) + Phase 2 fee/funding 로깅 + MDD/Sharpe 대시보드
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
@@ -91,7 +91,7 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
 # T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
 TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.5}  # ★ V10.31c: T3 1.0 → 0.5 (DCA 33/33/34 전환으로 blended ROI 약 1%p 더 깊어지는 것 보정)
-TRIM_TRAIL_FLOOR = 0.5   # ★ V10.30: TRIM 안전 하한
+# ★ V10.31d: TRIM_TRAIL_FLOOR 제거 — V10.31c에서 FLOOR 로직 이미 제거됐으나 상수/import 잔존했던 것 정리
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거
