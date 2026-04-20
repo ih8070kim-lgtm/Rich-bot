@@ -267,6 +267,7 @@ from v9.config import (
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
     DCA_ENTRY_BASED, DCA_ENTRY_ROI,
     DCA_ENTRY_ROI_BY_TIER,
+    TP1_FIXED, HARD_SL_BY_TIER,  # ★ V10.31e-6: HEDGE_SIM용
     calc_trim_qty, calc_tp1_thresh, get_sl_entry,
 )
 from v9.utils.utils_math import (
@@ -1187,10 +1188,8 @@ def plan_open(
                             # ★ V10.31e-6: 중간형 DCA 시뮬 필드 확장
                             # 기존 단순 ep 비교 → tier/DCA 트리거/평단 압축까지 시뮬
                             # Q1 MR 심볼에 가상 / Q2 TREND 동일 notional / Q3 독립 종료
-                            from v9.config import (
-                                DCA_WEIGHTS, DCA_ENTRY_ROI_BY_TIER,
-                                TP1_FIXED, HARD_SL_BY_TIER,
-                            )
+                            # (DCA_WEIGHTS/DCA_ENTRY_ROI_BY_TIER/TP1_FIXED/HARD_SL_BY_TIER는
+                            #  module-level import — line 258~273)
                             _hsim = system_state.setdefault("_hedge_sim", {})
                             _hsim_opp = "buy" if trigger_side == "sell" else "sell"
                             # T2/T3 noteional (T1 대비 비율)

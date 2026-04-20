@@ -2131,6 +2131,16 @@ async def _place_trim_preorders(ex, st, snapshot):
                           f"→ qty={_regen_qty:.1f} price=${_regen_price:.4f} "
                           f"(잔량={p['amt']-_regen_qty:.1f})")
                     if _regen_qty > 0 and _regen_price > 0:
+                        # ★ V10.31e-7: Binance LOT_SIZE 필터 사전 방어
+                        # calc_trim_qty가 극소값(예: 0.0005) 반환 시 precision 후 0이 되거나
+                        # 최소 수량 미만으로 "minimum amount precision" 에러 발생.
+                        # 근본 원인: amt/tier 불일치 상태 (sync 버그)에서 trim_notional 극소.
+                        # 여기서 미리 거르면 3회 재시도 폭주 + 텔레그램 스팸 차단.
+                        _regen_min = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
+                        if _regen_qty < _regen_min:
+                            print(f"[TRIM_REGEN_SKIP] {sym} T{_regen_dca} "
+                                  f"qty {_regen_qty:.6f} < min {_regen_min} — regen 중단")
+                            continue
                         p["trim_to_place"] = {
                             "tier": _regen_dca,
                             "price": round(_regen_price, 8),

@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31e-6"  # ★ V10.31e-6: HEDGE_SIM 중간형 DCA 시뮬 확장 (TREND vs 가상 MR 헷지)
+VERSION = "10.31e-7"  # ★ V10.31e-7: HEDGE_SIM UnboundLocalError 긴급 핫픽스
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
