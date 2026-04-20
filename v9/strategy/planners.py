@@ -1184,16 +1184,49 @@ def plan_open(
                                 "regime": _btc_regime,
                                 "ts": time.time(),
                             }
-                            # ★ V10.29e: 동일심볼 헷지 시뮬레이션 — TREND_COMP와 비교용
+                            # ★ V10.31e-6: 중간형 DCA 시뮬 필드 확장
+                            # 기존 단순 ep 비교 → tier/DCA 트리거/평단 압축까지 시뮬
+                            # Q1 MR 심볼에 가상 / Q2 TREND 동일 notional / Q3 독립 종료
+                            from v9.config import (
+                                DCA_WEIGHTS, DCA_ENTRY_ROI_BY_TIER,
+                                TP1_FIXED, HARD_SL_BY_TIER,
+                            )
                             _hsim = system_state.setdefault("_hedge_sim", {})
                             _hsim_opp = "buy" if trigger_side == "sell" else "sell"
+                            # T2/T3 noteional (T1 대비 비율)
+                            _dw_sum = sum(DCA_WEIGHTS) or 100
+                            _t2_mult = DCA_WEIGHTS[1] / DCA_WEIGHTS[0]
+                            _t3_mult = DCA_WEIGHTS[2] / DCA_WEIGHTS[0] if len(DCA_WEIGHTS) >= 3 else 0
                             _hsim[f"{symbol}:{trigger_side}"] = {
+                                # 기본 식별
+                                "mr_sym": symbol,
+                                "mr_side": trigger_side,
+                                "sim_side": _hsim_opp,
+                                "trend_sym": _tr_best_sym,
+                                "trend_side": _tr_opp_side,
+                                # T1 진입 (curr_p = MR 시그널 발생 시점 MR 심볼 가격)
+                                "t1_ep": curr_p,
+                                "t1_notional": _tr_notional,  # TREND와 동일
+                                "t1_qty": _tr_notional / curr_p if curr_p > 0 else 0,
+                                # 중간형 DCA 시뮬 상태
+                                "tier": 1,
+                                "blended_ep": curr_p,
+                                "total_qty": _tr_notional / curr_p if curr_p > 0 else 0,
+                                "max_roi": 0.0,
+                                # 시뮬 파라미터 (실전 config 동일)
+                                "dca_trigger_roi": dict(DCA_ENTRY_ROI_BY_TIER),  # {2: -1.8, 3: -3.6}
+                                "t2_notional": _tr_notional * _t2_mult,
+                                "t3_notional": _tr_notional * _t3_mult,
+                                "tp1_thresh": TP1_FIXED.get(1, 2.0),
+                                "hard_sl_thresh": HARD_SL_BY_TIER.get(3, -10.0),
+                                # 시간
+                                "ts": time.time(),
+                                # 레거시 호환 (기존 필드 유지)
                                 "ep": curr_p, "side": _hsim_opp,
-                                "ts": time.time(), "mr_side": trigger_side,
-                                "trend_sym": _tr_best_sym, "trend_side": _tr_opp_side,
                                 "trend_ep": _tr_cp,
                             }
                             print(f"[HEDGE_SIM] 📊 {symbol} {_hsim_opp} ep={curr_p:.4f} "
+                                  f"notional=${_tr_notional:.0f} "
                                   f"(vs TREND {_tr_best_sym} {_tr_opp_side} ep={_tr_cp:.4f})")
                             try:
                                 log_system("HEDGE_SIM", f"{symbol} {_hsim_opp} ep={curr_p:.4f} vs {_tr_best_sym} {_tr_opp_side}")

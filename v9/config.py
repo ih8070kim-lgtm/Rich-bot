@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31e"  # ★ V10.31e: Phase 3b — 심볼별 실적 tracker + 쿨다운 + 선발 tiebreaker
+VERSION = "10.31e-6"  # ★ V10.31e-6: HEDGE_SIM 중간형 DCA 시뮬 확장 (TREND vs 가상 MR 헷지)
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정

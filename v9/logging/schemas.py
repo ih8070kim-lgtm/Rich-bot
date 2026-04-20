@@ -91,3 +91,26 @@ UNIVERSE_COLUMNS = [
     "time", "trace_id", "top10", "long_4", "short_4",
     "regime", "btc_price", "note"
 ]
+
+# ── log_hedge_sim (★ V10.31e-6: TREND vs 가상 MR 헷지 쌍 추적) ────
+# MR 시그널 발생 → TREND가 실제 발사한 시점마다:
+#   (1) 실제 TREND 포지션 (이미 log_trades에 기록됨)
+#   (2) 가상 MR 헷지 (MR 시그널 심볼에 반대 방향, TREND와 동일 notional)
+# 중간형 시뮬: DCA 트리거 + 평단 압축. TP1 2% / HARD_SL -10% 도달 시 종료.
+# 목적: "TREND 실제 vs MR 가상 헷지" 병렬 PnL 비교 → 역방향 헷지 전략 유효성 검증.
+HEDGE_SIM_COLUMNS = [
+    "time",                   # 종료 시각
+    "mr_sym",                 # MR 시그널 심볼
+    "mr_side",                # MR 시그널 원 방향 (buy/sell)
+    "sim_side",                # 가상 헷지 방향 (= mr_side 반대 = TREND 방향과 같음)
+    "trend_sym",              # 실제 TREND가 진입한 심볼 (참조용)
+    "trend_side",             # 실제 TREND 방향
+    "sim_t1_ep",              # 가상 T1 진입가
+    "sim_final_ep",           # 가상 최종 평단 (DCA 후 blended)
+    "sim_final_tier",         # 가상 최종 tier (1/2/3)
+    "sim_notional_t1",        # 가상 T1 노셔널 ($, TREND와 동일)
+    "sim_final_roi",          # 가상 종료 시 ROI (%)
+    "sim_max_roi",             # 가상 구간 내 최고 ROI (%)
+    "sim_close_reason",       # VIRTUAL_TP1 / VIRTUAL_HARD_SL / ACTUAL_TREND_CLOSE
+    "hold_sec",
+]

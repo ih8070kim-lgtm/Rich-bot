@@ -1882,6 +1882,121 @@ async def _place_dca_preorders(ex, st, snapshot):
 
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
+# ═════════════════════════════════════════════════════════════════
+def _tick_hedge_sim(system_state: dict, snapshot):
+    """매 틱 실행: _hedge_sim dict의 가상 포지션들을 현재 가격 기준으로 업데이트.
+    DCA 임계 도달 시 평단 압축, TP1/HARD_SL 도달 시 가상 청산 + log_hedge_sim.
+    
+    실전 로직에 전혀 영향 없음 (읽기 전용 + 자체 state 관리).
+    예외 발생 시 조용히 무시 (try/except 감쌈).
+    """
+    try:
+        if not system_state or not snapshot:
+            return
+        _hsim = system_state.get("_hedge_sim") or {}
+        if not _hsim:
+            return
+        _prices = getattr(snapshot, "all_prices", None) or {}
+        from v9.config import LEVERAGE
+        from v9.logging.logger_csv import log_hedge_sim
+        now = time.time()
+        _to_remove = []
+
+        for key, sim in list(_hsim.items()):
+            # 중간형 시뮬 필드가 없으면(구버전 기록) 스킵
+            if "tier" not in sim or "blended_ep" not in sim:
+                continue
+            mr_sym = sim.get("mr_sym", "")
+            curr_p = float(_prices.get(mr_sym, 0) or 0)
+            if curr_p <= 0:
+                continue
+
+            sim_side = sim.get("sim_side", "")
+            blended_ep = float(sim.get("blended_ep", 0) or 0)
+            if blended_ep <= 0:
+                continue
+
+            # ROI 계산 (블렌디드 평단 기준, LEVERAGE 반영)
+            if sim_side == "buy":
+                roi = (curr_p - blended_ep) / blended_ep * LEVERAGE * 100
+            else:
+                roi = (blended_ep - curr_p) / blended_ep * LEVERAGE * 100
+
+            # max 추적
+            if roi > float(sim.get("max_roi", 0)):
+                sim["max_roi"] = roi
+
+            tier = int(sim.get("tier", 1))
+            dca_map = sim.get("dca_trigger_roi", {}) or {}
+
+            # DCA 트리거 체크 (T1→T2, T2→T3)
+            next_tier = tier + 1
+            if next_tier in dca_map:
+                trigger_roi = float(dca_map[next_tier])  # 음수 (-1.8, -3.6)
+                if roi <= trigger_roi:
+                    # 가상 DCA 체결: 평단 압축
+                    if next_tier == 2:
+                        add_notional = float(sim.get("t2_notional", 0))
+                    else:
+                        add_notional = float(sim.get("t3_notional", 0))
+                    if add_notional > 0 and curr_p > 0:
+                        add_qty = add_notional / curr_p
+                        total_qty = float(sim.get("total_qty", 0)) + add_qty
+                        old_cost = float(sim.get("blended_ep", 0)) * float(sim.get("total_qty", 0))
+                        new_cost = old_cost + add_qty * curr_p
+                        new_ep = new_cost / total_qty if total_qty > 0 else curr_p
+                        sim["blended_ep"] = new_ep
+                        sim["total_qty"] = total_qty
+                        sim["tier"] = next_tier
+                        tier = next_tier
+
+            # 종료 조건 (독립): TP1 또는 HARD_SL (T3 이후)
+            close_reason = None
+            tp1_th = float(sim.get("tp1_thresh", 2.0))
+            sl_th = float(sim.get("hard_sl_thresh", -10.0))
+
+            if roi >= tp1_th:
+                close_reason = "VIRTUAL_TP1"
+            elif tier >= 3 and roi <= sl_th:
+                close_reason = "VIRTUAL_HARD_SL"
+
+            if close_reason:
+                _hold = int(now - float(sim.get("ts", now)))
+                try:
+                    log_hedge_sim(
+                        mr_sym=sim.get("mr_sym", ""),
+                        mr_side=sim.get("mr_side", ""),
+                        sim_side=sim_side,
+                        trend_sym=sim.get("trend_sym", ""),
+                        trend_side=sim.get("trend_side", ""),
+                        sim_t1_ep=float(sim.get("t1_ep", 0)),
+                        sim_final_ep=float(sim.get("blended_ep", 0)),
+                        sim_final_tier=int(sim.get("tier", 1)),
+                        sim_notional_t1=float(sim.get("t1_notional", 0)),
+                        sim_final_roi=roi,
+                        sim_max_roi=float(sim.get("max_roi", 0)),
+                        sim_close_reason=close_reason,
+                        hold_sec=_hold,
+                    )
+                    print(f"[HEDGE_SIM_END] 📊 {sim.get('mr_sym','')} {sim_side} "
+                          f"final_roi={roi:+.2f}% max={sim.get('max_roi',0):+.2f}% "
+                          f"tier={tier} reason={close_reason}", flush=True)
+                except Exception as _le:
+                    print(f"[HEDGE_SIM_END] 기록 실패(무시): {_le}")
+                _to_remove.append(key)
+
+        for k in _to_remove:
+            _hsim.pop(k, None)
+    except Exception as _e:
+        # 시뮬 실패는 실전에 절대 영향 주면 안 됨 → 조용히 무시
+        try:
+            print(f"[HEDGE_SIM] tick 실패(무시): {_e}")
+        except Exception:
+            pass
+
+
+# ═════════════════════════════════════════════════════════════════
 # ★ V10.28b: 일별 PnL 자동 리포트
 # ═════════════════════════════════════════════════════════════════
 _last_report_date = ""
@@ -2373,25 +2488,30 @@ async def _main_loop(ex_init, dry_run: bool):
         # ★ V10.31e-5: IP 밴 플래그 감지 — 해제 ts까지 장시간 슬립
         # market_snapshot에서 418 감지 시 /tmp/trinity_ban_until.txt 생성.
         # 이 루프에서 발견하면 해제 시간까지 60초 간격으로 체크 (API 호출 전혀 안 함).
-        try:
-            _ban_flag = "/tmp/trinity_ban_until.txt"
-            if os.path.exists(_ban_flag):
+        _ban_flag = "/tmp/trinity_ban_until.txt"
+        if os.path.exists(_ban_flag):
+            _unban_ms = 0
+            try:
                 with open(_ban_flag) as _bf:
                     _unban_ms = int(_bf.read().strip())
+            except Exception as _bfe:
+                # 파일 손상 → 안전하게 삭제 후 정상 복귀 (밴 상태에서 두드리는 것보단 낫지만
+                # 이 경우 실제로는 이미 밴 해제됐을 확률 높음)
+                print(f"[BAN_WAIT] 플래그 파일 파싱 실패, 삭제: {_bfe}", flush=True)
+                try: os.remove(_ban_flag)
+                except Exception: pass
+            if _unban_ms > 0:
                 _rem = (_unban_ms / 1000) - now
-                if _rem > 30:  # 30초 이상 남았으면 대기
+                if _rem > 30:
                     print(f"[BAN_WAIT] IP 밴 해제까지 {_rem/60:.1f}분 — 60초 슬립", flush=True)
                     await asyncio.sleep(60)
                     continue
                 else:
-                    # 밴 해제됐거나 30초 이내 → 플래그 삭제
                     try:
                         os.remove(_ban_flag)
                         print(f"[BAN_WAIT] 해제 (또는 30초 이내) — 플래그 삭제, 정상 복귀", flush=True)
                     except Exception:
                         pass
-        except Exception:
-            pass
 
         try:
             # ── ★ v10.17: config_override.json 핫리로드 ─────────────
@@ -2819,6 +2939,9 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
             await _place_dca_preorders(ex, st, snapshot)
+
+            # ★ V10.31e-6: HEDGE_SIM 가상 헷지 시뮬 업데이트 (관찰 전용, 실전 영향 0)
+            _tick_hedge_sim(system_state, snapshot)
 
             # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
             try:

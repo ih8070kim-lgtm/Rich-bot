@@ -10,6 +10,7 @@ from v9.config import LOG_DIR
 from v9.logging.schemas import (
     FILLS_COLUMNS,
     FUNDING_COLUMNS,
+    HEDGE_SIM_COLUMNS,
     INTENTS_COLUMNS,
     ORDERS_COLUMNS,
     POSITIONS_COLUMNS,
@@ -319,3 +320,39 @@ def log_universe(
         "note": note,
     }
     _append_csv(_log_path("log_universe.csv"), UNIVERSE_COLUMNS, row)
+
+
+# ── log_hedge_sim (★ V10.31e-6) ────────────────────────────────
+def log_hedge_sim(
+    mr_sym: str,
+    mr_side: str,
+    sim_side: str,
+    trend_sym: str,
+    trend_side: str,
+    sim_t1_ep: float,
+    sim_final_ep: float,
+    sim_final_tier: int,
+    sim_notional_t1: float,
+    sim_final_roi: float,
+    sim_max_roi: float,
+    sim_close_reason: str,
+    hold_sec: int,
+):
+    """가상 MR 헷지 시뮬 종료 시 1행 기록. 실전 영향 0, 관찰 전용."""
+    row = {
+        "time": _now_str(),
+        "mr_sym": mr_sym,
+        "mr_side": mr_side,
+        "sim_side": sim_side,
+        "trend_sym": trend_sym,
+        "trend_side": trend_side,
+        "sim_t1_ep": round(sim_t1_ep, 8),
+        "sim_final_ep": round(sim_final_ep, 8),
+        "sim_final_tier": int(sim_final_tier),
+        "sim_notional_t1": round(sim_notional_t1, 2),
+        "sim_final_roi": round(sim_final_roi, 4),
+        "sim_max_roi": round(sim_max_roi, 4),
+        "sim_close_reason": sim_close_reason,
+        "hold_sec": int(hold_sec),
+    }
+    _append_csv(_log_path("log_hedge_sim.csv"), HEDGE_SIM_COLUMNS, row)

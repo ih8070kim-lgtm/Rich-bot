@@ -18,3 +18,30 @@
 - [ ] HEDGE_SIM 기록이 정상 작동하는지
 - [ ] score cap (TREND_MAX_SCORE) 체크가 양쪽 NOSLOT 탐색에 적용되는지
 - [ ] trigger_side=None 블록 끝에 continue 유지
+
+## HEDGE_SIM 중간형 시뮬 (★ V10.31e-6)
+
+### 목적
+TREND 실제 진입 vs 가상 MR 헷지(= MR 시그널 반대 방향 = TREND와 같은 방향) 병렬 비교.
+DCA 트리거까지 시뮬 → "어느 전략이 실제로 돈 벌었나" 검증.
+
+### 기록 시점 (planners.py:1187~)
+MR 시그널 발생 → TREND_COMP 후보 발견 → TREND 발사 예정인 순간:
+- `_hsim[f"{mr_sym}:{mr_side}"]` = 가상 헷지 포지션 메타 저장
+- notional = TREND T1 notional (동일 사이즈 비교)
+- 방향 = MR 시그널 반대 (= TREND와 같은 방향)
+
+### 시뮬 진행 (runner._tick_hedge_sim, 매 틱)
+- 현재가 기준 가상 ROI 계산 (블렌디드 평단, LEVERAGE 반영)
+- DCA 트리거: `DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}` 도달 시 평단 압축
+- DCA 사이즈: `DCA_WEIGHTS = [33, 33, 34]` 비율 그대로
+- 종료: ROI ≥ TP1_FIXED[1] (+2%) → `VIRTUAL_TP1`
+         ROI ≤ HARD_SL_BY_TIER[3] (-10%) at tier≥3 → `VIRTUAL_HARD_SL`
+
+### 로그 (log_hedge_sim.csv)
+14컬럼. 종료 시 1행 기록. 실전 PnL과 병렬 분석 가능.
+
+### 실전 영향
+전혀 없음. 읽기 전용 + 자체 state 관리 + try/except 감쌈.
+시뮬 실패 시 조용히 skip.
+
