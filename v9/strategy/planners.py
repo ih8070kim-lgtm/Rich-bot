@@ -1873,11 +1873,39 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
     else:
         system_state.pop("_pmc_block_entry", None)
 
-    # ── Phase 1 (08:00): limit +0.5% 배치 (1회) ──
+    # ── Phase 1 (08:00~08:30): 10분 단위 limit 재배치 (프리미엄 양보) ──
+    # ★ V10.31e-8: 10분마다 프리미엄 0.15%씩 양보해 체결 확률 높임
+    # T+0 (08:00):  +0.5%   (첫 배치)
+    # T+10 (08:10): +0.35%  (0.15% 양보)
+    # T+20 (08:20): +0.20%  (0.15% 양보)
+    # T+30 (08:30): Phase 2 시장가 정리
     if BLOCK_START <= et_min < CLEAR_START:
-        p1_key = f"_pmc_p1_{today_key}"
-        if system_state.get(p1_key):
+        # 10분 스텝 계산 (0, 1, 2)
+        _step = (et_min - BLOCK_START) // 10  # 0, 1, 2
+        _step = max(0, min(_step, 2))
+        _premium_bp = 0.005 - (_step * 0.0015)  # 0.50, 0.35, 0.20%
+
+        step_key = f"_pmc_p1_{today_key}_s{_step}"
+        if system_state.get(step_key):
             return intents
+
+        # ★ 이전 스텝 limit 주문 취소 큐에 추가
+        # _PENDING_LIMITS에서 is_pre_market_limit 플래그 달린 것만 필터
+        try:
+            from v9.execution.order_router import get_pending_limits
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _cancelled = 0
+            for _pl_oid, _pl_info in list(get_pending_limits().items()):
+                if _pl_info.get("is_pre_market_limit"):
+                    _TRIM_CANCEL_QUEUE.append({
+                        "sym": _pl_info.get("sym", ""),
+                        "oid": _pl_oid,
+                    })
+                    _cancelled += 1
+            if _cancelled > 0:
+                print(f"[PRE_MKT] step {_step} 이전 limit {_cancelled}건 취소 예약")
+        except Exception as _ce:
+            print(f"[PRE_MKT] 이전 limit 취소 실패(무시): {_ce}")
 
         for symbol, p in _pos_items(st):
             if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
@@ -1891,15 +1919,16 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
                 continue
 
             is_long = p.get("side", "") == "buy"
-            close_price = curr_p * 1.005 if is_long else curr_p * 0.995
+            close_price = curr_p * (1 + _premium_bp) if is_long else curr_p * (1 - _premium_bp)
             dca_level = int(p.get("dca_level", 1) or 1)
 
-            # DCA 선주문 취소
-            for _dt, _di in list(p.get("dca_preorders", {}).items()):
-                if isinstance(_di, dict) and _di.get("oid"):
-                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
-                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
-            p["dca_preorders"] = {}
+            # DCA 선주문 취소 (첫 스텝에서만 수행 — 이후 스텝은 이미 취소됨)
+            if _step == 0:
+                for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                    if isinstance(_di, dict) and _di.get("oid"):
+                        from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                        _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+                p["dca_preorders"] = {}
 
             intents.append(Intent(
                 trace_id=_tid(),
@@ -1908,14 +1937,16 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
                 side="sell" if is_long else "buy",
                 qty=amt,
                 price=close_price,
-                reason=f"PRE_MKT_P1_T{dca_level}(+0.5%)",
+                reason=f"PRE_MKT_P1_S{_step}_T{dca_level}(+{_premium_bp*100:.2f}%)",
                 metadata={"pre_market_limit": True,
+                          "is_pre_market_limit": True,  # ★ V10.31e-8: 스텝별 재배치용 플래그
                           "_expected_role": p.get("role", "")},
             ))
 
         if intents:
-            system_state[p1_key] = True
-            print(f"[PRE_MKT] Phase 1: {len(intents)}건 limit +0.5% 배치 "
+            system_state[step_key] = True
+            print(f"[PRE_MKT] Phase 1 step {_step}: {len(intents)}건 "
+                  f"limit +{_premium_bp*100:.2f}% 배치 "
                   f"(ET {et.strftime('%H:%M')})")
         return intents
 
@@ -1967,6 +1998,164 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
     return intents
 
 
+# ═════════════════════════════════════════════════════════════════
+# T3 8H CUT (V10.31f — T3 8시간 초과 시 단계적 정리)
+# ═════════════════════════════════════════════════════════════════
+def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
+                   system_state: Dict) -> List[Intent]:
+    """★ V10.31f: T3 포지션 8시간 초과 시 단계적 정리.
+
+    실측 근거: T3 + hold >= 8h = 25건 -$519 (대부분 손실).
+    T2/T1은 TRIM/TP1이 잘 처리 중이라 제외.
+
+    단계:
+      7h00 (step 0): limit +0.5% 유리방향 배치
+      7h20 (step 1): 이전 limit 취소, +0.35% 재배치
+      7h40 (step 2): 이전 limit 취소, +0.20% 재배치
+      8h00 (step 3): 시장가 강제 정리
+
+    유리한 방향:
+      롱(buy) 포지션 청산 = sell @ curr × (1 + premium)
+      숏(sell) 포지션 청산 = buy @ curr × (1 - premium)
+
+    사용자 결정 (V10.31f):
+      - 대상: T3만
+      - 조건: 8h 초과는 무조건 (max_roi 조건 없음)
+      - 일관성 우선: T3_DEF 활성 여부 무시
+    """
+    import time as _time
+
+    intents: List[Intent] = []
+    now_ts = _time.time()
+
+    # 단계 경계 (초 단위)
+    T_STEP0 = 7 * 3600              # 25200 (7h00)
+    T_STEP1 = 7 * 3600 + 20 * 60    # 26400 (7h20)
+    T_STEP2 = 7 * 3600 + 40 * 60    # 27600 (7h40)
+    T_STEP3 = 8 * 3600              # 28800 (8h00)
+
+    for symbol, p in _pos_items(st):
+        # 헷지/트렌드 구조물 제외 (PRE_MKT와 동일)
+        if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                             "INSURANCE_SH", "CORE_HEDGE"):
+            continue
+
+        # T3만 대상
+        dca_level = int(p.get("dca_level", 1) or 1)
+        if dca_level < 3:
+            continue
+
+        amt = float(p.get("amt", 0) or 0)
+        if amt <= 0:
+            continue
+
+        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+        if curr_p <= 0:
+            continue
+
+        # hold 시간 계산 — 포지션 "time" 필드(OPEN 시점) 기준
+        _open_ts = float(p.get("time", 0) or 0)
+        if _open_ts <= 0:
+            # time 없으면 안전하게 skip (이제 막 열린 포지션 과잉 정리 방지)
+            continue
+        hold_sec = now_ts - _open_ts
+
+        if hold_sec < T_STEP0:
+            continue
+
+        # 현재 단계 판정
+        if hold_sec < T_STEP1:
+            cur_step = 0
+            premium = 0.005   # 0.50%
+        elif hold_sec < T_STEP2:
+            cur_step = 1
+            premium = 0.0035  # 0.35%
+        elif hold_sec < T_STEP3:
+            cur_step = 2
+            premium = 0.0020  # 0.20%
+        else:
+            cur_step = 3
+            premium = 0.0       # 시장가
+
+        # 포지션의 현재 완료 단계 확인 (중복 방지)
+        last_step = int(p.get("_t3_8h_step", -1))
+        if cur_step <= last_step:
+            continue  # 이미 해당 단계 실행됨
+
+        is_long = p.get("side", "") == "buy"
+
+        # 이전 단계 limit 주문 취소 (step 1, 2, 3에서만)
+        if cur_step >= 1:
+            try:
+                from v9.execution.order_router import get_pending_limits
+                from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                _cancelled = 0
+                for _pl_oid, _pl_info in list(get_pending_limits().items()):
+                    if (_pl_info.get("sym") == symbol
+                            and _pl_info.get("is_t3_8h_limit")):
+                        _TRIM_CANCEL_QUEUE.append({
+                            "sym": symbol, "oid": _pl_oid,
+                        })
+                        _cancelled += 1
+                if _cancelled > 0:
+                    print(f"[T3_8H] {symbol} step {cur_step} 이전 limit "
+                          f"{_cancelled}건 취소 예약")
+            except Exception as _ce:
+                print(f"[T3_8H] 이전 limit 취소 실패(무시): {_ce}")
+
+        # Intent 생성
+        if cur_step < 3:
+            # Phase 1: 지정가 유리방향
+            close_price = curr_p * (1 + premium) if is_long else curr_p * (1 - premium)
+            intent_type = IntentType.CLOSE
+            force_market = False
+            reason = (f"T3_8H_S{cur_step}_h{hold_sec/3600:.1f}"
+                      f"(+{premium*100:.2f}%)")
+            _meta = {
+                "is_t3_8h_limit": True,  # 재배치 추적용
+                "_expected_role": p.get("role", ""),
+            }
+        else:
+            # Phase 2: 시장가 강제
+            close_price = curr_p
+            intent_type = IntentType.FORCE_CLOSE
+            force_market = True
+            reason = f"T3_8H_MKT_h{hold_sec/3600:.1f}"
+            _meta = {
+                "force_market": True,
+                "_expected_role": p.get("role", ""),
+            }
+
+        # DCA 선주문 취소 (첫 step에서만)
+        if cur_step == 0:
+            for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                if isinstance(_di, dict) and _di.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+            p["dca_preorders"] = {}
+
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=intent_type,
+            symbol=symbol,
+            side="sell" if is_long else "buy",
+            qty=amt,
+            price=close_price,
+            reason=reason,
+            metadata=_meta,
+        ))
+
+        # 단계 완료 기록
+        p["_t3_8h_step"] = cur_step
+
+        print(f"[T3_8H] {symbol} {p.get('side', '')} T{dca_level} "
+              f"step {cur_step} hold={hold_sec/3600:.2f}h: "
+              f"{'시장가' if cur_step == 3 else f'+{premium*100:.2f}% limit'} "
+              f"(qty={amt})")
+
+    return intents
+
+
 def generate_all_intents(
     snapshot: MarketSnapshot,
     st: Dict,
@@ -2001,12 +2190,19 @@ def generate_all_intents(
         intents += _pmc_intents
         return intents  # Phase 발동 시 다른 intent 생성 차단
 
+    # ★ V10.31f: T3 8h 컷 (PMC 다음 우선순위)
+    _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
+    intents += _t3_8h_intents
+    _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
+
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
+    # T3 8h 대상 심볼은 FC/TP1/TRIM 중복 방지
+    _exclude = _fc_syms | _t3_8h_syms
 
-    intents += plan_tp1(snapshot, st, exclude_syms=_fc_syms)
-    intents += plan_trim_trail(snapshot, st, exclude_syms=_fc_syms)
+    intents += plan_tp1(snapshot, st, exclude_syms=_exclude)
+    intents += plan_trim_trail(snapshot, st, exclude_syms=_exclude)
     intents += plan_trail_on(snapshot, st)
     # ★ V10.31c: plan_dca 호출 제거 완료 (함수 자체도 삭제됨)
     # ★ V10.31b: 미장전 신규 진입 차단 (08:00-09:30 ET)
