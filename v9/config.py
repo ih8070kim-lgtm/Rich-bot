@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31f"  # ★ V10.31f: T3 8h컷 (7h~8h 단계적 정리)
+VERSION = "10.31h"  # ★ V10.31h: NOSLOT A 조건 + universe 시나리오A 축소 + 14제거/7추가
 
 # ═══════════════════════════════════════════════════════════════════
 # 슬롯 설정
@@ -242,23 +242,29 @@ GLOBAL_BLACKLIST = [
 # SHORT_ONLY — 롱 진입 금지
 # NEUTRAL    — 양방향 허용
 LONG_ONLY_SYMBOLS = {
-    "BNB/USDT", "TRX/USDT", "TON/USDT",
-    "ICP/USDT", "ETC/USDT", "XLM/USDT",
-    "XRP/USDT", "AVAX/USDT",  # ★ V10.27f: 독자 펌프 리스크 → 숏 제외
+    # ★ V10.31h: 시나리오 A 축소 — 200회 universe 갱신 100% LONG 일관 + 메이저
+    "BNB/USDT", "XRP/USDT", "XLM/USDT", "AVAX/USDT",
+    # 제거: TRX, TON, ICP, ETC (200회 0회 등장 — corr/beta filter 상시 컷)
 }
 
 SHORT_ONLY_SYMBOLS = {
-    "ARB/USDT", "OP/USDT", "STRK/USDT", "TIA/USDT", "SEI/USDT",
-    "INJ/USDT", "RUNE/USDT", "FET/USDT", "RNDR/USDT",
-    "AGIX/USDT", "AKT/USDT", "WLD/USDT", "GRT/USDT", "FIL/USDT",
+    # ★ V10.31h: 시나리오 A 축소 — 200회 universe 갱신 100% SHORT 일관 + 토크노믹스 명확
+    "TIA/USDT", "FET/USDT", "OP/USDT", "INJ/USDT", "WLD/USDT", "FIL/USDT",
+    # ARB, SEI, ATOM → NEUTRAL 이동 (등장은 하지만 펀딩 자연 분리에 맡김)
+    # 제거: STRK, RUNE, RNDR, AGIX, AKT, GRT (200회 0회 등장)
 }
 
 NEUTRAL_SYMBOLS = {
     # ★ V10.27f: 대형주 NEUTRAL 이동 (하락장 숏 허용)
     "ETH/USDT", "SOL/USDT", "LINK/USDT", "ADA/USDT", "DOT/USDT",
-    # 기존 NEUTRAL
-    "SUI/USDT", "APT/USDT", "NEAR/USDT", "ATOM/USDT",
-    "AAVE/USDT", "UNI/USDT", "STX/USDT", "MATIC/USDT", "EOS/USDT",
+    # 기존 NEUTRAL (200회 등장 확인된 것만)
+    "SUI/USDT", "APT/USDT", "NEAR/USDT", "ATOM/USDT", "UNI/USDT",
+    # ★ V10.31h: SHORT_ONLY → NEUTRAL 이동 (등장 확인됨, 펀딩 자연 분리에 위임)
+    "ARB/USDT", "SEI/USDT",
+    # ★ V10.31h: 신규 추가 7종 — 메이저 알트 (DeFi/Solana/AI/BTC eco)
+    "LDO/USDT", "PENDLE/USDT", "JUP/USDT", "JTO/USDT",
+    "ARKM/USDT", "GMX/USDT", "ORDI/USDT",
+    # ★ V10.31h: 제거 (200회 0회): AAVE, STX, MATIC, EOS
 }
 
 # 전체 유니버스 (합집합)

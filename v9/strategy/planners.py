@@ -894,7 +894,12 @@ def plan_open(
                 _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
                 # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
                 _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
-                if _tr_opp_slots < MAX_MR_PER_SIDE:
+                # ★ V10.31h: A 조건 — NOSLOT은 "비대칭 해소" 목적. 발사 후에도 비대칭 유지될 때만 의미.
+                #   (_tr_opp_slots + 1) < _sig_side_slots 이어야 1개 추가 후에도 시그널 방향이 더 많음.
+                #   같거나 역전이면 발사 의미 없음 — 누적 발사 양산 차단 (04/20 TIA 5건 다발 패턴).
+                _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
+                _a_ok = (_tr_opp_slots + 1) < _sig_side_slots
+                if _tr_opp_slots < MAX_MR_PER_SIDE and _a_ok:
                     _tr_best_sym = None
                     _tr_best_score = 0
                     _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
@@ -948,7 +953,21 @@ def plan_open(
                             "sig_side": _trend_signal_side,
                         }
                 else:
-                    print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
+                    if _tr_opp_slots >= MAX_MR_PER_SIDE:
+                        print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
+                    elif not _a_ok:
+                        # ★ V10.31h: A 조건 위반 — 발사 후 균형/역전. 5분 1회 cooldown 로그.
+                        _akey = f"NOSLOT_A:{_trend_signal_side}_{_sig_side_slots}_{_tr_opp_slots}"
+                        _now_t = time.time()
+                        if _now_t - _TREND_SKIP_LOG_CD.get(_akey, 0) > _TREND_SKIP_LOG_CD_SEC:
+                            _TREND_SKIP_LOG_CD[_akey] = _now_t
+                            print(f"[NOSLOT_SKIP_A] sig={_trend_signal_side} sig_slots={_sig_side_slots} "
+                                  f"opp_slots={_tr_opp_slots} (발사 후 균형/역전 → 누적양산 차단)")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("NOSLOT_SKIP_A",
+                                           f"sig={_trend_signal_side} sig={_sig_side_slots} opp={_tr_opp_slots}")
+                            except Exception: pass
             # ★ V10.30 FIX: trigger_side=None → MR 진입 코드 도달 차단
             continue
         # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
@@ -1491,15 +1510,21 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
             continue
 
         # ★ V10.31b: 레짐별 exit 분기
+        # ★ V10.31g: T3은 레짐 불문 LIMIT 선주문 경로로 위임
+        #   근거: T3 trim threshold +0.5%는 매우 작은 이익 구간 — HIGH 변동성에서
+        #   trail이 peak +0.5% 찍고 0.3% 하락만으로 발동, +0.2%만 먹고 이탈 → 다시
+        #   T3 복귀 → T3_DEF/PRE_MKT/T3_8H 강제 청산으로 끌려가는 패턴.
+        #   LIMIT은 +0.5% 정확 도달 시 maker(0.02%) 수수료로 깔끔히 tier 감소.
         _regime = _btc_vol_regime(snapshot)
-        if _regime != "HIGH":
-            # LOW/NORMAL: _place_trim_preorders가 처리 → trail 정리 + skip
+        if _regime != "HIGH" or dca_level >= 3:
+            # LOW/NORMAL or T3(any regime): _place_trim_preorders가 처리 → trail 정리 + skip
+            # 배포 시점에 이미 HIGH+T3 trail 활성 상태로 남은 잔존 포지션도 여기서 자동 정리
             if p.get("trim_trail_active"):
                 p["trim_trail_active"] = False
                 p["trim_trail_max"] = 0.0
             continue
 
-        # ── HIGH: trail 모드 ──
+        # ── HIGH (T2만): trail 모드 ──
         # 이전 LOW/NORMAL에서 남은 trim 선주문 취소 (이중 exit 방지)
         _trp = p.get("trim_preorders", {})
         if _trp:
