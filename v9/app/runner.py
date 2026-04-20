@@ -676,6 +676,10 @@ def _make_exchange() -> ccxt.Exchange:
         'apiKey': api_key,
         'secret': secret,
         'enableRateLimit': True,
+        # ★ V10.31e-5: rateLimit 기본 50ms → 100ms (418 방어)
+        # ccxt 내부 throttle. 개별 API 호출 최소 간격 보장.
+        # weight 40짜리 fetch_tickers가 연속 발사되는 것 방지.
+        'rateLimit': 100,
         'options': {'defaultType': 'future'},
     })
 
@@ -2366,6 +2370,29 @@ async def _main_loop(ex_init, dry_run: bool):
         now = time.time()
         loop_start = now
 
+        # ★ V10.31e-5: IP 밴 플래그 감지 — 해제 ts까지 장시간 슬립
+        # market_snapshot에서 418 감지 시 /tmp/trinity_ban_until.txt 생성.
+        # 이 루프에서 발견하면 해제 시간까지 60초 간격으로 체크 (API 호출 전혀 안 함).
+        try:
+            _ban_flag = "/tmp/trinity_ban_until.txt"
+            if os.path.exists(_ban_flag):
+                with open(_ban_flag) as _bf:
+                    _unban_ms = int(_bf.read().strip())
+                _rem = (_unban_ms / 1000) - now
+                if _rem > 30:  # 30초 이상 남았으면 대기
+                    print(f"[BAN_WAIT] IP 밴 해제까지 {_rem/60:.1f}분 — 60초 슬립", flush=True)
+                    await asyncio.sleep(60)
+                    continue
+                else:
+                    # 밴 해제됐거나 30초 이내 → 플래그 삭제
+                    try:
+                        os.remove(_ban_flag)
+                        print(f"[BAN_WAIT] 해제 (또는 30초 이내) — 플래그 삭제, 정상 복귀", flush=True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         try:
             # ── ★ v10.17: config_override.json 핫리로드 ─────────────
             # 파일 있으면 v9.config 모듈 속성을 런타임 오버라이드
@@ -2505,8 +2532,10 @@ async def _main_loop(ex_init, dry_run: bool):
                 system_state['allow_new_entries'] = True
                 system_state['allow_dca'] = True
 
-            # ── Universe 업데이트 (5분 주기) ─────────────────────
-            if now - last_universe_ts >= 300:
+            # ── Universe 업데이트 ─────────────────────
+            # ★ V10.31e-5: 5min → 15min. 418 밴 대응 (순간 ohlcv 33×1h 폭주 완화).
+            # 유니버스 심볼 교체가 느려지지만 1~2시간 단위 심볼 회전이면 충분.
+            if now - last_universe_ts >= 900:
                 snapshot = await update_universe(ex, snapshot)
                 last_universe_ts = now
 
@@ -3024,7 +3053,9 @@ async def _main_loop(ex_init, dry_run: bool):
         except Exception:
             pass
         elapsed = time.time() - loop_start
-        sleep_t = max(0.1, 1.0 - elapsed)
+        # ★ V10.31e-5: 메인 루프 1s → 2s. 모든 API 호출 빈도 절반. 418 밴 대응.
+        # 5m 봉 전략이라 2초 지연 무해. trim/trail 반응도 1→2s (무시할 수준).
+        sleep_t = max(0.1, 2.0 - elapsed)
         await asyncio.sleep(sleep_t)
 
 

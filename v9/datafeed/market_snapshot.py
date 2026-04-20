@@ -13,19 +13,19 @@ from v9.types import MarketSnapshot
 _BAL_CACHE = {"ts": 0.0, "real": 0.0, "free": 0.0}
 _BAL_CACHE_TTL = 15.0
 
-# ★ V10.31e-3: Tickers 캐시 (3초) — 429 rate limit 근본 방어
-# fetch_tickers는 weight 40 × 분당 60회 = 2400 (Binance 한도 정확히 근접).
-# 3초 캐시로 1/3 감축 → 분당 800 weight. 진입 판단용 가격은 3초 지연 무해.
-# 04-20 04:08~04:17 "429 Too Many Requests" 8회 실측 확인 후 도입.
+# ★ V10.31e-3: Tickers 캐시 (초기 3s → V10.31e-5: 5s) — 418 IP 밴 대응
+# 04-20 ~04:40 KST 418 I'm a teapot 발생 (550분 밴). 기존 3s로도 부족 → 5s로 확대.
+# fetch_tickers weight 40 × 분당 12회 = 480 weight/분 (기존 800).
+# 5초 지연은 5m 봉 전략에 무해.
 _TICKERS_CACHE = {"ts": 0.0, "data": None}
-_TICKERS_CACHE_TTL = 3.0
+_TICKERS_CACHE_TTL = 5.0
 
 
 async def fetch_market_snapshot(
     ex,
     active_symbols: list,
     prev_snapshot: MarketSnapshot | None = None,
-    ohlcv_interval_sec: float = 15.0,  # ★ V10.31e-3: 10→15s, 429 방어 (weight 1920→1280/분)
+    ohlcv_interval_sec: float = 30.0,  # ★ V10.31e-5: 15→30s, 418 밴 대응 (weight 1280→640)
 ) -> MarketSnapshot:
     """
     거래소에서 전체 시장 스냅샷을 수집.
@@ -81,6 +81,25 @@ async def fetch_market_snapshot(
                 _TICKERS_CACHE["ts"] = ts
                 _TICKERS_CACHE["data"] = tickers_raw
         except Exception as e:
+            _es = str(e)
+            # ★ V10.31e-5: 418 IP 밴 감지 → 밴 해제 ts 파싱 후 글로벌 신호
+            # runner 메인 루프에서 read해서 장시간 슬립 처리 (폭주 재발 방지).
+            if "418" in _es or "banned until" in _es.lower():
+                import re
+                _m = re.search(r'banned until (\d+)', _es)
+                if _m:
+                    _unban_ms = int(_m.group(1))
+                    import os
+                    # 파일로 플래그 저장 (간단하고 재시작 시에도 인지)
+                    try:
+                        _flag_path = "/tmp/trinity_ban_until.txt"
+                        with open(_flag_path, 'w') as _f:
+                            _f.write(str(_unban_ms))
+                        _wait_sec = max(0, (_unban_ms / 1000) - time.time())
+                        print(f"[CRITICAL] 418 IP 밴 감지. 해제 ts={_unban_ms}, 남은 {_wait_sec/60:.0f}분. "
+                              f"플래그 파일: {_flag_path}", flush=True)
+                    except Exception:
+                        pass
             print(f"[market_snapshot] fetch_tickers 실패: {e}")
             # ★ V10.31c: tickers 실패 시 prev snapshot에서 tickers 복원 (아래 norm_tickers 생성부에서 fallback)
             # ★ V10.31e-3: 캐시도 fallback 소스

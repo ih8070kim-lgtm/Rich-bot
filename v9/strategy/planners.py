@@ -261,7 +261,7 @@ from v9.config import (
     TOTAL_MAX_SLOTS, MAX_LONG, MAX_SHORT, GRID_DIVISOR, MAX_MR_PER_SIDE,
     HARD_SL_ATR_BASE,  # plan_open ATR 계산용
     DCA_MIN_CORR,
-    FALLING_KNIFE_BARS, FALLING_KNIFE_THRESHOLD,
+    # ★ V10.31e-4: FALLING_KNIFE_BARS/THRESHOLD 제거 (필터 비활성화)
     LONG_ONLY_SYMBOLS, SHORT_ONLY_SYMBOLS,
     OPEN_CORR_MIN,
     SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT,
@@ -424,29 +424,13 @@ def _build_dca_targets(
 
 
 
-# Falling Knife Filter  (★ v9.9)
 # ═════════════════════════════════════════════════════════════════
-def _is_falling_knife_long(ohlcv_5m: list) -> bool:
-    """최근 N개 5m 봉 누적 하락 > threshold → Long 차단"""
-    if len(ohlcv_5m) < FALLING_KNIFE_BARS:
-        return False
-    closes = [float(x[4]) for x in ohlcv_5m[-FALLING_KNIFE_BARS:]]
-    if closes[0] <= 0:
-        return False
-    return (closes[-1] - closes[0]) / closes[0] < -FALLING_KNIFE_THRESHOLD
-
-
-def _is_falling_knife_short(ohlcv_5m: list) -> bool:
-    """최근 N개 5m 봉 누적 상승 > threshold → Short 차단"""
-    if len(ohlcv_5m) < FALLING_KNIFE_BARS:
-        return False
-    closes = [float(x[4]) for x in ohlcv_5m[-FALLING_KNIFE_BARS:]]
-    if closes[0] <= 0:
-        return False
-    return (closes[-1] - closes[0]) / closes[0] > FALLING_KNIFE_THRESHOLD
-
-
+# ★ V10.31e-4: Falling Knife Filter 제거
+# v9.9에서 도입, 9일 실측으로 효과 없음 확인 후 삭제.
+# 필터 있는 MR T3 FC 5.8% > 필터 없는 TREND 4.4% (무용).
+# 설정(FALLING_KNIFE_BARS/THRESHOLD)은 config.py에 유지하되 비활성화 주석.
 # ═════════════════════════════════════════════════════════════════
+
 
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.29c: TREND COMPANION — MR 진입 시 반대 방향 추세 심볼 동시 진입
@@ -840,11 +824,11 @@ def plan_open(
 
         # (reason 태깅은 pending_map/entry_type_tag에서 처리)
 
-        # ★ v9.9: Falling Knife Filter — 급가속 구간 진입 차단
-        if final_long_trig  and _is_falling_knife_long(ohlcv_5m):
-            final_long_trig  = False
-        if final_short_trig and _is_falling_knife_short(ohlcv_5m):
-            final_short_trig = False
+        # ★ V10.31e-4: Falling Knife 필터 제거
+        # 실측(9일, n=52+136): 필터 있는 MR이 T3 FC 비율 5.8% vs 필터 없는 TREND 4.4%.
+        # 필터가 손실 방어 효과 없고 기회만 차단. MR의 "이격 구간 반대 진입" 철학과 정면 충돌.
+        # 제거 후 효과는 log_trades.csv entry_type=MR 건수/실적 증가로 실측 검증.
+        # 원복 필요 시 git log에서 `_is_falling_knife_long/short` 함수 + 이 호출 복원.
 
         # ── (5) pending-nextbar
         cd_map      = system_state.setdefault("open_symbol_cd_until", {})

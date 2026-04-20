@@ -94,7 +94,17 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
     global _sticky_long, _sticky_short
 
     try:
-        tickers = await asyncio.to_thread(ex.fetch_tickers)
+        # ★ V10.31e-5: market_snapshot의 tickers 캐시 재사용 (418 밴 대응)
+        # universe refresh는 15분 주기지만 snapshot과 시간차로 중복 fetch 가능.
+        # 캐시 히트 시 fetch 스킵, 미스 시 신규 fetch + 캐시 업데이트.
+        from v9.datafeed.market_snapshot import _TICKERS_CACHE, _TICKERS_CACHE_TTL
+        import time as _time
+        if _TICKERS_CACHE.get("data") and (_time.time() - _TICKERS_CACHE["ts"] < _TICKERS_CACHE_TTL):
+            tickers = _TICKERS_CACHE["data"]
+        else:
+            tickers = await asyncio.to_thread(ex.fetch_tickers)
+            _TICKERS_CACHE["ts"] = _time.time()
+            _TICKERS_CACHE["data"] = tickers
 
         # ══ Step 1: 공통 — 절대 floor + 거래량 수집 ══
         all_vols = {}

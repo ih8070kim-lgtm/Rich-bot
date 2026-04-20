@@ -7,7 +7,7 @@
 3. micro RSI 확인 (15m RSI 일치 방향)
 4. VS (Volume Surge) ≥ 1.0 — 최근 5봉/30봉 거래량 비율
 5. 상관계수 ≥ OPEN_CORR_MIN (0.60)
-6. Falling Knife 아님 (최근 3봉 누적 -2% 이상이면 차단)
+6. ★ V10.31e-4 제거: Falling Knife 필터 (9일 실측 효과 없음)
 7. 방향별 쿨다운: ★ V10.31d 제거 (OPEN_DIR_COOLDOWN_SEC=0)
 8. 심볼별 open_fail_cooldown 통과
 ```

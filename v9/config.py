@@ -314,10 +314,13 @@ ASYM_DCA_MR_MAX      = 0.90
 HEDGE_MODE = True   # True → positionSide 태깅 활성화
 
 # ═══════════════════════════════════════════════════════════════════
-# Falling Knife Filter  (★ v9.9 신규)
+# Falling Knife Filter  (★ v9.9 신규 → V10.31e-4 비활성화)
+# 9일 실측으로 효과 없음 확인 (MR T3 FC 5.8% > TREND 4.4%) 후 planners.py에서
+# 호출/함수/import 제거. 이 상수는 참조 없으나 히스토리 기록 겸 유지.
+# 필요 시 롤백 포인트.
 # ═══════════════════════════════════════════════════════════════════
-FALLING_KNIFE_BARS      = 3      # 최근 N개 5m 봉
-FALLING_KNIFE_THRESHOLD = 0.020  # ★ v10.9: 1.2% → 2.0% (MR 진입 차단 완화)
+FALLING_KNIFE_BARS      = 3      # (미사용) 최근 N개 5m 봉
+FALLING_KNIFE_THRESHOLD = 0.020  # (미사용) 누적 변화 임계값
 
 # ═══════════════════════════════════════════════════════════════════
 # Pullback Entry  (★ v9.9 신규)
