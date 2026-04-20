@@ -13,12 +13,19 @@ from v9.types import MarketSnapshot
 _BAL_CACHE = {"ts": 0.0, "real": 0.0, "free": 0.0}
 _BAL_CACHE_TTL = 15.0
 
+# ★ V10.31e-3: Tickers 캐시 (3초) — 429 rate limit 근본 방어
+# fetch_tickers는 weight 40 × 분당 60회 = 2400 (Binance 한도 정확히 근접).
+# 3초 캐시로 1/3 감축 → 분당 800 weight. 진입 판단용 가격은 3초 지연 무해.
+# 04-20 04:08~04:17 "429 Too Many Requests" 8회 실측 확인 후 도입.
+_TICKERS_CACHE = {"ts": 0.0, "data": None}
+_TICKERS_CACHE_TTL = 3.0
+
 
 async def fetch_market_snapshot(
     ex,
     active_symbols: list,
     prev_snapshot: MarketSnapshot | None = None,
-    ohlcv_interval_sec: float = 10.0,
+    ohlcv_interval_sec: float = 15.0,  # ★ V10.31e-3: 10→15s, 429 방어 (weight 1920→1280/분)
 ) -> MarketSnapshot:
     """
     거래소에서 전체 시장 스냅샷을 수집.
@@ -60,16 +67,27 @@ async def fetch_market_snapshot(
     margin_ratio = 1.0 - (free_balance / real_balance) if real_balance > 0 else 0.0
 
     # ── 티커 조회 ────────────────────────────────────────────────
+    # ★ V10.31e-3: 3초 캐시로 429 rate limit 방어
     tickers_raw = {}
-    try:
-        tickers_raw = await asyncio.to_thread(ex.fetch_tickers)
-        if not isinstance(tickers_raw, dict):
-            tickers_raw = {}
-    except Exception as e:
-        print(f"[market_snapshot] fetch_tickers 실패: {e}")
-        # ★ V10.31c: tickers 실패 시 prev snapshot에서 tickers 복원 (아래 norm_tickers 생성부에서 fallback)
-        if prev_snapshot and hasattr(prev_snapshot, 'tickers'):
-            tickers_raw = prev_snapshot.tickers or {}
+    _tk_age = ts - _TICKERS_CACHE["ts"]
+    if _tk_age < _TICKERS_CACHE_TTL and _TICKERS_CACHE["data"]:
+        tickers_raw = _TICKERS_CACHE["data"]
+    else:
+        try:
+            tickers_raw = await asyncio.to_thread(ex.fetch_tickers)
+            if not isinstance(tickers_raw, dict):
+                tickers_raw = {}
+            else:
+                _TICKERS_CACHE["ts"] = ts
+                _TICKERS_CACHE["data"] = tickers_raw
+        except Exception as e:
+            print(f"[market_snapshot] fetch_tickers 실패: {e}")
+            # ★ V10.31c: tickers 실패 시 prev snapshot에서 tickers 복원 (아래 norm_tickers 생성부에서 fallback)
+            # ★ V10.31e-3: 캐시도 fallback 소스
+            if _TICKERS_CACHE["data"]:
+                tickers_raw = _TICKERS_CACHE["data"]
+            elif prev_snapshot and hasattr(prev_snapshot, 'tickers'):
+                tickers_raw = prev_snapshot.tickers or {}
 
     norm_tickers = {}
     all_prices = {}
