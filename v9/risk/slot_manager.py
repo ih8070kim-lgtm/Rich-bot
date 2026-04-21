@@ -85,6 +85,57 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
                 risk_short_f += 1.0
 
     import math
+    
+    # ★ V10.31o: _PENDING_LIMITS도 직접 카운트 (pending_entry 누락 케이스 방어)
+    # 배경: SOL 19:46:11 limit placed → 19:46:34 UNI 진입 시점에 long=3 카운트 (실제 4)
+    # 원인: limit 체결 후 _apply_pending_fill 호출 지연 + pending_entry는 cleanup됨
+    # 해결: _PENDING_LIMITS의 OPEN intent도 직접 카운트 (체결 보장된 슬롯)
+    try:
+        from v9.execution.order_router import _PENDING_LIMITS
+        # st에 이미 카운트된 sym/side는 중복 방지용 set
+        _counted_keys = set()
+        for sym in st.keys():
+            sd = st[sym]
+            if not isinstance(sd, dict):
+                continue
+            for side, p in iter_positions(sd):
+                if p and isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0:
+                    _counted_keys.add((sym, side))
+            for pe_side in ("buy", "sell"):
+                if get_pending_entry(sd, pe_side):
+                    _counted_keys.add((sym, pe_side))
+        
+        for _oid, _info in _PENDING_LIMITS.items():
+            if _info.get("intent_type") != "OPEN":
+                continue  # OPEN만 — TP1/DCA/TRIM은 기존 포지션 영향
+            _pl_sym = _info.get("sym", "")
+            _pl_side = _info.get("side", "")
+            _pl_role = _info.get("role", "CORE_MR")
+            if not _pl_sym or not _pl_side:
+                continue
+            # 중복 방지: 이미 포지션/pending_entry로 카운트됐으면 skip
+            if (_pl_sym, _pl_side) in _counted_keys:
+                continue
+            # role_filter 적용
+            if role_filter:
+                if role_filter == "CORE_MR" and _pl_role not in ("CORE_MR", "CORE_BREAKOUT"):
+                    continue
+                if role_filter == "CORE_HEDGE" and _pl_role != "CORE_HEDGE":
+                    continue
+            if _pl_role in ("BC", "CB"):
+                continue
+            hard_total += 1
+            risk_total_f += 1.0
+            if _pl_side == "buy":
+                hard_long    += 1
+                risk_long_f  += 1.0
+            else:
+                hard_short   += 1
+                risk_short_f += 1.0
+            _counted_keys.add((_pl_sym, _pl_side))
+    except Exception:
+        pass
+    
     risk_total = math.ceil(risk_total_f - 0.0001) if risk_total_f > 0 else 0
     risk_long  = math.ceil(risk_long_f  - 0.0001) if risk_long_f  > 0 else 0
     risk_short = math.ceil(risk_short_f - 0.0001) if risk_short_f > 0 else 0

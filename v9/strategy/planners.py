@@ -1754,6 +1754,23 @@ def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
             if trailing_triggered:
                 # ★ V10.29e FIX: trail close는 p["amt"] 전량 — 잔량 남으면 유령 포지션
                 _trail_qty = float(p.get("amt", 0.0))
+                # ★ V10.31o FIX: Binance min_qty 미달 잔량은 시도해도 FAIL 무한루프
+                # FIL 0.1 케이스 — 0.0999...로 인식되어 17회 FAIL 반복
+                # 해결: min_qty 미달 잔량은 강제 클리어 (Binance에서 자동 정리되거나 dust)
+                from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT
+                _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+                if _trail_qty < _min_qty * 0.9999:
+                    # 잔량 강제 클리어 — 포지션북에서 제거
+                    try:
+                        from v9.execution.position_book import clear_position
+                        from v9.logging.logger_csv import log_system
+                        clear_position(st, symbol, p.get("side", "buy"))
+                        log_system("RESIDUAL_FORCE_CLEAR",
+                                   f"{symbol} {p.get('side','')} amt={_trail_qty} "
+                                   f"< min_qty={_min_qty} (포지션북 강제 클리어)")
+                    except Exception as _fc_err:
+                        print(f"[RESIDUAL_FORCE_CLEAR] {symbol} 실패(무시): {_fc_err}")
+                    continue  # intent 발사 안 함 (FAIL 루프 차단)
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.TRAIL_ON,
