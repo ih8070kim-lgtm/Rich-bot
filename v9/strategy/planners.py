@@ -1109,10 +1109,30 @@ def plan_open(
         if _trend_signal_side:
             _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
             _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
+            _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
             _tr_entered = {i.symbol for i in intents}
+
+            # ★ V10.31i: COMP는 스큐 예방 목적 (주 수입원 아님).
+            #   발사 후 opp < sig (MR보다 하나 이상 적게) 유지될 때만 의미.
+            #   균형/opp우세 상태에서는 발사 차단 — 신규 스큐 생성은 MR 전담.
+            #   수식: (opp+1) < (sig+1) = opp < sig
+            _comp_skew_ok = _tr_opp_slots < _sig_side_slots
 
             if _tr_opp_slots >= MAX_MR_PER_SIDE:
                 print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
+            elif not _comp_skew_ok:
+                # ★ V10.31i: 스큐 예방 조건 미충족 — 5분 1회 cooldown 로그
+                _akey = f"COMP_SKIP_SKEW:{_trend_signal_side}_{_sig_side_slots}_{_tr_opp_slots}"
+                _now_t = time.time()
+                if _now_t - _TREND_SKIP_LOG_CD.get(_akey, 0) > _TREND_SKIP_LOG_CD_SEC:
+                    _TREND_SKIP_LOG_CD[_akey] = _now_t
+                    print(f"[COMP_SKIP_SKEW] sig={_trend_signal_side} sig_slots={_sig_side_slots} "
+                          f"opp_slots={_tr_opp_slots} (opp>=sig → 스큐 예방 조건 미충족)")
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("COMP_SKIP_SKEW",
+                                   f"sig={_trend_signal_side} sig={_sig_side_slots} opp={_tr_opp_slots}")
+                    except Exception: pass
             else:
                 _tr_best_sym = None
                 _tr_best_score = 0

@@ -10,6 +10,8 @@
 - ★ V10.31b: score 1.0~2.0 밴드는 발사 직전 필터로 블록 (애매한 트렌드)
 - ★ V10.31c: **실제 후보 풀 진입 기준은 `_TR_MIN=0.5` 하드코딩** (planners.py 내부). `TREND_MIN_SCORE` config는 미사용 죽은 코드였음 — V10.31c에서 제거
 - ★ V10.31c: TREND_SCORE_SKIP 로그는 모듈 dict `_TREND_SKIP_LOG_CD`로 심볼당 5분 1회 제한 (setattr 방식 무효화 수정)
+- ★ V10.31i: **COMP는 스큐 예방 도구, 주 수입원 아님** — 가드 `_tr_opp_slots < _sig_side_slots` 적용. 균형/opp우세 상태에서 발사 차단
+- ★ V10.31i: NOSLOT A 조건(`opp+1 < sig`)과 COMP 조건(`opp < sig`)의 수식 차이 주의 — NOSLOT은 단독 발사(opp만 +1), COMP는 MR과 동시 발사(양쪽 +1)라 기준선 다름
 
 ## 수정 시 체크
 - [ ] NOSLOT이 intents.append 사용
@@ -18,6 +20,8 @@
 - [ ] HEDGE_SIM 기록이 정상 작동하는지
 - [ ] score cap (TREND_MAX_SCORE) 체크가 양쪽 NOSLOT 탐색에 적용되는지
 - [ ] trigger_side=None 블록 끝에 continue 유지
+- [ ] ★ V10.31i: COMP 스큐 가드 `_tr_opp_slots < _sig_side_slots` 체크가 `_tr_opp_slots >= MAX_MR_PER_SIDE` 이후 elif로 배치되어 있는지
+- [ ] ★ V10.31i: COMP 스킵 로그 키가 NOSLOT A 조건과 겹치지 않는지 (`COMP_SKIP_SKEW:` vs `NOSLOT_A:`)
 
 ## HEDGE_SIM 중간형 시뮬 (★ V10.31e-6)
 
