@@ -2434,6 +2434,54 @@ def _ptp_session_date_kst(now_ts: float) -> str:
     return _t.strftime("%Y-%m-%d", _t.gmtime(now_ts + PTP_SESSION_TZ_OFFSET_SEC))
 
 
+def _load_today_balance_stats(utc_day_start_ts: float) -> tuple:
+    """★ V10.31l: log_balance.csv에서 오늘 UTC 00:00 이후 (start, peak) 복원.
+    
+    서버 타임존 UTC 가정 (log_balance.csv 시각 = UTC).
+    오늘 UTC 00:00 (= KST 09:00) 이후 첫 레코드 = session_start,
+    이후 모든 레코드 중 최대 = peak.
+    
+    Returns:
+        (session_start, session_peak) — 데이터 없으면 (0.0, 0.0)
+    """
+    import os
+    import time as _t
+    from v9.config import LOG_DIR
+    
+    fpath = os.path.join(LOG_DIR, "log_balance.csv")
+    if not os.path.exists(fpath):
+        return (0.0, 0.0)
+    
+    # UTC day start → "YYYY-MM-DD HH:MM" 문자열 비교 (CSV 시각 포맷과 동일)
+    boundary_str = _t.strftime("%Y-%m-%d %H:%M", _t.gmtime(utc_day_start_ts))
+    
+    session_start = 0.0
+    session_peak = 0.0
+    try:
+        with open(fpath, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(',')
+                if len(parts) != 2:
+                    continue
+                ts_str = parts[0].strip()
+                try:
+                    bal = float(parts[1].strip())
+                except (ValueError, IndexError):
+                    continue
+                if ts_str < boundary_str:
+                    continue
+                if session_start == 0.0:
+                    session_start = bal
+                if bal > session_peak:
+                    session_peak = bal
+    except Exception:
+        return (0.0, 0.0)
+    return (session_start, session_peak)
+
+
 def _ptp_update_state(system_state: Dict, current_balance: float,
                       st: Dict, now_ts: float) -> bool:
     """PTP 상태 관리 — peak 추적 + 트리거 판정.
@@ -2444,21 +2492,41 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
     """
     from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
     
-    # 1) KST 자정 세션 리셋
+    # 1) KST 09:00 (UTC 00:00) 세션 경계 + ★ V10.31l 재시작 시 복원
     today_kst = _ptp_session_date_kst(now_ts)
     if system_state.get("_ptp_session_date") != today_kst:
+        # ★ V10.31l: balance.csv에서 오늘 UTC 00:00 이후 start/peak 복원
+        # 봇 재시작 시에도 "오늘 KST 09:00 대비 peak"를 연속 추적
+        utc_day_start = int(now_ts // 86400) * 86400
+        restored_start, restored_peak = _load_today_balance_stats(utc_day_start)
+        
         system_state["_ptp_session_date"] = today_kst
-        system_state["_ptp_session_start"] = current_balance
-        system_state["_ptp_peak_balance"] = current_balance
+        if restored_start > 0:
+            # 복원 성공 — 오늘 UTC 자정 이후 레코드 존재 (재시작 케이스)
+            system_state["_ptp_session_start"] = restored_start
+            system_state["_ptp_peak_balance"] = max(restored_peak, current_balance)
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("PTP_SESSION_RESTORE",
+                           f"date={today_kst} start=${restored_start:.2f} "
+                           f"peak=${system_state['_ptp_peak_balance']:.2f} "
+                           f"curr=${current_balance:.2f} (balance.csv 복원)")
+            except Exception:
+                pass
+        else:
+            # 복원 실패 — balance.csv 없거나 오늘 레코드 없음 (신규 세션 또는 첫 부팅)
+            system_state["_ptp_session_start"] = current_balance
+            system_state["_ptp_peak_balance"] = current_balance
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("PTP_SESSION_RESET",
+                           f"date={today_kst} start=${current_balance:.2f} "
+                           f"(새 세션 — 복원 데이터 없음)")
+            except Exception:
+                pass
         # 진행 중 상태 정리
         system_state.pop("_ptp_trigger_ts", None)
         system_state.pop("_ptp_last_step", None)
-        try:
-            from v9.logging.logger_csv import log_system
-            log_system("PTP_SESSION_RESET",
-                       f"date={today_kst} start=${current_balance:.2f}")
-        except Exception:
-            pass
     
     session_start = float(system_state.get("_ptp_session_start", current_balance) or current_balance)
     if session_start <= 0:
