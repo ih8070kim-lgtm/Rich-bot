@@ -506,9 +506,10 @@ def plan_open(
     system_state: Dict,
 ) -> List[Intent]:
     intents: List[Intent] = []
+    # ★ V10.31j: 미장전 진입 차단 비활성 (사용자 결정, 주석처리)
     # ★ V10.31b: 미장전 신규 진입 차단
-    if system_state.get("_pmc_block_entry"):
-        return intents
+    # if system_state.get("_pmc_block_entry"):
+    #     return intents
     long_targets  = list(getattr(snapshot, "global_targets_long",  None) or [])
     short_targets = list(getattr(snapshot, "global_targets_short", None) or [])
     # ★ Python UnboundLocalError 방지: 루프 안에서 재할당되는 변수 미리 초기화
@@ -1510,7 +1511,8 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
     tp1_preorder_id, tp1_limit_oid, step, tp1_done 등 T1 전용 필드 무시.
     """
     from v9.config import (TRIM_BLENDED_ROI_BY_TIER,
-                           HARD_SL_ATR_BASE, calc_trim_qty)
+                           HARD_SL_ATR_BASE, calc_trim_qty,
+                           calc_dynamic_trim_thresh)
     intents: List[Intent] = []
     _excl = exclude_syms or set()
 
@@ -1561,7 +1563,9 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
 
         is_long = p.get("side", "") == "buy"
         roi = calc_roi_pct(p.get("ep", 0.0), curr_p, p.get("side", ""), LEVERAGE)
-        _threshold = TRIM_BLENDED_ROI_BY_TIER.get(dca_level, 1.0)
+        # ★ V10.31j: worst_roi 기반 동적 임계 (T2 worst≤-2 → 0.5, 기본 1.5)
+        _worst = float(p.get("worst_roi", 0.0) or 0.0)
+        _threshold = calc_dynamic_trim_thresh(dca_level, _worst)
 
         # ── trail 활성화 ──
         if roi >= _threshold and not p.get("trim_trail_active"):
@@ -2085,6 +2089,11 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
                              "INSURANCE_SH", "CORE_HEDGE"):
             continue
 
+        # ★ V10.31j: MR only — TREND는 plan_t3_3h_cut_trend가 3h~4h 더 빠른 컷 처리
+        _entry_type = str(p.get("entry_type", "MR"))
+        if _entry_type != "MR":
+            continue
+
         # T3만 대상
         dca_level = int(p.get("dca_level", 1) or 1)
         if dca_level < 3:
@@ -2201,6 +2210,173 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
     return intents
 
 
+def plan_t3_3h_cut_trend(snapshot: "MarketSnapshot", st: Dict,
+                         system_state: Dict) -> List[Intent]:
+    """★ V10.31j: TREND T3 포지션 3시간 초과 시 단계적 정리.
+
+    실측 근거 (OLD 500건):
+      TREND_T3 회복률 — <3h 90% / ≥3h 38%
+      TREND_T3 FC — 4h+ 13건 -$373 (주 손실 파이프라인)
+      TREND_T3 TRIM — 4h+ 7건 +$35 (기회상실 확정)
+
+    MR은 plan_t3_8h_cut (7h~8h) 별도 유지 — MR_T3 FC 전량 >12h 패턴.
+
+    단계:
+      3h00 (step 0): limit +0.5% 유리방향 배치
+      3h20 (step 1): 이전 limit 취소, +0.35% 재배치
+      3h40 (step 2): 이전 limit 취소, +0.20% 재배치
+      4h00 (step 3): 시장가 강제 정리
+
+    유리한 방향: plan_t3_8h_cut과 동일 (롱 sell @curr×(1+p), 숏 buy @curr×(1-p))
+
+    사용자 결정 (V10.31j):
+      - 대상: TREND T3만 (entry_type=="TREND")
+      - 조건: 3h 초과는 무조건 (max_roi 조건 없음)
+      - 일관성 우선: T3_DEF 활성 여부 무시
+    """
+    import time as _time
+
+    intents: List[Intent] = []
+    now_ts = _time.time()
+
+    # 단계 경계 (초 단위)
+    T_STEP0 = 3 * 3600              # 10800 (3h00)
+    T_STEP1 = 3 * 3600 + 20 * 60    # 12000 (3h20)
+    T_STEP2 = 3 * 3600 + 40 * 60    # 13200 (3h40)
+    T_STEP3 = 4 * 3600              # 14400 (4h00)
+
+    for symbol, p in _pos_items(st):
+        # 헷지/트렌드 구조물 제외
+        if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                             "INSURANCE_SH", "CORE_HEDGE"):
+            continue
+
+        # ★ V10.31j: TREND only — MR은 plan_t3_8h_cut 담당
+        _entry_type = str(p.get("entry_type", "MR"))
+        if _entry_type != "TREND":
+            continue
+
+        # T3만 대상
+        dca_level = int(p.get("dca_level", 1) or 1)
+        if dca_level < 3:
+            continue
+
+        amt = float(p.get("amt", 0) or 0)
+        if amt <= 0:
+            continue
+
+        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+        if curr_p <= 0:
+            continue
+
+        # hold 시간 계산
+        _open_ts = float(p.get("time", 0) or 0)
+        if _open_ts <= 0:
+            continue
+        hold_sec = now_ts - _open_ts
+
+        if hold_sec < T_STEP0:
+            continue
+
+        # 현재 단계 판정
+        if hold_sec < T_STEP1:
+            cur_step = 0
+            premium = 0.005   # 0.50%
+        elif hold_sec < T_STEP2:
+            cur_step = 1
+            premium = 0.0035  # 0.35%
+        elif hold_sec < T_STEP3:
+            cur_step = 2
+            premium = 0.0020  # 0.20%
+        else:
+            cur_step = 3
+            premium = 0.0       # 시장가
+
+        # 중복 방지 (plan_t3_8h_cut와 별도 필드 사용)
+        last_step = int(p.get("_t3_3h_step", -1))
+        if cur_step <= last_step:
+            continue
+
+        is_long = p.get("side", "") == "buy"
+
+        # 이전 단계 limit 주문 취소 (step 1, 2, 3에서만)
+        if cur_step >= 1:
+            try:
+                from v9.execution.order_router import get_pending_limits
+                from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                _cancelled = 0
+                for _pl_oid, _pl_info in list(get_pending_limits().items()):
+                    if (_pl_info.get("sym") == symbol
+                            and _pl_info.get("is_t3_3h_limit")):
+                        _TRIM_CANCEL_QUEUE.append({
+                            "sym": symbol, "oid": _pl_oid,
+                        })
+                        _cancelled += 1
+                if _cancelled > 0:
+                    print(f"[T3_3H] {symbol} step {cur_step} 이전 limit "
+                          f"{_cancelled}건 취소 예약")
+            except Exception as _ce:
+                print(f"[T3_3H] 이전 limit 취소 실패(무시): {_ce}")
+
+        # Intent 생성
+        if cur_step < 3:
+            close_price = curr_p * (1 + premium) if is_long else curr_p * (1 - premium)
+            intent_type = IntentType.CLOSE
+            force_market = False
+            reason = (f"T3_3H_S{cur_step}_h{hold_sec/3600:.1f}"
+                      f"(+{premium*100:.2f}%)")
+            _meta = {
+                "is_t3_3h_limit": True,
+                "_expected_role": p.get("role", ""),
+            }
+        else:
+            close_price = curr_p
+            intent_type = IntentType.FORCE_CLOSE
+            force_market = True
+            reason = f"T3_3H_MKT_h{hold_sec/3600:.1f}"
+            _meta = {
+                "force_market": True,
+                "_expected_role": p.get("role", ""),
+            }
+
+        # DCA 선주문 취소 (첫 step에서만)
+        if cur_step == 0:
+            for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                if isinstance(_di, dict) and _di.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+            p["dca_preorders"] = {}
+
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=intent_type,
+            symbol=symbol,
+            side="sell" if is_long else "buy",
+            qty=amt,
+            price=close_price,
+            reason=reason,
+            metadata=_meta,
+        ))
+
+        p["_t3_3h_step"] = cur_step
+
+        # ★ V10.31j: log_system 이벤트
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system(f"T3_3H_S{cur_step}",
+                       f"{symbol} TREND hold={hold_sec/3600:.1f}h "
+                       f"{'MKT' if cur_step==3 else f'+{premium*100:.2f}%'}")
+        except Exception:
+            pass
+
+        print(f"[T3_3H] {symbol} {p.get('side', '')} T{dca_level} TREND "
+              f"step {cur_step} hold={hold_sec/3600:.2f}h: "
+              f"{'시장가' if cur_step == 3 else f'+{premium*100:.2f}% limit'} "
+              f"(qty={amt})")
+
+    return intents
+
+
 def generate_all_intents(
     snapshot: MarketSnapshot,
     st: Dict,
@@ -2229,32 +2405,38 @@ def generate_all_intents(
                   f"heavy={_urg_log['heavy_side']}")
             generate_all_intents._last_urg = _urg_log["urgency"]
 
-    # ★ V10.31b: 미장 전 포지션 정리 (최우선)
-    _pmc_intents = plan_pre_market_clear(snapshot, st, system_state)
-    if _pmc_intents:
-        intents += _pmc_intents
-        return intents  # Phase 발동 시 다른 intent 생성 차단
+    # ★ V10.31j: 미장 전 포지션 정리 비활성화 (사용자 결정, 주석처리 — 함수 정의는 유지)
+    # _pmc_intents = plan_pre_market_clear(snapshot, st, system_state)
+    # if _pmc_intents:
+    #     intents += _pmc_intents
+    #     return intents  # Phase 발동 시 다른 intent 생성 차단
 
-    # ★ V10.31f: T3 8h 컷 (PMC 다음 우선순위)
+    # ★ V10.31f: T3 8h 컷 (MR only, V10.31j에서 조건 추가)
     _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
     intents += _t3_8h_intents
     _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
 
+    # ★ V10.31j: T3 3h 컷 (TREND only)
+    _t3_3h_intents = plan_t3_3h_cut_trend(snapshot, st, system_state)
+    intents += _t3_3h_intents
+    _t3_3h_syms = {i.symbol for i in _t3_3h_intents}
+
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
-    # T3 8h 대상 심볼은 FC/TP1/TRIM 중복 방지
-    _exclude = _fc_syms | _t3_8h_syms
+    # T3 시간 컷 대상 심볼은 FC/TP1/TRIM 중복 방지
+    _exclude = _fc_syms | _t3_8h_syms | _t3_3h_syms
 
     intents += plan_tp1(snapshot, st, exclude_syms=_exclude)
     intents += plan_trim_trail(snapshot, st, exclude_syms=_exclude)
     intents += plan_trail_on(snapshot, st)
     # ★ V10.31c: plan_dca 호출 제거 완료 (함수 자체도 삭제됨)
+    # ★ V10.31j: 미장전 진입 차단 비활성 (주석처리) — 항상 진입 허용
     # ★ V10.31b: 미장전 신규 진입 차단 (08:00-09:30 ET)
-    if not system_state.get("_pmc_block_entry"):
-        intents += plan_counter(snapshot, st, system_state)
-        intents += plan_insurance_sh(snapshot, st, system_state)
-        intents += plan_open(snapshot, st, cooldowns, system_state)
+    # if not system_state.get("_pmc_block_entry"):
+    intents += plan_counter(snapshot, st, system_state)
+    intents += plan_insurance_sh(snapshot, st, system_state)
+    intents += plan_open(snapshot, st, cooldowns, system_state)
     for _i in intents:
         if _i.metadata is None:
             _i.metadata = {}

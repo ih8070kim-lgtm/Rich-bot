@@ -567,6 +567,7 @@ def apply_order_results(
                         source_sym=str(p.get("source_sym", "") or ""),
                         fee_usdt=_fee,
                         t1_max_roi_pre_dca=_t1_pre,  # ★ V10.31e
+                        worst_roi_seen=float(p.get("worst_roi", 0.0) or 0.0),  # ★ V10.31j
                     )
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")

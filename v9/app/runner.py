@@ -1057,7 +1057,11 @@ def _migrate_log_trades_schema() -> None:
             print(f"[V9 Runner] log_trades 마이그레이션 스킵: 이미 최신 스키마 ({len(existing_cols)}컬럼)", flush=True)
             return
         # 구 스키마 → backup + 새로 시작
-        _vtag = "pre_v10_31e" if "fee_usdt" in existing_cols else "pre_v10_31d"
+        # ★ V10.31j: worst_roi_seen 없으면 pre_v10_31j 백업
+        if "worst_roi_seen" not in existing_cols and "t1_max_roi_pre_dca" in existing_cols:
+            _vtag = "pre_v10_31j"
+        else:
+            _vtag = "pre_v10_31e" if "fee_usdt" in existing_cols else "pre_v10_31d"
         bak = fpath.replace('.csv', f'.{_vtag}.csv')
         if os.path.exists(bak):
             bak = fpath.replace('.csv', f'.{_vtag}_{int(time.time())}.csv')
@@ -1530,6 +1534,9 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["trim_trail_active"] = False  # ★ V10.30: DCA 시 trim trail 리셋
         p["trim_trail_max"] = 0.0
         p["t4_worst_roi"] = 0.0
+        # ★ V10.31j: 디펜스 활성 플래그 리셋 (tier별 독립 추적)
+        p["_t2_def_logged"] = False
+        p["_t3_def_m5_logged"] = False
         p["last_dca_qty"] = filled_qty
         p.setdefault("dca_qty_by_tier", {})
         p["dca_qty_by_tier"][str(tier)] = filled_qty
@@ -1661,6 +1668,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                         role=str(p.get("role", "") or ""),
                         source_sym="",
                         t1_max_roi_pre_dca=_t1_pre_trim,  # ★ V10.31e
+                        worst_roi_seen=float(p.get("worst_roi", 0) or 0),  # ★ V10.31j
                     )
                 except Exception as _lt_e:
                     print(f"[TRIM_FILL] log_trade 실패(무시): {_lt_e}")
@@ -1705,6 +1713,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 source_sym=str(p.get("source_sym", "") or ""),
                 fee_usdt=float(info.get("_commission", 0) or 0),  # ★ V10.31d
                 t1_max_roi_pre_dca=_t1_pre_tp1,  # ★ V10.31e
+                worst_roi_seen=float(p.get("worst_roi", 0) or 0),  # ★ V10.31j
             )
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
@@ -2086,13 +2095,16 @@ async def _place_trim_preorders(ex, st, snapshot):
                     _trp.pop(_st, None)
 
             # ★ V10.31b FIX: EP 변경 시 trim 선주문 가격 검증 → 불일치 시 취소+재배치
+            # ★ V10.31j: worst_roi 전달 — 디펜스 구간 전환(T2 worst≤-2, T3 worst≤-5) 시
+            #   _v_correct 가격이 달라져 자동 재배치 트리거됨 (별도 분기 불필요).
             _trp_v = p.get("trim_preorders", {})
             if _trp_v and isinstance(_trp_v, dict):
                 from v9.config import calc_trim_price as _ctp_v
                 _v_ep = float(p.get("ep", 0) or 0)
                 _v_dca = int(p.get("dca_level", 1) or 1)
+                _v_worst = float(p.get("worst_roi", 0.0) or 0.0)
                 if _v_ep > 0 and _v_dca >= 2:
-                    _v_correct = _ctp_v(_v_ep, pos_side, _v_dca)
+                    _v_correct = _ctp_v(_v_ep, pos_side, _v_dca, _v_worst)
                     for _vt, _vi in list(_trp_v.items()):
                         if not isinstance(_vi, dict) or not _vi.get("oid"):
                             continue
@@ -2103,7 +2115,8 @@ async def _place_trim_preorders(ex, st, snapshot):
                                 try:
                                     await asyncio.to_thread(ex.cancel_order, _vi["oid"], sym)
                                     print(f"[TRIM_REPRICE] {sym} T{_vt} "
-                                          f"${_v_old:.4f}→${_v_correct:.4f} (EP 변경)")
+                                          f"${_v_old:.4f}→${_v_correct:.4f} "
+                                          f"(worst={_v_worst:.1f}%)")
                                 except Exception:
                                     pass
                                 _PENDING_LIMITS.pop(str(_vi["oid"]), None)
@@ -2126,7 +2139,9 @@ async def _place_trim_preorders(ex, st, snapshot):
                         float(p["amt"]), _regen_dca,
                         ep=_regen_ep, bal=_regen_bal, mark_price=_regen_mark
                     )
-                    _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca)
+                    # ★ V10.31j: worst_roi 전달 — 디펜스 구간 동적 임계
+                    _regen_worst = float(p.get("worst_roi", 0.0) or 0.0)
+                    _regen_price = calc_trim_price(_regen_ep, pos_side, _regen_dca, _regen_worst)
                     # ★ V10.31b: regen trim qty 디버그
                     print(f"[TRIM_DBG_REGEN] {sym} T{_regen_dca} "
                           f"amt={p['amt']:.1f} ep={_regen_ep:.4f} "
@@ -2741,6 +2756,31 @@ async def _main_loop(ex_init, dry_run: bool):
                         _mr_worst = float(_mr_p.get("worst_roi", 0.0) or 0.0)
                         if _mr_roi < _mr_worst:
                             _mr_p["worst_roi"] = _mr_roi
+                            # ★ V10.31j: 디펜스 구간 진입 1회 로그
+                            _mr_tier = int(_mr_p.get("dca_level", 1) or 1)
+                            _mr_entry_type = str(_mr_p.get("entry_type", "MR"))
+                            try:
+                                from v9.config import (T2_DEF_WORST_ENTER,
+                                                       T3_DEF_M5_WORST_ENTER)
+                                from v9.logging.logger_csv import log_system
+                                if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
+                                        and not _mr_p.get("_t2_def_logged")):
+                                    _mr_p["_t2_def_logged"] = True
+                                    log_system("T2_DEF_ENTER",
+                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
+                                               f"worst={_mr_roi:.2f}%")
+                                    print(f"[T2_DEF_ENTER] {_mr_sym} {_mr_entry_type} "
+                                          f"{_mr_side} worst={_mr_roi:.2f}%")
+                                if (_mr_tier == 3 and _mr_roi <= T3_DEF_M5_WORST_ENTER
+                                        and not _mr_p.get("_t3_def_m5_logged")):
+                                    _mr_p["_t3_def_m5_logged"] = True
+                                    log_system("T3_DEF_M5_ENTER",
+                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
+                                               f"worst={_mr_roi:.2f}%")
+                                    print(f"[T3_DEF_M5_ENTER] {_mr_sym} {_mr_entry_type} "
+                                          f"{_mr_side} worst={_mr_roi:.2f}%")
+                            except Exception:
+                                pass
                         # ★ v10.15: minroi JSON도 갱신
                         _mr_dca = int(_mr_p.get("dca_level", 1) or 1)
                         update_minroi(_minroi, _mr_sym, _mr_side, _mr_roi, _mr_dca)

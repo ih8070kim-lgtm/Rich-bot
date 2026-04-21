@@ -29,6 +29,9 @@ max_roi_seen → 0.0
 worst_roi → 0.0
 trim_trail_active → False
 trim_trail_max → 0.0
+★ V10.31j 추가:
+_t2_def_logged → False     # T2 디펜스 활성 플래그 (worst≤-2 최초 로그)
+_t3_def_m5_logged → False  # T3 디펜스 활성 플래그 (worst≤-5 최초 로그)
 ```
 
 ## 수정 시 체크

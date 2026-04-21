@@ -4,8 +4,30 @@
 - ★ V10.31b: 전 tier trail 통합 — T1/T2/T3 모두 동일한 trail 메커니즘
 - ★ V10.31c: `_manage_tp1_preorders`는 **LOW/NORMAL 레짐에서 활성 유지** (runner.py:2628에서 호출 중). V10.31b의 "선주문 시스템 전면 제거" 기재는 틀렸음 — 실제로는 HIGH에서만 trail 사용, LOW/NORMAL은 TP1 선주문 유지
 - ★ V10.31g: **T3 trim은 레짐 불문 LIMIT 선주문 경로**. plan_trim_trail의 trail 모드는 T2 전용으로 축소
+- ★ V10.31j: **worst_roi 기반 동적 TRIM 임계** — T2 worst≤-2.0 → 0.5, T3 worst≤-5.0 → -0.5 (`calc_dynamic_trim_thresh`)
 - plan_tp1은 T1 전용 (trail → partial close → step=1 → TRAIL_ON)
 - plan_trim_trail은 T2 전용 (★ V10.31g: T3 제외) — trail → trim → tier 감소
+
+## V10.31j 동적 임계 (디펜스 모드)
+```
+기본 (worst>-2 for T2, worst>-5 for T3):
+  T2: 1.5% (기존 TRIM_BLENDED_ROI_BY_TIER[2])
+  T3: 0.5% (기존 TRIM_BLENDED_ROI_BY_TIER[3])
+
+디펜스 (worst 통과 시):
+  T2 worst≤-2.0 → TRIM 임계 0.5 (약반등 포획)
+  T3 worst≤-5.0 → TRIM 임계 -0.5 (약손실 탈출)
+
+자동 재배치:
+  _place_trim_preorders의 EP 검증 블록이 worst 변화도 자동 감지
+  calc_trim_price(ep, side, tier, worst_roi) 시그니처 — worst 전달 시
+  _v_correct 가격이 변동되어 기존 LIMIT과 0.1% 차이 → 취소 + regen 재배치
+
+로깅:
+  T2_DEF_ENTER / T3_DEF_M5_ENTER (log_system) — 포지션당 1회만
+  DCA 체결 시 _t2_def_logged / _t3_def_m5_logged 플래그 리셋
+  worst_roi_seen 컬럼 (trades.csv 21번째) — 디펜스 임계 재튜닝용
+```
 
 ## TP Trail 흐름 (V10.31g)
 ```
@@ -26,22 +48,23 @@
   → step=1 → TRAIL_ON이 잔량 처리
 
 ■ T2 HIGH (plan_trim_trail trail)
-  ROI ≥ threshold(+1.5%) → trail 활성화 → 시장가 TRIM
+  ROI ≥ threshold (★ V10.31j: 동적 — 기본 1.5, worst≤-2면 0.5) → trail 활성화 → 시장가 TRIM
 
 ■ T2 LOW/NORMAL (_place_trim_preorders)
   DCA 체결 시 calc_trim_price → limit 선주문
   기존 T2 포지션도 자동 재생성 (regen)
+  worst 구간 전환(≤-2) 시 EP 검증 블록이 감지 → 취소+재배치 (V10.31j)
   가격 도달 → 체결 → tier 감소 (T2→T1)
 
 ■ T3 ALL regime (★ V10.31g) (_place_trim_preorders)
-  threshold +0.5% — HIGH trail로 가면 변동성에 0.2% 이익만 먹고 이탈 → 재T3 → 강제청산 패턴
+  threshold +0.5% (★ V10.31j: worst≤-5면 -0.5로 하향) — HIGH trail로 가면 변동성에 0.2% 이익만 먹고 이탈 → 재T3 → 강제청산 패턴
   LIMIT으로 +0.5% 정확 도달 시 maker(0.02%)로 깔끔히 T2 감소
 
 ■ 전환 안전장치
   T2: LOW→HIGH: 선주문 취소 → trail 시작 / HIGH→LOW: trail 리셋 → 다음 틱 선주문 배치
   T3: 레짐 전환에 영향 받지 않음 — 항상 LIMIT 경로 (V10.31g)
        기존 HIGH+T3 trail 활성 잔존 시 plan_trim_trail 진입부에서 자동 정리
-  DCA: 둘 다 리셋 (runner DCA fill handler)
+  DCA: 둘 다 리셋 + 디펜스 플래그 리셋 (V10.31j)
 ```
 
 ## 제거된 것 (V10.31b)
@@ -58,6 +81,9 @@
 - [ ] plan_trim_trail이 T3을 제외하는지 (★ V10.31g: `dca_level >= 3` skip)
 - [ ] _place_trim_preorders가 HIGH+T3 케이스를 fall through 시키는지 (★ V10.31g)
 - [ ] DCA 시 trim_trail_active / trim_trail_max 리셋 (runner.py)
+- [ ] ★ V10.31j: DCA 시 _t2_def_logged / _t3_def_m5_logged 리셋
+- [ ] ★ V10.31j: calc_trim_price 호출부 3곳(초기/EP검증/regen)에 worst_roi 전달
+- [ ] ★ V10.31j: log_trade 호출부 3곳(TP1/TRIM/FORCE_CLOSE)에 worst_roi_seen 전달
 - [ ] trim 수량이 노셔널 기반(calc_trim_qty)인지
 - [ ] trim 후 dca_level 정확히 감소
 - [ ] T1 TP1 intent에 force_market: True 포함

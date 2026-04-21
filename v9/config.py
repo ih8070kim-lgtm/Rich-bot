@@ -93,6 +93,30 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.5}  # ★ V10.31c: T3 1.0 → 0.5 (DCA 33/33/34 전환으로 blended ROI 약 1%p 더 깊어지는 것 보정)
 # ★ V10.31d: TRIM_TRAIL_FLOOR 제거 — V10.31c에서 FLOOR 로직 이미 제거됐으나 상수/import 잔존했던 것 정리
 
+# ★ V10.31j: Tier별 디펜스 모드 (worst_roi 기반 동적 TRIM 임계)
+# T2 worst ≤ -2.0 → TRIM 임계 1.5 → 0.5 (약반등 포획)
+# T3 worst ≤ -5.0 → TRIM 임계 0.5 → -0.5 (약손실 탈출)
+# DCA 체결 시 worst_roi=0 리셋되므로 tier별 독립 추적
+T2_DEF_WORST_ENTER     = -2.0
+T2_DEF_TRIM_THRESH     = 0.5
+T3_DEF_M5_WORST_ENTER  = -5.0
+T3_DEF_M5_TRIM_THRESH  = -0.5
+
+def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
+    """★ V10.31j: worst_roi 기반 동적 TRIM 임계.
+    
+    tier=2 + worst ≤ -2.0 → 0.5 (약반등 TRIM 허용)
+    tier=3 + worst ≤ -5.0 → -0.5 (약손실 TRIM 허용)
+    그 외 → 기본 TRIM_BLENDED_ROI_BY_TIER 값
+    
+    DCA 체결 시 worst_roi=0 리셋되므로 tier별 독립 평가.
+    """
+    if tier == 2 and worst_roi <= T2_DEF_WORST_ENTER:
+        return T2_DEF_TRIM_THRESH
+    if tier == 3 and worst_roi <= T3_DEF_M5_WORST_ENTER:
+        return T3_DEF_M5_TRIM_THRESH
+    return TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
+
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거
 DCA_COOLDOWN_SEC     = 0     # 레거시 호환용
@@ -355,9 +379,13 @@ TREND_FILTER_MIN_BARS = 50
 #   중복 구현으로 인한 불일치 방지
 # ═════════════════════════════════════════════════════════════════
 
-def calc_trim_price(blended_ep: float, side: str, tier: int) -> float:
-    """★ V10.29b: Trim 선주문 목표 가격 — 블렌디드 EP 기준."""
-    roi_pct = TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
+def calc_trim_price(blended_ep: float, side: str, tier: int, worst_roi: float = 0.0) -> float:
+    """★ V10.29b: Trim 선주문 목표 가격 — 블렌디드 EP 기준.
+    
+    ★ V10.31j: worst_roi 인자 추가 — 디펜스 모드 시 동적 임계.
+    기본값(worst_roi=0) 시 기존 TRIM_BLENDED_ROI_BY_TIER 그대로.
+    """
+    roi_pct = calc_dynamic_trim_thresh(tier, worst_roi)
     if side == "buy":
         return blended_ep * (1 + roi_pct / LEVERAGE / 100)
     return blended_ep * (1 - roi_pct / LEVERAGE / 100)

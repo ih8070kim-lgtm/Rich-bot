@@ -71,6 +71,10 @@ TRADES_COLUMNS = [
     # 기존 max_roi_seen은 DCA 시 0 리셋되어 "DCA 이후 구간의 max"만 기록.
     # 이 컬럼은 T1 시점에 얼마나 반등 찍었는지 추적해 조기 익절 시나리오 검증용.
     "t1_max_roi_pre_dca",
+    # ★ V10.31j: 디펜스 모드 임계 튜닝을 위한 worst_roi 보존
+    # 최종 tier에서 얼마나 깊게 물렸는지 추적. T2_DEF/T3_DEF_M5 임계 재조정 근거.
+    # DCA 체결 시 worst_roi=0 리셋되므로 "최종 tier 구간의 worst"만 기록.
+    "worst_roi_seen",
 ]
 
 # ── log_funding (★ V10.31d: 펀딩비 별도 로깅) ────────────────────

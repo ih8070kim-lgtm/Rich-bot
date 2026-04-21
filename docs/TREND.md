@@ -12,6 +12,8 @@
 - ★ V10.31c: TREND_SCORE_SKIP 로그는 모듈 dict `_TREND_SKIP_LOG_CD`로 심볼당 5분 1회 제한 (setattr 방식 무효화 수정)
 - ★ V10.31i: **COMP는 스큐 예방 도구, 주 수입원 아님** — 가드 `_tr_opp_slots < _sig_side_slots` 적용. 균형/opp우세 상태에서 발사 차단
 - ★ V10.31i: NOSLOT A 조건(`opp+1 < sig`)과 COMP 조건(`opp < sig`)의 수식 차이 주의 — NOSLOT은 단독 발사(opp만 +1), COMP는 MR과 동시 발사(양쪽 +1)라 기준선 다름
+- ★ V10.31j: **TREND T3 3h 컷 (plan_t3_3h_cut_trend)** — hold≥3h부터 단계적 컷. MR T3는 기존 plan_t3_8h_cut(7h~8h) 유지
+- ★ V10.31j: TREND/MR 구분은 `entry_type == "TREND"` 조건. plan_t3_8h_cut에 MR only 조건 추가됨
 
 ## 수정 시 체크
 - [ ] NOSLOT이 intents.append 사용
@@ -22,6 +24,30 @@
 - [ ] trigger_side=None 블록 끝에 continue 유지
 - [ ] ★ V10.31i: COMP 스큐 가드 `_tr_opp_slots < _sig_side_slots` 체크가 `_tr_opp_slots >= MAX_MR_PER_SIDE` 이후 elif로 배치되어 있는지
 - [ ] ★ V10.31i: COMP 스킵 로그 키가 NOSLOT A 조건과 겹치지 않는지 (`COMP_SKIP_SKEW:` vs `NOSLOT_A:`)
+- [ ] ★ V10.31j: plan_t3_3h_cut_trend가 `entry_type=="TREND"` 체크
+- [ ] ★ V10.31j: plan_t3_8h_cut에 `entry_type=="MR"` 체크 추가되어 있는지
+- [ ] ★ V10.31j: _t3_3h_step 필드가 _t3_8h_step과 별개인지 (중복 방지)
+- [ ] ★ V10.31j: is_t3_3h_limit 플래그가 is_t3_8h_limit과 별개인지
+
+## T3 시간 컷 테이블 (★ V10.31j)
+```
+TREND T3 (plan_t3_3h_cut_trend):
+  3h00 step 0: limit +0.5% 유리방향
+  3h20 step 1: 이전 취소 + +0.35%
+  3h40 step 2: 이전 취소 + +0.20%
+  4h00 step 3: 시장가 강제 정리
+
+MR T3 (plan_t3_8h_cut) — 기존 유지:
+  7h00 step 0: limit +0.5%
+  7h20 step 1: +0.35%
+  7h40 step 2: +0.20%
+  8h00 step 3: 시장가
+
+실측 근거 (OLD 500건):
+  TREND_T3 회복률: <3h 90% / ≥3h 38%
+  MR_T3 FC: 전량 >12h (시간 누적 패턴)
+  → entry_type별 분리 컷 시간이 합리적
+```
 
 ## HEDGE_SIM 중간형 시뮬 (★ V10.31e-6)
 
