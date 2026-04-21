@@ -90,8 +90,24 @@ def plan_force_close(
             _res_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
             # ★ V10.30 FIX: float epsilon(2.84e-14) 차단 + reduce_fail 쿨다운 존중
             # ★ V10.31b FIX: 필드명 통일 (runner는 exit_fail_cooldown_until 세팅)
+            # ★ V10.31n FIX: Binance min_qty 경계값 float 오차 케이스 방어
+            # 예: _res_amt=0.0999999999999659 & min_qty=0.1 → RESIDUAL_CLEANUP 시도 시
+            #     매번 FAIL (precision 미달) → 57분간 17회 무한 루프 실측 확인
+            # 해결: min_qty 미달이면 시도 자체 차단 + exit_fail_cooldown 세팅해 재시도 방지
             _res_cd = float(sym_st.get("exit_fail_cooldown_until", 0) or 0)
-            if _res_amt > _res_min_qty * 0.01 and _res_cd < now:
+            _res_below_min = _res_amt < _res_min_qty * 0.9999  # 0.9999 여유 — 부동소수점 경계 방어
+            if _res_below_min and _res_cd < now:
+                # 최소 qty 미달 잔량 — 시도 불가. 5분 쿨다운 세팅해 무한 시도 차단
+                sym_st["exit_fail_cooldown_until"] = now + 300
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("RESIDUAL_SKIP",
+                               f"{symbol} amt={_res_amt} < min_qty={_res_min_qty} "
+                               f"(Binance precision 미달, 5분 쿨다운)")
+                except Exception:
+                    pass
+                # force = False 유지 → 이 심볼 skip
+            elif _res_amt > _res_min_qty * 0.01 and _res_cd < now:
                 if _res_notional < 20.0 or _res_amt < _res_min_qty * 2:
                     force  = True
                     reason = f"RESIDUAL_CLEANUP(${_res_notional:.2f},qty={_res_amt})"
