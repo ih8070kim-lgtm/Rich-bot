@@ -131,6 +131,36 @@ function render(){
     <div class="kpi"><div class="l">Urgency</div><div class="v" style="color:${data.skew.urgency>30?'var(--r)':data.skew.urgency>15?'var(--a)':'var(--c)'}">${data.skew.urgency||0}</div><div class="s">${data.skew.heavy_side||'-'} ${data.skew.heavy_roi||0}%</div></div>
   `;
 
+  // ★ V10.31n: PTP 상태 배지 (KPI 아래)
+  const ptp = data.ptp || {};
+  let ptpBadge = '';
+  if(ptp.state === 'active'){
+    const stepLabel = ptp.last_step >= 0 ? `STEP ${ptp.last_step + 1}/4` : 'STARTED';
+    ptpBadge = `<div style="margin:6px 0;padding:8px 12px;background:#3b1e1e;border-left:3px solid var(--r);border-radius:4px;font-size:12px">
+      <span style="color:var(--r);font-weight:700">🔴 PTP ACTIVE — ${stepLabel}</span>
+      <span style="color:var(--m);margin-left:8px">peak +${ptp.peak_gain_pct.toFixed(2)}% · drop ${ptp.current_drop_pct.toFixed(2)}%p</span>
+    </div>`;
+  } else if(ptp.state === 'armed'){
+    const dropBar = ptp.drop_thresh_pct > 0 ? Math.min(ptp.current_drop_pct / ptp.drop_thresh_pct * 100, 100) : 0;
+    ptpBadge = `<div style="margin:6px 0;padding:8px 12px;background:#1e2e3b;border-left:3px solid var(--a);border-radius:4px;font-size:12px">
+      <span style="color:var(--a);font-weight:700">🟡 PTP ARMED</span>
+      <span style="color:var(--m);margin-left:8px">peak +${ptp.peak_gain_pct.toFixed(2)}% · drop ${ptp.current_drop_pct.toFixed(2)}%p / ${ptp.drop_thresh_pct.toFixed(2)}%p</span>
+      <div style="margin-top:4px;background:#0f172a;border-radius:3px;height:4px;overflow:hidden"><div style="width:${dropBar}%;height:100%;background:var(--a);opacity:.7"></div></div>
+    </div>`;
+  } else {
+    ptpBadge = `<div style="margin:6px 0;padding:6px 12px;background:#1e293b;border-radius:4px;font-size:11px;color:var(--m)">
+      ⚪ PTP idle · peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}% (1% 도달 시 arm)
+    </div>`;
+  }
+  const kpisEl = $('kpis');
+  // 기존 ptp 배지 있으면 제거
+  const oldBadge = document.getElementById('ptp-badge');
+  if(oldBadge) oldBadge.remove();
+  const badgeDiv = document.createElement('div');
+  badgeDiv.id = 'ptp-badge';
+  badgeDiv.innerHTML = ptpBadge;
+  kpisEl.parentNode.insertBefore(badgeDiv, kpisEl.nextSibling);
+
   // Tab content
   if(currentTab==='pos') renderPositions();
   else if(currentTab==='trades') renderTrades();
@@ -259,15 +289,17 @@ function renderToday(){
   html+='</div>';
 
   // 시간대별 (오늘만, non-zero hour만)
+  // ★ V10.31n: UTC → KST 변환 표시 (UTC+9). hour_pnl 배열은 UTC 기준 유지, 표기만 KST
   const nonZeroHours = hr.map((v,i)=>[i,v]).filter(([,v])=>v!==0);
   if(nonZeroHours.length){
-    html+='<div class="card"><h3>오늘 시간대별 PnL (UTC)</h3>';
+    html+='<div class="card"><h3>오늘 시간대별 PnL (KST · 09시 리셋)</h3>';
     const maxAbs = Math.max(1, ...nonZeroHours.map(([,v])=>Math.abs(v)));
     for(const [h,v] of nonZeroHours){
+      const hKst = (h + 9) % 24;  // UTC → KST
       const w = Math.min(Math.abs(v)/maxAbs*100, 100);
       const bc = v>=0?'var(--g)':'var(--r)';
       html+=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;font-size:11px">
-        <span style="width:32px;color:var(--m);font-family:'SF Mono',monospace">${String(h).padStart(2,'0')}h</span>
+        <span style="width:32px;color:var(--m);font-family:'SF Mono',monospace">${String(hKst).padStart(2,'0')}h</span>
         <div class="bar-wrap" style="flex:1"><div class="bar" style="width:${w}%;background:${bc};opacity:.7"></div></div>
         <span style="width:58px;text-align:right;color:${c(v)};font-family:'SF Mono',monospace">${v>0?'+':''}$${v.toFixed(1)}</span>
       </div>`;

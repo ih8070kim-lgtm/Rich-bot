@@ -179,6 +179,58 @@ def _record_balance(bal: float):
         pass
 
 
+def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
+    """★ V10.31n: PTP 상태 요약 — 대시보드 표시용.
+    
+    상태 구분:
+      - idle:    peak_gain < 1% (arming 안 됨)
+      - armed:   peak_gain ≥ 1% + drop 미달 (대기 중)
+      - active:  trigger 중 (단계 진행 중)
+    """
+    result = {
+        "state": "idle",
+        "session_start": 0.0,
+        "peak": 0.0,
+        "peak_gain_pct": 0.0,
+        "current_drop_pct": 0.0,
+        "drop_thresh_pct": 0.0,
+        "last_step": -1,
+    }
+    if not system_state or current_balance <= 0:
+        return result
+    
+    session_start = float(system_state.get("_ptp_session_start", 0) or 0)
+    peak = float(system_state.get("_ptp_peak_balance", 0) or 0)
+    if session_start <= 0 or peak <= 0:
+        return result
+    
+    peak_gain_pct = (peak - session_start) / session_start * 100.0
+    current_drop_pct = (peak - current_balance) / session_start * 100.0
+    
+    result["session_start"] = round(session_start, 2)
+    result["peak"] = round(peak, 2)
+    result["peak_gain_pct"] = round(peak_gain_pct, 3)
+    result["current_drop_pct"] = round(current_drop_pct, 3)
+    
+    # tiered drop 임계 계산
+    try:
+        from v9.config import _ptp_get_drop_thresh
+        _dt = _ptp_get_drop_thresh(peak_gain_pct)
+        if _dt is not None:
+            result["drop_thresh_pct"] = round(_dt, 3)
+    except Exception:
+        pass
+    
+    # 상태 분류
+    if system_state.get("_ptp_trigger_ts"):
+        result["state"] = "active"
+        result["last_step"] = int(system_state.get("_ptp_last_step", -1))
+    elif peak_gain_pct >= 1.0:
+        result["state"] = "armed"
+    
+    return result
+
+
 def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
     """runner 메인 루프에서 호출. 대시보드용 요약 JSON 작성."""
     global _LAST_WRITE
@@ -549,6 +601,8 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
             },
             # ★ V10.31e: 심볼별 7일 실적 + 쿨다운 상태
             "symbol_stats": symbol_stats_list,
+            # ★ V10.31n: PTP 상태 — 대시보드 상단에 on/off + peak/drop 표시용
+            "ptp": _build_ptp_status(system_state, bal),
         }
 
         tmp = _STATUS_PATH + ".tmp"

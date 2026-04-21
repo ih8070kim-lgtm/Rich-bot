@@ -404,6 +404,52 @@ def apply_order_results(
             if p and filled > 0:
                 p["amt"] = max(0.0, p["amt"] - filled)
                 if p["amt"] <= 0:
+                    # ★ V10.31n FIX: 전량 체결 시에도 log_trade 기록
+                    # 기존 버그: trail이 trim qty를 남은 전량으로 계산하거나 시장가 slippage로
+                    #   잔량까지 쓸어가는 경우 log_trade 누락 → 대시보드/통계에서 사라짐
+                    #   (사용자 실측 17:42 XRP/XLM/SUI/AVAX 4건 누락 보고)
+                    try:
+                        from v9.logging.logger_csv import log_trade
+                        _tp1_ep   = float(p.get("ep", 0.0) or 0.0)
+                        _tp1_side = p.get("side", pos_side)
+                        _tp1_cpx  = float(avg_px if avg_px > 0 else
+                                          (snapshot.all_prices or {}).get(sym, _tp1_ep))
+                        _tp1_roi_full = (calc_roi_pct(_tp1_ep, _tp1_cpx, _tp1_side, LEVERAGE)
+                                         if _tp1_ep > 0 and _tp1_cpx > 0 else 0.0)
+                        _tp1_rpnl = getattr(result, 'realized_pnl', 0.0) or 0.0
+                        _tp1_raw = ((_tp1_cpx - _tp1_ep) / _tp1_ep if _tp1_side == "buy"
+                                    else (_tp1_ep - _tp1_cpx) / _tp1_ep)
+                        _tp1_self_pnl = _tp1_raw * filled * _tp1_cpx
+                        if _tp1_rpnl != 0.0 and abs(_tp1_rpnl) >= abs(_tp1_self_pnl) * 0.5:
+                            _tp1_pnl = _tp1_rpnl
+                        else:
+                            _tp1_pnl = _tp1_self_pnl
+                        _tp1_fee = float(getattr(result, 'fee_usdt', 0.0) or 0.0)
+                        _tp1_t1_pre = float(p.get("max_roi_by_tier", {}).get("1", 0.0) or 0.0)
+                        log_trade(
+                            trace_id=result.trace_id,
+                            symbol=sym,
+                            side=_tp1_side,
+                            ep=_tp1_ep,
+                            exit_price=_tp1_cpx,
+                            amt=filled,
+                            pnl_usdt=_tp1_pnl,
+                            roi_pct=_tp1_roi_full,
+                            dca_level=int(p.get("dca_level", 1) or 1),
+                            hold_sec=now - float(p.get("time", now) or now),
+                            reason=itype.value,  # "TP1" or "TP2"
+                            hedge_mode=bool(p.get("hedge_mode", False)),
+                            was_hedge=bool(p.get("was_hedge", False)),
+                            max_roi_seen=float(p.get("max_roi_seen", 0.0) or 0.0),
+                            entry_type=str(p.get("entry_type", "MR") or "MR"),
+                            role=str(p.get("role", "") or ""),
+                            source_sym=str(p.get("source_sym", "") or ""),
+                            fee_usdt=_tp1_fee,
+                            t1_max_roi_pre_dca=_tp1_t1_pre,
+                            worst_roi_seen=float(p.get("worst_roi", 0.0) or 0.0),
+                        )
+                    except Exception as _tp1_lt_err:
+                        print(f"[TP1_LT_FIX] {sym} log_trade 오류(무시): {_tp1_lt_err}")
                     # ★ V10.28b: trim 선주문 취소 큐
                     if p.get("trim_preorders"):
                         for _tc_tier, _tc_info in p.get("trim_preorders", {}).items():
