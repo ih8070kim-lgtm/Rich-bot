@@ -631,6 +631,9 @@ def plan_open(
     from v9.config import MAX_E30_SLOTS
     _active_e30 = 0
     _noslot_best = None  # ★ V10.29e: TREND_NOSLOT 최고 score 후보
+    # ★ V10.31k: 같은 틱 내 이미 생성한 MR intent 카운트 (st 미갱신 상태에서 슬롯 초과 방지)
+    _tick_new_long = 0
+    _tick_new_short = 0
     for _e30_sym, _e30_p in _pos_items(st):
         if _e30_p.get("entry_type") == "15mE30":
             _active_e30 += 1
@@ -660,8 +663,11 @@ def plan_open(
         if _slots_pre.risk_total >= TOTAL_MAX_SLOTS:
             break  # 전체 5개 꽉 참
         _slots_mr_pre = count_slots(st, role_filter="CORE_MR")
-        _can_long  = symbol in long_targets  and _slots_mr_pre.risk_long  < MAX_MR_PER_SIDE
-        _can_short = symbol in short_targets and _slots_mr_pre.risk_short < MAX_MR_PER_SIDE
+        # ★ V10.31k: 같은 틱 내 이미 생성한 intent도 합산 (st 미갱신 버그 수정)
+        _real_long  = _slots_mr_pre.risk_long  + _tick_new_long
+        _real_short = _slots_mr_pre.risk_short + _tick_new_short
+        _can_long  = symbol in long_targets  and _real_long  < MAX_MR_PER_SIDE
+        _can_short = symbol in short_targets and _real_short < MAX_MR_PER_SIDE
         if not (_can_long or _can_short):
             continue
         curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
@@ -895,10 +901,13 @@ def plan_open(
                 _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
                 # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
                 _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
+                _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
+                # ★ V10.31k: 같은 틱 내 새 MR intent 슬롯 반영
+                _tr_opp_slots += (_tick_new_short if _tr_opp_side == "sell" else _tick_new_long)
+                _sig_side_slots += (_tick_new_long if _trend_signal_side == "buy" else _tick_new_short)
                 # ★ V10.31h: A 조건 — NOSLOT은 "비대칭 해소" 목적. 발사 후에도 비대칭 유지될 때만 의미.
                 #   (_tr_opp_slots + 1) < _sig_side_slots 이어야 1개 추가 후에도 시그널 방향이 더 많음.
                 #   같거나 역전이면 발사 의미 없음 — 누적 발사 양산 차단 (04/20 TIA 5건 다발 패턴).
-                _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
                 _a_ok = (_tr_opp_slots + 1) < _sig_side_slots
                 if _tr_opp_slots < MAX_MR_PER_SIDE and _a_ok:
                     _tr_best_sym = None
@@ -1103,6 +1112,11 @@ def plan_open(
         # ★ V10.27d: E30 슬롯 카운터 증가 (루프 내 중복 방지)
         if entry_type_tag == "15mE30":
             _active_e30 += 1
+        # ★ V10.31k: 같은 틱 내 MR intent 카운터 증가 — 다음 심볼 슬롯 체크에 반영
+        if trigger_side == "buy":
+            _tick_new_long += 1
+        else:
+            _tick_new_short += 1
 
         # ★ V10.29e: TREND COMPANION — MR 진입 성공 시 추세 심볼 동시 진입
         # (_trend_signal_side는 루프 상단에서 이미 계산됨)
@@ -1111,6 +1125,9 @@ def plan_open(
             _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
             _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
             _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
+            # ★ V10.31k: 같은 틱 내 새 MR intent 슬롯 반영 (race condition 방지)
+            _tr_opp_slots += (_tick_new_short if _tr_opp_side == "sell" else _tick_new_long)
+            _sig_side_slots += (_tick_new_long if _trend_signal_side == "buy" else _tick_new_short)
             _tr_entered = {i.symbol for i in intents}
 
             # ★ V10.31i: COMP는 스큐 예방 목적 (주 수입원 아님).
@@ -1289,6 +1306,23 @@ def plan_open(
             print(f"[TREND_SKIP] {symbol} {trigger_side} → 시그널없음({','.join(_ts_reasons) or 'N/A'})")
 
     # ★ V10.29e: TREND_NOSLOT — 루프 종료 후 최고 score 1개만 발사
+    if _noslot_best:
+        _ns = _noslot_best
+        # ★ V10.31k: 최종 슬롯 재체크 — 루프 중 MR 진입으로 slot 도달했을 수 있음
+        _final_slots = count_slots(st, role_filter="CORE_MR")
+        _final_long  = _final_slots.risk_long  + _tick_new_long
+        _final_short = _final_slots.risk_short + _tick_new_short
+        _ns_side_full = ((_ns["side"] == "buy"  and _final_long  >= MAX_MR_PER_SIDE) or
+                         (_ns["side"] == "sell" and _final_short >= MAX_MR_PER_SIDE))
+        if _ns_side_full:
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("NOSLOT_FINAL_BLOCK",
+                           f"{_ns['sym']} {_ns['side']} long={_final_long} short={_final_short} (발사 직전 풀)")
+            except Exception: pass
+            print(f"[NOSLOT_FINAL_BLOCK] {_ns['sym']} {_ns['side']} "
+                  f"long={_final_long} short={_final_short} (발사 직전 슬롯 풀 차단)")
+            _noslot_best = None
     if _noslot_best:
         _ns = _noslot_best
         # ★ V10.31b: score 1.0~2.0 필터
@@ -2377,6 +2411,265 @@ def plan_t3_3h_cut_trend(snapshot: "MarketSnapshot", st: Dict,
     return intents
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ★ V10.31k: Portfolio TP (Peak Trail + Tier Gate, J+K 조합)
+# ═══════════════════════════════════════════════════════════════════
+def _ptp_get_drop_thresh(peak_pct: float) -> float:
+    """V10.31k: Tiered drop 임계 — peak 높을수록 drop 허용폭 증가."""
+    from v9.config import PTP_DROP_BY_PEAK
+    for peak_min, drop_pct in PTP_DROP_BY_PEAK:
+        if peak_pct >= peak_min:
+            return drop_pct
+    return 999.0  # peak < 1% → 사실상 미발동
+
+
+def _ptp_session_date_kst(now_ts: float) -> str:
+    """일일 세션 날짜 — ★ KST 09:00 (UTC 00:00) 기준.
+    
+    텔레그램 일일 수익률 리셋 시각과 통일 (_daily_pnl_report).
+    PTP_SESSION_TZ_OFFSET_SEC = 0 → UTC 자정 기준 = KST 09:00 기준.
+    """
+    from v9.config import PTP_SESSION_TZ_OFFSET_SEC
+    import time as _t
+    return _t.strftime("%Y-%m-%d", _t.gmtime(now_ts + PTP_SESSION_TZ_OFFSET_SEC))
+
+
+def _ptp_update_state(system_state: Dict, current_balance: float,
+                      st: Dict, now_ts: float) -> bool:
+    """PTP 상태 관리 — peak 추적 + 트리거 판정.
+    
+    Returns:
+        True: PTP 활성 (plan_portfolio_tp 실행 필요)
+        False: 미활성
+    """
+    from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
+    
+    # 1) KST 자정 세션 리셋
+    today_kst = _ptp_session_date_kst(now_ts)
+    if system_state.get("_ptp_session_date") != today_kst:
+        system_state["_ptp_session_date"] = today_kst
+        system_state["_ptp_session_start"] = current_balance
+        system_state["_ptp_peak_balance"] = current_balance
+        # 진행 중 상태 정리
+        system_state.pop("_ptp_trigger_ts", None)
+        system_state.pop("_ptp_last_step", None)
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system("PTP_SESSION_RESET",
+                       f"date={today_kst} start=${current_balance:.2f}")
+        except Exception:
+            pass
+    
+    session_start = float(system_state.get("_ptp_session_start", current_balance) or current_balance)
+    if session_start <= 0:
+        return False
+    
+    peak = float(system_state.get("_ptp_peak_balance", current_balance) or current_balance)
+    
+    # 2) Peak 갱신
+    if current_balance > peak:
+        system_state["_ptp_peak_balance"] = current_balance
+        peak = current_balance
+    
+    # 3) 이미 트리거 중이면 True 반환 (step 진행)
+    if system_state.get("_ptp_trigger_ts"):
+        return True
+    
+    # 4) Peak arm (J 조건): peak_gain ≥ 1%
+    peak_gain_pct = (peak - session_start) / session_start * 100.0
+    if peak_gain_pct < PTP_PEAK_TRIG_PCT:
+        return False
+    
+    # 5) Drop 조건 (J: tiered)
+    drop_pct = (peak - current_balance) / session_start * 100.0
+    drop_thresh = _ptp_get_drop_thresh(peak_gain_pct)
+    if drop_pct < drop_thresh:
+        return False
+    
+    # 6) Tier gate (K): avg_dca_level ≥ 1.5
+    tiers = []
+    for _sym_p, _sym_pp in _pos_items(st):
+        if _sym_pp.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                                    "INSURANCE_SH", "CORE_HEDGE"):
+            continue
+        tier = int(_sym_pp.get("dca_level", 1) or 1)
+        tiers.append(tier)
+    
+    if not tiers:
+        return False  # 포지션 없으면 발동 불필요
+    
+    avg_tier = sum(tiers) / len(tiers)
+    if avg_tier < PTP_AVG_TIER_GATE:
+        # 안정 구간 (T1 대부분) — tier 리셋 불필요
+        return False
+    
+    # 7) 트리거 확정
+    system_state["_ptp_trigger_ts"] = now_ts
+    system_state["_ptp_last_step"] = -1
+    try:
+        from v9.logging.logger_csv import log_system
+        log_system("PTP_TRIGGER",
+                   f"peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
+                   f"avg_tier={avg_tier:.2f} bal=${current_balance:.2f} "
+                   f"pos={len(tiers)}")
+        print(f"[PTP_TRIGGER] peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
+              f"avg_tier={avg_tier:.2f} positions={len(tiers)}")
+    except Exception:
+        pass
+    return True
+
+
+def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
+                       system_state: Dict) -> List[Intent]:
+    """★ V10.31k: Portfolio TP 단계적 청산.
+    
+    트리거 조건 (J+K):
+      (J-1) peak_gain ≥ 1%
+      (J-2) drop ≥ f(peak) (tiered 0.3/0.4/0.5%p)
+      (K)   avg_dca_level ≥ 1.5 (위험 축적 상태)
+    
+    단계 (T3_3H 패턴):
+      step 0 (0-5min):  +0.20% limit
+      step 1 (5-10min): +0.15% (이전 취소+재배치)
+      step 2 (10-15min): +0.10%
+      step 3 (15min+):  시장가 강제
+    
+    자연 쿨다운: step 3 완료 후 _session_start = current_balance
+    → 또 1% 쌓여야 재발동. 명시 쿨다운 불필요.
+    """
+    import time as _time
+    intents: List[Intent] = []
+    now_ts = _time.time()
+    
+    # 상태 업데이트 + 트리거 판정
+    current_balance = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+    if current_balance <= 0:
+        return []
+    
+    if not _ptp_update_state(system_state, current_balance, st, now_ts):
+        return []
+    
+    # 단계 진행
+    trigger_ts = float(system_state["_ptp_trigger_ts"])
+    elapsed = now_ts - trigger_ts
+    
+    from v9.config import PTP_STEP_INTERVAL_SEC, PTP_PREMIUMS_BY_STEP
+    
+    T_STEP0 = PTP_STEP_INTERVAL_SEC          # 5min
+    T_STEP1 = PTP_STEP_INTERVAL_SEC * 2      # 10min
+    T_STEP2 = PTP_STEP_INTERVAL_SEC * 3      # 15min
+    
+    if elapsed < T_STEP0:
+        cur_step = 0
+        premium = PTP_PREMIUMS_BY_STEP.get(0, 0.002)
+    elif elapsed < T_STEP1:
+        cur_step = 1
+        premium = PTP_PREMIUMS_BY_STEP.get(1, 0.0015)
+    elif elapsed < T_STEP2:
+        cur_step = 2
+        premium = PTP_PREMIUMS_BY_STEP.get(2, 0.001)
+    else:
+        cur_step = 3
+        premium = 0.0
+    
+    last_step = int(system_state.get("_ptp_last_step", -1))
+    if cur_step <= last_step:
+        return []
+    
+    # 이전 단계 PTP limit 취소 (step 1~3)
+    if cur_step >= 1:
+        try:
+            from v9.execution.order_router import get_pending_limits
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _cancelled = 0
+            for _pl_oid, _pl_info in list(get_pending_limits().items()):
+                if _pl_info.get("is_ptp_limit"):
+                    _TRIM_CANCEL_QUEUE.append({
+                        "sym": _pl_info.get("sym", ""), "oid": _pl_oid,
+                    })
+                    _cancelled += 1
+            if _cancelled > 0:
+                print(f"[PTP] step {cur_step} 이전 limit {_cancelled}건 취소 예약")
+        except Exception as _ce:
+            print(f"[PTP] 이전 limit 취소 실패(무시): {_ce}")
+    
+    # 전 포지션 intent 생성 (BC/CB/HEDGE 계열 제외)
+    for symbol, p in _pos_items(st):
+        if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
+                             "INSURANCE_SH", "CORE_HEDGE"):
+            continue
+        amt = float(p.get("amt", 0) or 0)
+        if amt <= 0:
+            continue
+        curr_p = float((snapshot.all_prices or {}).get(symbol, 0.0))
+        if curr_p <= 0:
+            continue
+        
+        is_long = p.get("side", "") == "buy"
+        
+        if cur_step < 3:
+            close_price = curr_p * (1 + premium) if is_long else curr_p * (1 - premium)
+            intent_type = IntentType.CLOSE
+            reason = f"PTP_S{cur_step}(+{premium*100:.2f}%)"
+            _meta = {
+                "is_ptp_limit": True,
+                "_expected_role": p.get("role", ""),
+            }
+        else:
+            close_price = curr_p
+            intent_type = IntentType.FORCE_CLOSE
+            reason = f"PTP_MKT"
+            _meta = {
+                "force_market": True,
+                "_expected_role": p.get("role", ""),
+            }
+        
+        # DCA 선주문 취소 (첫 step에서만)
+        if cur_step == 0:
+            for _dt, _di in list(p.get("dca_preorders", {}).items()):
+                if isinstance(_di, dict) and _di.get("oid"):
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": symbol, "oid": _di["oid"]})
+            p["dca_preorders"] = {}
+        
+        intents.append(Intent(
+            trace_id=_tid(),
+            intent_type=intent_type,
+            symbol=symbol,
+            side="sell" if is_long else "buy",
+            qty=amt,
+            price=close_price,
+            reason=reason,
+            metadata=_meta,
+        ))
+    
+    system_state["_ptp_last_step"] = cur_step
+    
+    # step 3 완료: 세션 리셋 (자연 쿨다운)
+    if cur_step == 3:
+        system_state["_ptp_session_start"] = current_balance  # 새 시작점
+        system_state["_ptp_peak_balance"] = current_balance
+        system_state.pop("_ptp_trigger_ts", None)
+        system_state.pop("_ptp_last_step", None)
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system("PTP_COMPLETE",
+                       f"bal=${current_balance:.2f} positions_closed={len(intents)}")
+            print(f"[PTP] 완료 — 세션 리셋 bal=${current_balance:.2f}")
+        except Exception:
+            pass
+    else:
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system(f"PTP_S{cur_step}",
+                       f"premium={premium*100:.2f}% positions={len(intents)}")
+            print(f"[PTP_S{cur_step}] +{premium*100:.2f}% limit × {len(intents)} positions")
+        except Exception:
+            pass
+    
+    return intents
+
+
 def generate_all_intents(
     snapshot: MarketSnapshot,
     st: Dict,
@@ -2410,6 +2703,20 @@ def generate_all_intents(
     # if _pmc_intents:
     #     intents += _pmc_intents
     #     return intents  # Phase 발동 시 다른 intent 생성 차단
+
+    # ★ V10.31k: Portfolio TP (J안 — peak trail + tiered drop)
+    # peak ≥ 1% + drop ≥ f(peak) (0.3/0.4/0.5%p tiered) → 전체 단계적 청산
+    # K gate(avg_tier) 비활성 — config PTP_AVG_TIER_GATE=0.0
+    _ptp_intents = plan_portfolio_tp(snapshot, st, system_state)
+    if _ptp_intents:
+        intents += _ptp_intents
+        _ptp_syms = {i.symbol for i in _ptp_intents}
+        # PTP 활성 시 다른 intent 생성 차단 (중복 방지)
+        for _i in _ptp_intents:
+            if _i.metadata is None:
+                _i.metadata = {}
+            _i.metadata["snap_ts"] = _snap_ts
+        return intents
 
     # ★ V10.31f: T3 8h 컷 (MR only, V10.31j에서 조건 추가)
     _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)

@@ -110,6 +110,10 @@ def _register_pending_limit(trace_id, sym, side, qty, price, order_id, tag, inte
         "is_pre_market_limit": _meta.get("is_pre_market_limit", False),
         # ★ V10.31f: T3 8h컷 limit 재배치 추적용
         "is_t3_8h_limit": _meta.get("is_t3_8h_limit", False),
+        # ★ V10.31j: T3 3h컷 TREND 전용 limit 재배치 추적용
+        "is_t3_3h_limit": _meta.get("is_t3_3h_limit", False),
+        # ★ V10.31k: Portfolio TP limit 재배치 추적용 (step별 취소+재배치)
+        "is_ptp_limit": _meta.get("is_ptp_limit", False),
     }
     print(f"[order_router] PENDING_LIMIT registered: {sym} {side} {qty}@{price} oid={order_id}")
 

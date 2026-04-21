@@ -117,6 +117,44 @@ def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
         return T3_DEF_M5_TRIM_THRESH
     return TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
 
+# ★ V10.31k: Portfolio TP (Peak Trail + Tiered Drop, J안)
+# peak ≥ 1% 도달 후 drop 감지 시 단계적 청산
+# 목적: 횡보 수익 확정 + tier 리셋으로 추세 전환 방어
+# 사용자 결정: K gate(avg_tier) 제외 — 단순 J안 (peak trail + tiered drop)만
+PTP_PEAK_TRIG_PCT         = 1.0   # peak gain 임계 %
+PTP_AVG_TIER_GATE         = 0.0   # ★ V10.31k: 0.0 → 모든 포지션 허용 (K gate 무효화, J안 단독)
+# Tiered drop — peak 높을수록 drop 허용폭 증가 (상승 여유)
+PTP_DROP_BY_PEAK = [
+    (2.0, 0.5),   # peak ≥ 2.0% → drop 0.5%p
+    (1.5, 0.4),   # peak ≥ 1.5% → drop 0.4%p
+    (1.0, 0.3),   # peak ≥ 1.0% → drop 0.3%p
+]
+
+def _ptp_get_drop_thresh(peak_gain_pct: float):
+    """★ V10.31k: Peak 기반 tiered drop 임계 (%p 단위).
+    
+    peak_gain_pct: % 단위 (예: 1.5 = 1.5%)
+    반환: %p 단위 drop 임계 (예: 0.4 = 0.4%p)
+    peak < PTP_PEAK_TRIG_PCT → None (미arming)
+    """
+    for p_thresh, d_thresh in PTP_DROP_BY_PEAK:
+        if peak_gain_pct >= p_thresh:
+            return d_thresh
+    return None
+
+# 단계적 청산 (V10.31j T3_3H 패턴)
+PTP_STEP_INTERVAL_SEC     = 300   # 5분 간격
+PTP_PREMIUMS_BY_STEP      = {
+    0: 0.0020,  # +0.20%
+    1: 0.0015,  # +0.15%
+    2: 0.0010,  # +0.10%
+    # step 3: 시장가 (premium=0)
+}
+# 일일 세션 경계 — ★ KST 09:00 (UTC 00:00) 통일
+# - 텔레그램 일일 수익률 리포트와 동일한 기준 (_daily_pnl_report)
+# - 거래소 펀딩 정산 주기와도 정렬
+PTP_SESSION_TZ_OFFSET_SEC = 0   # UTC 자정 = KST 09:00 — 텔레그램 일일 리셋 시각과 통일
+
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거
 DCA_COOLDOWN_SEC     = 0     # 레거시 호환용
