@@ -1725,11 +1725,39 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             p["tp1_price"] = avg_price
             p["trailing_on_time"] = now
             dca = int(p.get("dca_level", 1) or 1)
-            if pos_side == "buy":
+            # ★ V10.31n: 부분 체결도 log_trade — 텔레그램에 알림 보내는데 trades.csv 누락 버그
+            # 사용자 보고: "✅ XRP TP1 Limit +$2.76" 텔레그램은 왔는데 대시보드 미반영
+            # realizedPnl 우선, 없으면 self_pnl
+            _rpnl_part = float(info.get("_realized_pnl", 0) or 0)
+            if _rpnl_part != 0.0:
+                _pnl = _rpnl_part
+            elif pos_side == "buy":
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)
             _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
+            try:
+                from v9.logging.logger_csv import log_trade as _lt_part
+                _hold_part = now - float(p.get("time", now) or now)
+                _t1_pre_part = float(p.get("max_roi_by_tier", {}).get("1", 0.0) or 0.0)
+                _lt_part(
+                    trace_id=info["trace_id"], symbol=sym, side=pos_side,
+                    ep=old_ep, exit_price=avg_price, amt=filled_qty,
+                    pnl_usdt=_pnl, roi_pct=_roi,
+                    dca_level=dca,
+                    hold_sec=_hold_part, reason="TP1_LIMIT",  # 부분 체결 (TP1_LIMIT_FULL과 구분)
+                    hedge_mode=bool(p.get("hedge_mode", False)),
+                    was_hedge=bool(p.get("was_hedge", False)),
+                    max_roi_seen=float(p.get("max_roi_seen", 0) or 0),
+                    entry_type=str(p.get("entry_type", "MR") or "MR"),
+                    role=str(p.get("role", "") or ""),
+                    source_sym=str(p.get("source_sym", "") or ""),
+                    fee_usdt=float(info.get("_commission", 0) or 0),
+                    t1_max_roi_pre_dca=_t1_pre_part,
+                    worst_roi_seen=float(p.get("worst_roi", 0) or 0),
+                )
+            except Exception as _lt_part_err:
+                print(f"[TP1_PART] log_trade 실패(무시): {_lt_part_err}")
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
                   f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                   f"→ trailing(잔량={p['amt']:.1f})")
