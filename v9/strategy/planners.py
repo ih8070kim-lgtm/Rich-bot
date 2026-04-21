@@ -2493,8 +2493,10 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
     from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
     
     # 1) KST 09:00 (UTC 00:00) 세션 경계 + ★ V10.31l 재시작 시 복원
+    # ★ V10.31m: 강제 복원 플래그 — 같은 날짜 안에 V10.31l 첫 가동 시 복원 트리거
     today_kst = _ptp_session_date_kst(now_ts)
-    if system_state.get("_ptp_session_date") != today_kst:
+    _force_restore = not system_state.get("_ptp_v31l_first_run_done")
+    if (system_state.get("_ptp_session_date") != today_kst) or _force_restore:
         # ★ V10.31l: balance.csv에서 오늘 UTC 00:00 이후 start/peak 복원
         # 봇 재시작 시에도 "오늘 KST 09:00 대비 peak"를 연속 추적
         utc_day_start = int(now_ts // 86400) * 86400
@@ -2527,6 +2529,8 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
         # 진행 중 상태 정리
         system_state.pop("_ptp_trigger_ts", None)
         system_state.pop("_ptp_last_step", None)
+        # ★ V10.31m: 강제 복원 1회 마커 세팅 (이후엔 자정 전환 시에만 리셋)
+        system_state["_ptp_v31l_first_run_done"] = True
     
     session_start = float(system_state.get("_ptp_session_start", current_balance) or current_balance)
     if session_start <= 0:
