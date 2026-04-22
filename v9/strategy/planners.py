@@ -515,8 +515,12 @@ def plan_open(
     # ★ Python UnboundLocalError 방지: 루프 안에서 재할당되는 변수 미리 초기화
     total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 노셔널 차감
 
-    # ═══ V10.29d: PENDING TREND_COMP 발사 (MR fill 확인 후) ═══
-    _ptc = system_state.get("_pending_trend_comp")
+    # ═══ V10.31u: PENDING HEDGE_COMP 발사 (MR fill 확인 후) ═══
+    # V10.31u: TREND_COMP 제거 → 동일 심볼 반대 방향 CORE_HEDGE로 교체
+    # 기존 TREND_COMP: 다른 심볼 반대 방향 추세 심볼 (-$30 순손실, 승률 낮음)
+    # 변경 HEDGE_COMP: 동일 심볼 반대 방향 (HEDGE_SIM 결과 100% 승률 재현 목표)
+    # 실측 04-21~22 HEDGE_SIM 13건 +$113 추정 vs TREND_COMP 실전 -$30
+    _ptc = system_state.get("_pending_hedge_comp") or system_state.get("_pending_trend_comp")
     if _ptc and isinstance(_ptc, dict):
         _ptc_age = time.time() - float(_ptc.get("ts", 0) or 0)
         _ptc_mr_sym = _ptc.get("mr_symbol", "")
@@ -532,15 +536,16 @@ def plan_open(
 
         if _ptc_age > 300:
             # 5분 초과 → 만료
+            system_state.pop("_pending_hedge_comp", None)
             system_state.pop("_pending_trend_comp", None)
         elif _ptc_mr_filled:
-            # MR fill 확인 → companion 발사
+            # MR fill 확인 → HEDGE_COMP 발사 (동일 심볼 반대 방향)
             _ptc_sym = _ptc["symbol"]
             _ptc_side = _ptc["side"]
             _ptc_cp = float((snapshot.all_prices or {}).get(_ptc_sym, _ptc.get("price", 0)))
             _ptc_qty = _ptc.get("qty", 0)
             if _ptc_cp > 0:
-                _ptc_qty = (_ptc_qty * _ptc.get("price", _ptc_cp)) / _ptc_cp  # 현재가 기준 재계산
+                _ptc_qty = (_ptc_qty * _ptc.get("price", _ptc_cp)) / _ptc_cp
             if _ptc_qty > 0 and _ptc_cp > 0:
                 intents.append(Intent(
                     trace_id=_tid(),
@@ -549,20 +554,26 @@ def plan_open(
                     side=_ptc_side,
                     qty=_ptc_qty,
                     price=_ptc_cp,
-                    reason=f"TREND_COMP(sig={_ptc_mr_sym},score={_ptc.get('score',0):.1f})",
+                    reason=f"HEDGE_COMP(mr={_ptc_mr_sym})",
                     metadata={
                         "atr": 0,
                         "dca_targets": _ptc.get("dca_targets", []),
                         "positionSide": "LONG" if _ptc_side == "buy" else "SHORT",
+                        # ★ V10.31u: entry_type=TREND → T3_3H 시간컷 적용 (3~4h 정리)
                         "entry_type": "TREND",
-                        "role": "CORE_MR",
+                        # ★ V10.31u: CORE_MR_HEDGE role — 기존 CORE_HEDGE와 구분
+                        # 기존 CORE_HEDGE는 스큐 기반 자동 헷지 전용 (HEDGE 계열 가드 적용)
+                        # CORE_MR_HEDGE는 MR과 동일 DCA/TP1/SL 로직, 다만 다른 이름으로 구분
+                        # slot_manager에서 CORE_MR/CORE_BREAKOUT만 MR 슬롯 카운트 → CORE_MR_HEDGE 별도
+                        "role": "CORE_MR_HEDGE",
                         "locked_regime": _ptc.get("regime", "LOW"),
                     },
                 ))
-                print(f"[TREND_FIRE] {_ptc_sym} {_ptc_side} ← MR {_ptc_mr_sym} filled "
-                      f"(delay={_ptc_age:.0f}s)")
+                print(f"[HEDGE_FIRE] {_ptc_sym} {_ptc_side} (동일 심볼 반대방향) "
+                      f"← MR {_ptc_mr_sym} filled (delay={_ptc_age:.0f}s)")
+            system_state.pop("_pending_hedge_comp", None)
             system_state.pop("_pending_trend_comp", None)
-    # ═══ END PENDING TREND_COMP ═══
+    # ═══ END PENDING HEDGE_COMP ═══
 
     # ── stale pending_nextbar 정리 (재시작 후 TTL 초과 엔트리) ────
     pending_map = system_state.setdefault("open_pending_nextbar", {})
@@ -1126,193 +1137,49 @@ def plan_open(
         else:
             _tick_new_short += 1
 
-        # ★ V10.29e: TREND COMPANION — MR 진입 성공 시 추세 심볼 동시 진입
-        # (_trend_signal_side는 루프 상단에서 이미 계산됨)
+        # ★ V10.31u: TREND_COMP → HEDGE_COMP (동일 심볼 반대방향)
+        # MR 진입 성공 시, 같은 심볼 반대 방향으로 CORE_HEDGE 동시 진입
+        # 이전 TREND_COMP (다른 심볼 선정)는 -$30 순손실, ARB -$50 등 큰 손실
+        # HEDGE_SIM 13건 +2% 모두 수익 → 실전 동일 로직 적용
+        # entry_type=TREND → T3_3H 시간컷 적용, role=CORE_HEDGE (반대방향 식별용)
 
         if _trend_signal_side:
-            _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
-            _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
-            _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
-            # ★ V10.31k: 같은 틱 내 새 MR intent 슬롯 반영 (race condition 방지)
-            _tr_opp_slots += (_tick_new_short if _tr_opp_side == "sell" else _tick_new_long)
-            _sig_side_slots += (_tick_new_long if _trend_signal_side == "buy" else _tick_new_short)
-            _tr_entered = {i.symbol for i in intents}
-
-            # ★ V10.31i: COMP는 스큐 예방 목적 (주 수입원 아님).
-            #   발사 후 opp < sig (MR보다 하나 이상 적게) 유지될 때만 의미.
-            #   균형/opp우세 상태에서는 발사 차단 — 신규 스큐 생성은 MR 전담.
-            #   수식: (opp+1) < (sig+1) = opp < sig
-            _comp_skew_ok = _tr_opp_slots < _sig_side_slots
-
-            if _tr_opp_slots >= MAX_MR_PER_SIDE:
-                print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
-            elif not _comp_skew_ok:
-                # ★ V10.31i: 스큐 예방 조건 미충족 — 5분 1회 cooldown 로그
-                _akey = f"COMP_SKIP_SKEW:{_trend_signal_side}_{_sig_side_slots}_{_tr_opp_slots}"
-                _now_t = time.time()
-                if _now_t - _TREND_SKIP_LOG_CD.get(_akey, 0) > _TREND_SKIP_LOG_CD_SEC:
-                    _TREND_SKIP_LOG_CD[_akey] = _now_t
-                    print(f"[COMP_SKIP_SKEW] sig={_trend_signal_side} sig_slots={_sig_side_slots} "
-                          f"opp_slots={_tr_opp_slots} (opp>=sig → 스큐 예방 조건 미충족)")
-                    try:
-                        from v9.logging.logger_csv import log_system
-                        log_system("COMP_SKIP_SKEW",
-                                   f"sig={_trend_signal_side} sig={_sig_side_slots} opp={_tr_opp_slots}")
-                    except Exception: pass
+            _hc_opp_side = "sell" if trigger_side == "buy" else "buy"
+            # ★ 같은 틱에서 이미 이 심볼 반대방향 intent 발사 예정이면 skip
+            _hc_sym_entered = {i.symbol + ":" + i.side for i in intents}
+            if symbol + ":" + _hc_opp_side in _hc_sym_entered:
+                pass  # 이미 발사됨
             else:
-                _tr_best_sym = None
-                _tr_best_score = 0
-                _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
-                _tr_prices = snapshot.all_prices or {}
-                _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
-                            for _, p in iter_positions(ss)
-                            if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
-                # ★ V10.31q: TREND_NOSLOT universe 필터링
-                # 버그: ohlcv_pool은 과거 universe 심볼도 캐시 → stale 데이터 진입
-                # 실측: LINK 04:37 universe 제외 후 04:42 진입 (3h51m stale)
-                # 수정: 현재 universe 풀 (side별)만 대상
-                _tr_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
-                _tr_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
-                _tr_allowed_pool = _tr_long_pool if _tr_opp_side == "buy" else _tr_short_pool
-
-                for _tr_sym in _tr_ohlcv_pool:
-                    if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
-                        continue
-                    if _tr_sym == "BTC/USDT":
-                        continue
-                    # ★ V10.31q: universe 풀 (side별) 외부 차단
-                    if _tr_sym not in _tr_allowed_pool:
-                        continue
-                    if _trend_cooldown.get(_tr_sym, 0) > now_ts:
-                        continue
-                    # ★ V10.31e: 심볼 실적 쿨다운
-                    try:
-                        from v9.strategy.symbol_stats import is_symbol_cooldown as _sc
-                        if _sc(_tr_sym):
-                            continue
-                    except Exception:
-                        pass
-                    # ★ V10.29d: corr 선체크 (risk_manager REJECT_CORR_LOW 방지)
-                    _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
-                    if _tr_corr < OPEN_CORR_MIN:
-                        continue
-                    _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
-                    _tr_15m = _tr_pool.get("15m", [])
-                    if len(_tr_15m) < 35:
-                        continue
-                    _tr_cp = float(_tr_prices.get(_tr_sym, 0))
-                    if _tr_cp <= 0:
-                        continue
-
-                    _tr_score = _calc_trend_score(_tr_15m)
-
-                    # ★ V10.29d: 브레이크아웃 companion — 추세 방향 진입
-                    # sell → 하락 추세 심볼 (score < -0.5)
-                    # buy  → 상승 추세 심볼 (score > +0.5)
-                    _TR_MIN = 0.5
-                    # ★ V10.30: score 상한 (과열 역전 방지)
-                    if abs(_tr_score) > TREND_MAX_SCORE:
-                        continue
-                    if _tr_opp_side == "sell" and _tr_score < -_TR_MIN:
-                        if abs(_tr_score) > _tr_best_score:
-                            _tr_best_score = abs(_tr_score)
-                            _tr_best_sym = _tr_sym
-                    elif _tr_opp_side == "buy" and _tr_score > _TR_MIN:
-                        if _tr_score > _tr_best_score:
-                            _tr_best_score = _tr_score
-                            _tr_best_sym = _tr_sym
-
-                if _tr_best_sym:
-                    # ★ V10.31b: score 1.0~2.0 필터 — 애매한 트렌드 스킵
-                    if 1.0 <= _tr_best_score < 2.0:
-                        # ★ V10.31c: 모듈 dict로 쿨다운 관리 (setattr 리셋 문제 fix)
-                        _skip_key = f"COMP:{_tr_best_sym}"
-                        _now_t = time.time()
-                        if _now_t - _TREND_SKIP_LOG_CD.get(_skip_key, 0) > _TREND_SKIP_LOG_CD_SEC:
-                            _TREND_SKIP_LOG_CD[_skip_key] = _now_t
-                            print(f"[TREND_SCORE_SKIP] COMP {_tr_best_sym} score={_tr_best_score:.1f} "
-                                  f"(1.0~2.0 필터) ← {symbol}")
-                            try:
-                                from v9.logging.logger_csv import log_system
-                                log_system("TREND_SCORE_SKIP", f"COMP {_tr_best_sym} score={_tr_best_score:.1f} sig={symbol}")
-                            except Exception: pass
-                    else:
-                        _tr_cp = float(_tr_prices.get(_tr_best_sym, 0))
-                        _tr_grid = total_cap / GRID_DIVISOR * LEVERAGE
-                        _tr_notional = _tr_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
-                        _tr_qty = _tr_notional / _tr_cp if _tr_cp > 0 and _tr_notional >= 10 else 0
-
-                        if _tr_qty > 0:
-                            _tr_dca_targets = _build_dca_targets(
-                                _tr_cp, _tr_opp_side, _tr_grid, regime=_btc_regime)
-                            _trend_cooldown[_tr_best_sym] = now_ts + TREND_COOLDOWN_SEC
-
-                            # ★ V10.29d: MR fill 확인 후 발사 — system_state에 저장
-                            # runner._process_pending_fill(OPEN)에서 꺼내서 실행
-                            system_state["_pending_trend_comp"] = {
-                                "symbol": _tr_best_sym,
-                                "side": _tr_opp_side,
-                                "qty": _tr_qty,
-                                "price": _tr_cp,
-                                "score": _tr_best_score,
-                                "mr_symbol": symbol,
-                                "dca_targets": _tr_dca_targets,
-                                "regime": _btc_regime,
-                                "ts": time.time(),
-                            }
-                            # ★ V10.31e-6: 중간형 DCA 시뮬 필드 확장
-                            # 기존 단순 ep 비교 → tier/DCA 트리거/평단 압축까지 시뮬
-                            # Q1 MR 심볼에 가상 / Q2 TREND 동일 notional / Q3 독립 종료
-                            # (DCA_WEIGHTS/DCA_ENTRY_ROI_BY_TIER/TP1_FIXED/HARD_SL_BY_TIER는
-                            #  module-level import — line 258~273)
-                            _hsim = system_state.setdefault("_hedge_sim", {})
-                            _hsim_opp = "buy" if trigger_side == "sell" else "sell"
-                            # T2/T3 noteional (T1 대비 비율)
-                            _dw_sum = sum(DCA_WEIGHTS) or 100
-                            _t2_mult = DCA_WEIGHTS[1] / DCA_WEIGHTS[0]
-                            _t3_mult = DCA_WEIGHTS[2] / DCA_WEIGHTS[0] if len(DCA_WEIGHTS) >= 3 else 0
-                            _hsim[f"{symbol}:{trigger_side}"] = {
-                                # 기본 식별
-                                "mr_sym": symbol,
-                                "mr_side": trigger_side,
-                                "sim_side": _hsim_opp,
-                                "trend_sym": _tr_best_sym,
-                                "trend_side": _tr_opp_side,
-                                # T1 진입 (curr_p = MR 시그널 발생 시점 MR 심볼 가격)
-                                "t1_ep": curr_p,
-                                "t1_notional": _tr_notional,  # TREND와 동일
-                                "t1_qty": _tr_notional / curr_p if curr_p > 0 else 0,
-                                # 중간형 DCA 시뮬 상태
-                                "tier": 1,
-                                "blended_ep": curr_p,
-                                "total_qty": _tr_notional / curr_p if curr_p > 0 else 0,
-                                "max_roi": 0.0,
-                                # 시뮬 파라미터 (실전 config 동일)
-                                "dca_trigger_roi": dict(DCA_ENTRY_ROI_BY_TIER),  # {2: -1.8, 3: -3.6}
-                                "t2_notional": _tr_notional * _t2_mult,
-                                "t3_notional": _tr_notional * _t3_mult,
-                                "tp1_thresh": TP1_FIXED.get(1, 2.0),
-                                "hard_sl_thresh": HARD_SL_BY_TIER.get(3, -10.0),
-                                # 시간
-                                "ts": time.time(),
-                                # 레거시 호환 (기존 필드 유지)
-                                "ep": curr_p, "side": _hsim_opp,
-                                "trend_ep": _tr_cp,
-                            }
-                            print(f"[HEDGE_SIM] 📊 {symbol} {_hsim_opp} ep={curr_p:.4f} "
-                                  f"notional=${_tr_notional:.0f} "
-                                  f"(vs TREND {_tr_best_sym} {_tr_opp_side} ep={_tr_cp:.4f})")
-                            try:
-                                log_system("HEDGE_SIM", f"{symbol} {_hsim_opp} ep={curr_p:.4f} vs {_tr_best_sym} {_tr_opp_side}")
-                            except Exception: pass
-                            print(f"[TREND] {_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} "
-                                  f"← sig {symbol} {_trend_signal_side} (PENDING→MR fill)")
+                # ★ 반대방향 슬롯 여유 체크 (MR + HEDGE 동일 슬롯 사용 — CORE로 함께 카운트)
+                _hc_opp_slots = _core_short if _hc_opp_side == "sell" else _core_long
+                _hc_opp_slots += (_tick_new_short if _hc_opp_side == "sell" else _tick_new_long)
+                if _hc_opp_slots >= MAX_MR_PER_SIDE:
+                    print(f"[HEDGE_SKIP] {symbol} {_hc_opp_side} 슬롯풀({_hc_opp_slots}/{MAX_MR_PER_SIDE})")
+                else:
+                    # ★ T1 notional — MR과 동일 크기
+                    _hc_grid = total_cap / GRID_DIVISOR * LEVERAGE
+                    _hc_notional = _hc_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                    _hc_qty = _hc_notional / curr_p if curr_p > 0 and _hc_notional >= 10 else 0
+                    if _hc_qty > 0:
+                        _hc_dca_targets = _build_dca_targets(
+                            curr_p, _hc_opp_side, _hc_grid, regime=_btc_regime)
+                        system_state["_pending_hedge_comp"] = {
+                            "symbol": symbol,   # ★ 동일 심볼
+                            "side": _hc_opp_side,
+                            "qty": _hc_qty,
+                            "price": curr_p,
+                            "mr_symbol": symbol,  # 자기 자신
+                            "dca_targets": _hc_dca_targets,
+                            "regime": _btc_regime,
+                            "ts": time.time(),
+                        }
+                        print(f"[HEDGE_COMP] 📊 {symbol} {_hc_opp_side} "
+                              f"notional=${_hc_notional:.0f} (MR {symbol} {trigger_side} 반대)")
                         try:
                             from v9.logging.logger_csv import log_system
-                            log_system("TREND", f"{_tr_best_sym} {_tr_opp_side} score={_tr_best_score:.1f} ← {symbol} PENDING")
+                            log_system("HEDGE_COMP", f"{symbol} {_hc_opp_side} "
+                                       f"notional={_hc_notional:.0f} ← MR {trigger_side}")
                         except Exception: pass
-                else:
-                    print(f"[TREND_SKIP] {symbol} {trigger_side} → COMP {_tr_opp_side} 후보없음(score미달/보유중/corr)")
         elif TREND_ENABLED:
             # ★ V10.29e: TREND 시그널 미감지 사유 로그
             _ts_reasons = []
@@ -1321,7 +1188,7 @@ def plan_open(
                 if not _mr_mtf_ok: _ts_reasons.append("MTF")
                 if not long_trig and not short_trig: _ts_reasons.append("ATR")
                 if not micro_long_ok and not micro_short_ok: _ts_reasons.append("MICRO")
-            print(f"[TREND_SKIP] {symbol} {trigger_side} → 시그널없음({','.join(_ts_reasons) or 'N/A'})")
+            print(f"[HEDGE_SKIP] {symbol} {trigger_side} → MR 시그널 없음({','.join(_ts_reasons) or 'N/A'})")
 
     # ★ V10.29e: TREND_NOSLOT — 루프 종료 후 최고 score 1개만 발사
     if _noslot_best:

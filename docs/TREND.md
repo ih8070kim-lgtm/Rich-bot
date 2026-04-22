@@ -17,6 +17,7 @@
 - ★ V10.31q: **NOSLOT/COMP universe 필터 필수** — `snapshot.global_targets_long/short` 외부 심볼은 후보 제외. ohlcv_pool은 stale 데이터 누적 (과거 universe 심볼 복사본), universe 제외된 LINK가 3h51m 후 TREND_NOSLOT으로 진입하는 버그 실측 → 04-22 LINK 04:42 케이스. side별 allowed_pool 매칭 필수 (_tr_opp_side=buy → LONG 풀, sell → SHORT 풀)
 - ★ V10.31q: TREND_NOSLOT 발사 로그에 `β={값}` 포함 (snapshot.beta_by_sym 조회). universe 갱신 시에도 log_system.csv `UNIV_LONG_BETA`/`UNIV_SHORT_BETA` 태그로 베타 영구 기록
 - ★ V10.31t: **p["time"] OPEN 시각 고정** — DCA 체결 시 덮어쓰지 않음. 이전엔 runner._apply_pending_fill과 strategy_core.apply_order_results에서 DCA 체결마다 `p["time"] = now`로 갱신 → T3_3H/T3_8H 시간컷 hold 계산이 "마지막 DCA 이후" 기준으로 작동하여 OPEN 기준 시간컷 의도가 무력화됨. 실측 ARB 04-22 12:43 OPEN → 16:48 T3 체결 시점에 time 덮어써져 18:03 HARD_SL -12% 도달까지 시간컷 미발동. 수정 후 OPEN 이후 경과 정확히 계산됨. last_dca_time은 별도 유지하여 trim/pending 로직은 영향 없음.
+- ★ V10.31u: **TREND_COMP → HEDGE_COMP 전환** — 기존 다른 심볼 반대 방향 추세 추종 제거, 동일 심볼 반대 방향 CORE_MR_HEDGE 동시 진입으로 교체. HEDGE_SIM 04-21~22 13건 100% 승률 +2% 결과를 실전화. MR 진입 성공 시 `_pending_hedge_comp`에 저장 → 다음 tick에서 반대 방향 OPEN intent 발사 (entry_type=TREND, role=CORE_MR_HEDGE). **role 분리**: 기존 CORE_HEDGE(hedge_core 스큐 전용, 비활성)와 구분 위해 CORE_MR_HEDGE로 명명. MR과 동일 DCA/TP1/HARD_SL/T3_3H 시간컷 로직 적용. 슬롯은 CORE_MR과 합쳐서 MAX_MR_PER_SIDE 체크 (slot_manager에 CORE_MR_HEDGE 포함). 바이낸스 hedge_mode positionSide로 동일 심볼 양방향 기술적 가능. 기존 TREND_COMP 심볼 검색 루프 (158줄) 완전 삭제. ARB 타입 큰 손실 원인 제거. 모든 HEDGE 계열 집합(_HEDGE_ROLES_SLOT/_HEDGE_ROLES_U/zombie/urgency 등)에 CORE_MR_HEDGE 없음 → 기존 HEDGE 로직 자동 건너뛰지 않고 MR 로직 적용받음.
 
 ## 수정 시 체크
 - [ ] NOSLOT이 intents.append 사용

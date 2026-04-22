@@ -55,7 +55,9 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
             # MR 슬롯 카운트에서 빠져 총량만 차지하는 문제 해결
             if role_filter:
                 _role = (p or {}).get("role", "CORE_MR")
-                if role_filter == "CORE_MR" and _role not in ("CORE_MR", "CORE_BREAKOUT"):
+                # ★ V10.31u: CORE_MR_HEDGE도 CORE_MR 슬롯 카운트에 포함
+                # (MR과 동일 로직 사용, 같은 심볼 반대 방향 헷지 = MR 슬롯 확장)
+                if role_filter == "CORE_MR" and _role not in ("CORE_MR", "CORE_BREAKOUT", "CORE_MR_HEDGE"):
                     continue
                 if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
                     continue
@@ -118,7 +120,8 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
                 continue
             # role_filter 적용
             if role_filter:
-                if role_filter == "CORE_MR" and _pl_role not in ("CORE_MR", "CORE_BREAKOUT"):
+                # ★ V10.31u: CORE_MR_HEDGE도 CORE_MR 슬롯 카운트에 포함
+                if role_filter == "CORE_MR" and _pl_role not in ("CORE_MR", "CORE_BREAKOUT", "CORE_MR_HEDGE"):
                     continue
                 if role_filter == "CORE_HEDGE" and _pl_role != "CORE_HEDGE":
                     continue
