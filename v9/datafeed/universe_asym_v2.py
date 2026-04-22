@@ -268,13 +268,27 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
             print(f"[Universe V10.15] {pool_name}: pool={len(pool_syms)} "
                   f"vol={len(active_syms)} filter={len(cands)} → {len(selected)}선발")
             print(f"[Universe V10.15] {pool_name} beta: {_sel_info}")
-            return selected
+            # ★ V10.31q: log_system.csv에 베타값 영구 기록 (추후 분석/추적용)
+            try:
+                from v9.logging.logger_csv import log_system
+                _beta_parts = [
+                    f"{x['sym'].replace('/USDT','')}:β{x['beta']:.2f}/c{x['corr_24h']:.2f}"
+                    for x in cands[:target_n]
+                ]
+                log_system(f"UNIV_{pool_name}_BETA", " ".join(_beta_parts))
+            except Exception:
+                pass
+            # ★ V10.31q: 베타 dict도 반환 (snapshot 저장 → TREND_NOSLOT 로그에 사용)
+            _beta_dict = {x["sym"]: x["beta"] for x in cands[:target_n]}
+            return selected, _beta_dict
 
         # ── Long / Short 파이프라인 실행 ──
-        new_long = await _pipeline(
+        # ★ V10.31q: _pipeline이 (selected, beta_dict) 튜플 반환
+        new_long, new_long_betas = await _pipeline(
             long_pool, "LONG", LONG_MIN_CORR, LONG_BETA_MIN, LONG_BETA_MAX, UNIVERSE_LONG_N)
-        new_short = await _pipeline(
+        new_short, new_short_betas = await _pipeline(
             short_pool, "SHORT", SHORT_MIN_CORR, SHORT_BETA_MIN, SHORT_BETA_MAX, UNIVERSE_SHORT_N)
+        _combined_betas = {**new_long_betas, **new_short_betas}
 
         if _excluded_log:
             show = _excluded_log[:8]
@@ -336,11 +350,13 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
         )
 
         from dataclasses import replace
+        # ★ V10.31q: beta_by_sym도 snapshot에 저장 (TREND_NOSLOT 로그용)
         return replace(
             snapshot,
             correlations=new_correlations,
             global_targets_long=final_long,
             global_targets_short=final_short,
+            beta_by_sym=_combined_betas,
         )
 
     except Exception as e:

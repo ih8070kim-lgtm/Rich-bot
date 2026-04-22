@@ -113,6 +113,8 @@ class MarketSnapshot:
     timestamp: float
     valid: bool
     all_fundings: dict = field(default_factory=dict)
+    # ★ V10.31q: universe 선정 시 계산된 심볼별 beta (TREND_NOSLOT 로그용)
+    beta_by_sym: dict = field(default_factory=dict)
 
 
 # ── Intent ──────────────────────────────────────────────────────

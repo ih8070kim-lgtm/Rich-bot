@@ -14,6 +14,8 @@
 - ★ V10.31i: NOSLOT A 조건(`opp+1 < sig`)과 COMP 조건(`opp < sig`)의 수식 차이 주의 — NOSLOT은 단독 발사(opp만 +1), COMP는 MR과 동시 발사(양쪽 +1)라 기준선 다름
 - ★ V10.31j: **TREND T3 3h 컷 (plan_t3_3h_cut_trend)** — hold≥3h부터 단계적 컷. MR T3는 기존 plan_t3_8h_cut(7h~8h) 유지
 - ★ V10.31j: TREND/MR 구분은 `entry_type == "TREND"` 조건. plan_t3_8h_cut에 MR only 조건 추가됨
+- ★ V10.31q: **NOSLOT/COMP universe 필터 필수** — `snapshot.global_targets_long/short` 외부 심볼은 후보 제외. ohlcv_pool은 stale 데이터 누적 (과거 universe 심볼 복사본), universe 제외된 LINK가 3h51m 후 TREND_NOSLOT으로 진입하는 버그 실측 → 04-22 LINK 04:42 케이스. side별 allowed_pool 매칭 필수 (_tr_opp_side=buy → LONG 풀, sell → SHORT 풀)
+- ★ V10.31q: TREND_NOSLOT 발사 로그에 `β={값}` 포함 (snapshot.beta_by_sym 조회). universe 갱신 시에도 log_system.csv `UNIV_LONG_BETA`/`UNIV_SHORT_BETA` 태그로 베타 영구 기록
 
 ## 수정 시 체크
 - [ ] NOSLOT이 intents.append 사용
@@ -28,6 +30,9 @@
 - [ ] ★ V10.31j: plan_t3_8h_cut에 `entry_type=="MR"` 체크 추가되어 있는지
 - [ ] ★ V10.31j: _t3_3h_step 필드가 _t3_8h_step과 별개인지 (중복 방지)
 - [ ] ★ V10.31j: is_t3_3h_limit 플래그가 is_t3_8h_limit과 별개인지
+- [ ] ★ V10.31q: TREND_NOSLOT 루프 앞에 `_tr_allowed_pool = long_pool if opp=="buy" else short_pool` 세팅되어 있는지
+- [ ] ★ V10.31q: TREND_COMPANION 루프에도 동일 universe 필터 적용되어 있는지 (2곳 모두)
+- [ ] ★ V10.31q: TREND_NOSLOT intent 발사 시 snapshot.beta_by_sym 조회해서 β 로그 남기는지
 
 ## T3 시간 컷 테이블 (★ V10.31j)
 ```

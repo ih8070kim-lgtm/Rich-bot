@@ -1,4 +1,4 @@
-# Trinity V10.31p — AI 제어 규칙
+# Trinity V10.31q — AI 제어 규칙
 
 ## 필수 작업 규칙
 - 함수 삭제/이동 전 `grep -rn "함수명" --include="*.py"` 실행하여 외부 참조 확인

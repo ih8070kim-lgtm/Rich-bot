@@ -918,10 +918,18 @@ def plan_open(
                                 for _, p in iter_positions(ss)
                                 if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
                     _tr_entered = {i.symbol for i in intents}
+                    # ★ V10.31q: TREND_COMP universe 필터링 (NOSLOT과 동일)
+                    _tr_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
+                    _tr_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
+                    _tr_allowed_pool = _tr_long_pool if _tr_opp_side == "buy" else _tr_short_pool
+
                     for _tr_sym in _tr_ohlcv_pool:
                         if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
                             continue
                         if _tr_sym == "BTC/USDT":
+                            continue
+                        # ★ V10.31q: universe 풀 (side별) 외부 차단
+                        if _tr_sym not in _tr_allowed_pool:
                             continue
                         if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                             continue
@@ -1159,11 +1167,21 @@ def plan_open(
                 _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
                             for _, p in iter_positions(ss)
                             if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
+                # ★ V10.31q: TREND_NOSLOT universe 필터링
+                # 버그: ohlcv_pool은 과거 universe 심볼도 캐시 → stale 데이터 진입
+                # 실측: LINK 04:37 universe 제외 후 04:42 진입 (3h51m stale)
+                # 수정: 현재 universe 풀 (side별)만 대상
+                _tr_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
+                _tr_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
+                _tr_allowed_pool = _tr_long_pool if _tr_opp_side == "buy" else _tr_short_pool
 
                 for _tr_sym in _tr_ohlcv_pool:
                     if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
                         continue
                     if _tr_sym == "BTC/USDT":
+                        continue
+                    # ★ V10.31q: universe 풀 (side별) 외부 차단
+                    if _tr_sym not in _tr_allowed_pool:
                         continue
                     if _trend_cooldown.get(_tr_sym, 0) > now_ts:
                         continue
@@ -1367,12 +1385,16 @@ def plan_open(
                     },
                 ))
                 _ns_corr = (getattr(snapshot, "correlations", None) or {}).get(_ns["sym"], 0)
+                # ★ V10.31q: beta_by_sym 조회
+                _ns_beta = (getattr(snapshot, "beta_by_sym", None) or {}).get(_ns["sym"], 0)
                 print(f"[TREND_NOSLOT] ⚡ {_ns['sym']} {_ns['side']} score={_ns['score']:.1f} "
-                      f"corr={_ns_corr:.2f} ← {_ns['sig_sym']} (최고score 발사)")
+                      f"corr={_ns_corr:.2f} β={_ns_beta:.2f} ← {_ns['sig_sym']} (최고score 발사)")
                 # ★ V10.31d-3: _open_dir_cd 세팅 제거
                 try:
                     from v9.logging.logger_csv import log_system
-                    log_system("TREND_NOSLOT", f"{_ns['sym']} {_ns['side']} score={_ns['score']:.1f} corr={_ns_corr:.2f} FIRE")
+                    log_system("TREND_NOSLOT",
+                               f"{_ns['sym']} {_ns['side']} score={_ns['score']:.1f} "
+                               f"corr={_ns_corr:.2f} β={_ns_beta:.2f} FIRE")
                 except Exception: pass
 
     return intents

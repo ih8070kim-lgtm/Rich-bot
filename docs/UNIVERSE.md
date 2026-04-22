@@ -48,7 +48,26 @@ NEUTRAL   (19): ETH, SOL, LINK, ADA, DOT, SUI, APT, NEAR, ATOM, UNI,
 폴링: asyncio.gather 병렬 (순차 대비 ~5배 빠름)
 버퍼: snapshot.ohlcv_pool = {심볼: {tf: [[ts,o,h,l,c,v], ...]}}
 주의: ohlcv_pool은 봉 개수만 정리되고 심볼은 유지 → universe에서 빠져도 stale 데이터 잔존
-      TREND가 이 잔존을 보고 universe 밖 진입할 수 있음 (V10.31h 인식)
+      ★ V10.31q fix: TREND_NOSLOT/COMPANION에 universe 필터 추가 (side별 allowed_pool 체크)
+      → 과거 universe 심볼의 stale ohlcv로 진입하는 케이스 원천 차단
+      (LINK 04-22 04:42 케이스 — 3h51m 전 제외된 심볼 진입 실측)
+```
+
+## Beta 계산 & 로그 (★ V10.31q)
+```
+계산: universe_asym_v2._pipeline — _beta = corr_24h × (alt_std / btc_std)
+      (24h 상관관계 × 변동성 비율)
+필터: LONG  BETA [0.80, 2.00]
+      SHORT BETA [0.50, 2.00]
+Snapshot 저장: MarketSnapshot.beta_by_sym: dict[str, float]
+               {"LINK/USDT": 1.45, "OP/USDT": 1.20, ...}
+Log:
+  log_system.csv (universe 갱신 시):
+    UNIV_LONG_BETA  LINK:β1.45/c0.86 ETH:β1.20/c0.92 ...
+    UNIV_SHORT_BETA OP:β1.35/c0.72 ...
+  log_system.csv (TREND_NOSLOT 발사 시):
+    TREND_NOSLOT  LINK/USDT buy score=2.7 corr=0.86 β=1.45 FIRE
+이력 분석: β 값과 실제 손익 상관관계 추적 가능 (후행지표 실전 검증용)
 ```
 
 ## 상관계수
@@ -80,3 +99,7 @@ _hourly_volumes             → beta_cycle.py 거래량 버퍼 (BC 볼륨 필터
 - [ ] OHLCV 병렬 풀링이 유지되는지 (순차로 바꾸면 틱 시간 5배 증가)
 - [ ] LONG_ONLY/SHORT_ONLY/NEUTRAL 3집합 중복 0건 (V10.31h 검증 완료)
 - [ ] MAJOR_UNIVERSE = 합집합으로 자동 계산 (수동 정의 금지)
+- [ ] ★ V10.31q: _pipeline이 `(selected, beta_dict)` 튜플 반환 (호출부 2곳 unpacking)
+- [ ] ★ V10.31q: snapshot.beta_by_sym 필드가 MarketSnapshot dataclass에 정의되어 있는지
+- [ ] ★ V10.31q: replace()에 `beta_by_sym=_combined_betas` 포함되어 있는지
+- [ ] ★ V10.31q: TREND_NOSLOT/COMP 루프가 `_tr_allowed_pool`로 universe 필터링하는지
