@@ -62,3 +62,30 @@ T1 TP trail과 T2+ TRIM trail과 TRAIL_ON 모두 동일 기준 사용.
 - [ ] HARD_SL_BY_TIER가 config와 일치하는지
 - [ ] plan_force_close 경로 (hedge_engine.py) 수정 시 DD_SHUTDOWN 동결 유지
 - [ ] DCA 체결 시 step=0, tp1_done=False, trailing_on_time=None 리셋
+
+## V10.31x: HIGH 레짐 임계 대폭 상향
+
+변경: 히스테리시스 임계 (상대 ATR 퍼센타일 기준)
+- LOW → HIGH:    0.70 → 0.90 (상위 30% → 10%)
+- NORMAL → HIGH: 0.73 → 0.92 (상위 27% → 8%)
+- HIGH 유지:     0.67 → 0.85 (상위 33% → 15%)
+
+배경:
+- 실측 04-21~22 HIGH 블록 6건 전부 BTC 1h 변동 ≤1%
+- "상대 ATR 높음"만으로 HIGH 분류 → 평상시 자주 발동
+- 사용자 의도: TRAIL은 "급등/급락 방어용 예외 도구"
+- 진짜 폭등 폭락 (상위 10% 극단)만 HIGH 분류 목표
+
+영향받는 로직 (HIGH 시만 활성):
+- trim_trail_active (trim → trail 전환)
+- URGENCY_DCA (긴급 물타기)
+- TP1 trailing 전환 (runner.py:778)
+
+추정 효과:
+- HIGH 빈도 14% → 1~2%
+- TRAIL 작동은 진짜 급변동 시에만 → 예외 도구로 정상화
+- URGENCY_DCA 발동 대폭 축소 (MR 봇에 오히려 유리)
+
+검증 로그:
+- `log_system("REGIME_CHANGE", ...)` 전환 시 점수/TF 퍼센타일 기록
+- 1~2주 누적 후 HIGH 실제 빈도 + 점수 분포 확인 가능

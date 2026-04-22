@@ -154,14 +154,19 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     # ★ v10.13b: BAD 제거 → 3단 레짐 (LOW / NORMAL / HIGH)
     # 백테스트: BAD 제거 시 $760→$1751 (+130%), MDD -6.5%
     # BAD 구간 = 변동성 극대 = MR 최적 사냥터 → 차단이 오히려 손해
+    # ★ V10.31x: HIGH 임계 대폭 상향 (0.70/0.73/0.67 → 0.90/0.92/0.85)
+    # 근거: 실측 HIGH 6블록 전부 BTC 1h 변동 ≤1% (평범한 변동도 HIGH 분류됨)
+    # 사용자 의도: "진짜 폭등 폭락만 HIGH" → 상위 10% 극단 변동만 분류
+    # 영향: trim_trail, URGENCY_DCA 등 HIGH 전용 로직이 진짜 예외 상황만 발동
+    # 빈도: 기존 14% → 1~2% 추정
     if _regime_last == "LOW":
-        new = "LOW" if _p < 0.60 else ("NORMAL" if _p < 0.70 else "HIGH")
+        new = "LOW" if _p < 0.60 else ("NORMAL" if _p < 0.90 else "HIGH")
     elif _regime_last == "NORMAL":
-        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.73 else "HIGH")
+        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.92 else "HIGH")
     elif _regime_last == "HIGH":
-        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.67 else "HIGH")
+        new = "LOW" if _p < 0.50 else ("NORMAL" if _p < 0.85 else "HIGH")
     else:
-        new = "LOW" if _p < 0.55 else ("NORMAL" if _p < 0.70 else "HIGH")
+        new = "LOW" if _p < 0.55 else ("NORMAL" if _p < 0.90 else "HIGH")
 
     # ★ v10.15: HIGH sticky — HIGH 진입 후 5분 유지
     global _high_enter_ts
@@ -177,6 +182,13 @@ def _btc_vol_regime(snapshot: "MarketSnapshot") -> str:
     if new != _regime_last:
         print(f"[REGIME] {_regime_last} → {new} "
               f"(score={_p:.3f} | 5m={pctl_5m:.2f} 15m={pctl_15m:.2f} 1h={pctl_1h:.2f})")
+        # ★ V10.31x: REGIME 전환 점수 파일 로깅 (임계 조정 효과 검증용)
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system("REGIME_CHANGE",
+                       f"{_regime_last}->{new} score={_p:.3f} "
+                       f"5m={pctl_5m:.2f} 15m={pctl_15m:.2f} 1h={pctl_1h:.2f}")
+        except Exception: pass
 
     # ★ BAD 모드 히스테리시스
     global _bad_regime_active
