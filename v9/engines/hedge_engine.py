@@ -84,6 +84,53 @@ def plan_force_close(
             force  = False
             reason = ""
 
+            # ★ V10.31s: BTC 대비 이탈률 관측 (로그 전용, 청산 미실행)
+            # 목적: 알트 독자 급등(숏 불리)/독자 하락(롱 불리) 패턴 데이터 수집
+            # 쌓은 데이터로 실제 손실 케이스와 상관 분석 → 임계 근거 확보
+            # 실측 ARB 04-22: BTC +0.20% 평이, ARB +3.84% (숏 불리) — 예측 불가했으나
+            #   이런 패턴이 얼마나 자주 일어나는지, 손실 케이스와 연관성 있는지 파악 필요
+            # 
+            # 로그 조건 (스팸 방지):
+            #   임계 |adverse_excess| ≥ 1.0% 이고 포지션별 5분 1회만 기록
+            # 
+            # 필드: sym side roi duration_min alt_pct btc_pct adverse_excess
+            _btc_price_now = float(getattr(snapshot, "btc_price", 0) or 0)
+            if _btc_price_now > 0:
+                _btc_entry = float(p.get("_btc_entry_price", 0) or 0)
+                _ep = float(p.get("ep", 0) or 0)
+                _entry_ts = float(p.get("time", 0) or 0)
+                # 진입 시점 BTC 가격 최초 1회만 저장 (90분 초과 시 재설정 안 함 — 전체 관측)
+                if _btc_entry == 0 and _btc_price_now > 0:
+                    p["_btc_entry_price"] = _btc_price_now
+                    _btc_entry = _btc_price_now
+                
+                # 이탈률 계산 (진입 시점 대비)
+                if _btc_entry > 0 and _ep > 0 and _entry_ts > 0:
+                    _alt_pct = (curr_p - _ep) / _ep * 100  # 알트 변화 %
+                    _btc_pct = (_btc_price_now - _btc_entry) / _btc_entry * 100
+                    # 봇 방향 기준 불리 이탈
+                    if is_long:
+                        # 롱: btc 상승(유리) - alt 상승(유리). 불리 = btc_pct - alt_pct 양수
+                        _adverse_excess = _btc_pct - _alt_pct
+                    else:
+                        # 숏: alt 하락(유리) - btc 하락(유리). 불리 = alt_pct - btc_pct 양수
+                        _adverse_excess = _alt_pct - _btc_pct
+                    
+                    _duration_min = (now - _entry_ts) / 60.0 if _entry_ts > 0 else 0
+                    # 로그 쿨다운 — 포지션별 5분 1회
+                    _last_log_ts = float(p.get("_btc_decouple_log_ts", 0) or 0)
+                    if abs(_adverse_excess) >= 1.0 and (now - _last_log_ts) >= 300 and _duration_min >= 15:
+                        p["_btc_decouple_log_ts"] = now
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("BTC_DECOUPLE_OBS",
+                                       f"{symbol} {p.get('side','')} roi={roi_pct:+.2f}% "
+                                       f"dur={_duration_min:.0f}min "
+                                       f"alt={_alt_pct:+.2f}% btc={_btc_pct:+.2f}% "
+                                       f"adverse={_adverse_excess:+.2f}%p")
+                        except Exception:
+                            pass
+
             # 잔량 정리
             _res_amt = float(p.get("amt", 0.0) or 0.0)
             _res_notional = _res_amt * curr_p
@@ -300,6 +347,29 @@ def plan_force_close(
                 # trim이 T2→T1 복귀 담당하므로 시간 기반 강제청산 불필요.
 
             if force:
+                # ★ V10.31s: 청산 시점 BTC 대비 이탈률 최종 기록 (관측용)
+                try:
+                    _btc_entry_log = float(p.get("_btc_entry_price", 0) or 0)
+                    _ep_log = float(p.get("ep", 0) or 0)
+                    _entry_ts_log = float(p.get("time", 0) or 0)
+                    _btc_now_log = float(getattr(snapshot, "btc_price", 0) or 0)
+                    if _btc_entry_log > 0 and _ep_log > 0 and _btc_now_log > 0 and _entry_ts_log > 0:
+                        _alt_p_close = (curr_p - _ep_log) / _ep_log * 100
+                        _btc_p_close = (_btc_now_log - _btc_entry_log) / _btc_entry_log * 100
+                        if is_long:
+                            _adv_close = _btc_p_close - _alt_p_close
+                        else:
+                            _adv_close = _alt_p_close - _btc_p_close
+                        _dur_close = (now - _entry_ts_log) / 60.0
+                        from v9.logging.logger_csv import log_system
+                        log_system("BTC_DECOUPLE_CLOSE",
+                                   f"{symbol} {p.get('side','')} roi={roi_pct:+.2f}% "
+                                   f"dur={_dur_close:.0f}min alt={_alt_p_close:+.2f}% "
+                                   f"btc={_btc_p_close:+.2f}% adverse={_adv_close:+.2f}%p "
+                                   f"reason={reason[:40]}")
+                except Exception:
+                    pass
+
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.FORCE_CLOSE,

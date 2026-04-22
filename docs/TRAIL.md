@@ -5,6 +5,33 @@
 - step < 1이면 trailing 진입 안 됨 — TP1 체결로 step=1 전환 필수
 - ★ V10.31b: TP1도 trail 방식 — tp1_preorder/tp1_limit_oid 없음
 - TP1 체결 시 max_roi_seen을 snapshot ROI로 덮어쓰면 안 됨 — 반드시 max(현재ROI, 기존max) 사용
+- ★ V10.31s: **BTC 대비 이탈률 관측 로그** — 청산 로직 아님, 데이터 수집용. 진입 시점 `_btc_entry_price` 저장하고, 매 tick마다 BTC 대비 alt 이탈률 계산. 임계 |adverse| ≥ 1.0%p + 포지션당 5분 쿨다운으로 `log_system.csv`에 `BTC_DECOUPLE_OBS` 태그 기록. FORCE_CLOSE 발생 시 `BTC_DECOUPLE_CLOSE` 태그로 최종 이탈률 기록. 목적: 실손실 케이스와 이탈률 상관 분석 → 임계 근거 확보 후 V10.32+에서 실제 청산 로직 판단.
+
+## BTC_DECOUPLE 관측 로그 (V10.31s)
+```
+정의:
+  adverse_excess = 봇 방향 기준 BTC 대비 불리 이탈률
+    숏 포지션: alt_pct - btc_pct (양수 = 알트가 BTC보다 상승=숏 불리)
+    롱 포지션: btc_pct - alt_pct (양수 = 알트가 BTC보다 하락=롱 불리)
+
+로그 조건 (OBS):
+  duration ≥ 15분 (초기 노이즈 제외)
+  |adverse_excess| ≥ 1.0%p
+  포지션당 5분 쿨다운 (스팸 방지)
+  필드: sym side roi dur alt_pct btc_pct adverse_excess
+
+로그 조건 (CLOSE):
+  FORCE_CLOSE 발생 시 최종 이탈률 무조건 기록
+  필드: sym side roi dur alt_pct btc_pct adverse_excess reason
+
+실측 ARB 04-22 청산 기록 예시:
+  BTC_DECOUPLE_CLOSE ARB/USDT sell roi=-12.00% dur=75min 
+    alt=+3.80% btc=+0.21% adverse=+3.59%p reason=T3_DEF_SL(...)
+
+분석 활용:
+  1주 데이터 축적 후 손실 크기 vs adverse 상관 분석
+  임계 결정 근거 확보 후 V10.32에서 실제 청산 조건 설정
+```
 
 ## Trail gap (V10.31b)
 ```
