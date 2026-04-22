@@ -1145,41 +1145,66 @@ def plan_open(
 
         if _trend_signal_side:
             _hc_opp_side = "sell" if trigger_side == "buy" else "buy"
-            # ★ 같은 틱에서 이미 이 심볼 반대방향 intent 발사 예정이면 skip
-            _hc_sym_entered = {i.symbol + ":" + i.side for i in intents}
-            if symbol + ":" + _hc_opp_side in _hc_sym_entered:
-                pass  # 이미 발사됨
+            # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼은 HEDGE 제외
+            # 예: XRP는 LONG_ONLY → sell HEDGE 금지 (펀딩/토크노믹스 제약)
+            #     FIL은 SHORT_ONLY → buy HEDGE 금지
+            # MR 단독 운용은 계속 유지 (plan_open에서 이미 방향 필터링 완료)
+            _hc_skip_whitelist = False
+            try:
+                from v9.config import LONG_ONLY_SYMBOLS as _LONG_ONLY, SHORT_ONLY_SYMBOLS as _SHORT_ONLY
+                if _hc_opp_side == "sell" and symbol in _LONG_ONLY:
+                    _hc_skip_whitelist = True
+                    print(f"[HEDGE_SKIP] {symbol} sell (LONG_ONLY 심볼 → HEDGE 제외)")
+                elif _hc_opp_side == "buy" and symbol in _SHORT_ONLY:
+                    _hc_skip_whitelist = True
+                    print(f"[HEDGE_SKIP] {symbol} buy (SHORT_ONLY 심볼 → HEDGE 제외)")
+                if _hc_skip_whitelist:
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("HEDGE_SKIP_WHITELIST",
+                                   f"{symbol} {_hc_opp_side} ← MR {trigger_side} (전용심볼)")
+                    except Exception: pass
+            except Exception:
+                pass
+
+            if _hc_skip_whitelist:
+                pass  # 전용심볼 → HEDGE 발사 안 함
             else:
-                # ★ 반대방향 슬롯 여유 체크 (MR + HEDGE 동일 슬롯 사용 — CORE로 함께 카운트)
-                _hc_opp_slots = _core_short if _hc_opp_side == "sell" else _core_long
-                _hc_opp_slots += (_tick_new_short if _hc_opp_side == "sell" else _tick_new_long)
-                if _hc_opp_slots >= MAX_MR_PER_SIDE:
-                    print(f"[HEDGE_SKIP] {symbol} {_hc_opp_side} 슬롯풀({_hc_opp_slots}/{MAX_MR_PER_SIDE})")
+                # ★ 같은 틱에서 이미 이 심볼 반대방향 intent 발사 예정이면 skip
+                _hc_sym_entered = {i.symbol + ":" + i.side for i in intents}
+                if symbol + ":" + _hc_opp_side in _hc_sym_entered:
+                    pass  # 이미 발사됨
                 else:
-                    # ★ T1 notional — MR과 동일 크기
-                    _hc_grid = total_cap / GRID_DIVISOR * LEVERAGE
-                    _hc_notional = _hc_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
-                    _hc_qty = _hc_notional / curr_p if curr_p > 0 and _hc_notional >= 10 else 0
-                    if _hc_qty > 0:
-                        _hc_dca_targets = _build_dca_targets(
-                            curr_p, _hc_opp_side, _hc_grid, regime=_btc_regime)
-                        system_state["_pending_hedge_comp"] = {
-                            "symbol": symbol,   # ★ 동일 심볼
-                            "side": _hc_opp_side,
-                            "qty": _hc_qty,
-                            "price": curr_p,
-                            "mr_symbol": symbol,  # 자기 자신
-                            "dca_targets": _hc_dca_targets,
-                            "regime": _btc_regime,
-                            "ts": time.time(),
-                        }
-                        print(f"[HEDGE_COMP] 📊 {symbol} {_hc_opp_side} "
-                              f"notional=${_hc_notional:.0f} (MR {symbol} {trigger_side} 반대)")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("HEDGE_COMP", f"{symbol} {_hc_opp_side} "
-                                       f"notional={_hc_notional:.0f} ← MR {trigger_side}")
-                        except Exception: pass
+                    # ★ 반대방향 슬롯 여유 체크 (MR + HEDGE 동일 슬롯 사용 — CORE로 함께 카운트)
+                    _hc_opp_slots = _core_short if _hc_opp_side == "sell" else _core_long
+                    _hc_opp_slots += (_tick_new_short if _hc_opp_side == "sell" else _tick_new_long)
+                    if _hc_opp_slots >= MAX_MR_PER_SIDE:
+                        print(f"[HEDGE_SKIP] {symbol} {_hc_opp_side} 슬롯풀({_hc_opp_slots}/{MAX_MR_PER_SIDE})")
+                    else:
+                        # ★ T1 notional — MR과 동일 크기
+                        _hc_grid = total_cap / GRID_DIVISOR * LEVERAGE
+                        _hc_notional = _hc_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                        _hc_qty = _hc_notional / curr_p if curr_p > 0 and _hc_notional >= 10 else 0
+                        if _hc_qty > 0:
+                            _hc_dca_targets = _build_dca_targets(
+                                curr_p, _hc_opp_side, _hc_grid, regime=_btc_regime)
+                            system_state["_pending_hedge_comp"] = {
+                                "symbol": symbol,   # ★ 동일 심볼
+                                "side": _hc_opp_side,
+                                "qty": _hc_qty,
+                                "price": curr_p,
+                                "mr_symbol": symbol,  # 자기 자신
+                                "dca_targets": _hc_dca_targets,
+                                "regime": _btc_regime,
+                                "ts": time.time(),
+                            }
+                            print(f"[HEDGE_COMP] 📊 {symbol} {_hc_opp_side} "
+                                  f"notional=${_hc_notional:.0f} (MR {symbol} {trigger_side} 반대)")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("HEDGE_COMP", f"{symbol} {_hc_opp_side} "
+                                           f"notional={_hc_notional:.0f} ← MR {trigger_side}")
+                            except Exception: pass
         elif TREND_ENABLED:
             # ★ V10.29e: TREND 시그널 미감지 사유 로그
             _ts_reasons = []
@@ -1224,6 +1249,30 @@ def plan_open(
                     log_system("TREND_SCORE_SKIP", f"NOSLOT {_ns['sym']} score={_ns['score']:.1f} sig={_ns['sig_sym']}")
                 except Exception: pass
             _noslot_best = None
+    if _noslot_best:
+        _ns = _noslot_best
+        # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼 보호 — universe 풀 필터 이후에도
+        # ohlcv_pool/sticky 영향으로 전용 심볼 진입 가능성 실측 (FIL buy, XRP sell 위반 실제 발생)
+        # universe pool 체크 외에 최종 발사 직전 방어선
+        try:
+            from v9.config import LONG_ONLY_SYMBOLS as _LONG_ONLY_NS, SHORT_ONLY_SYMBOLS as _SHORT_ONLY_NS
+            _ns_violate = False
+            if _ns["side"] == "sell" and _ns["sym"] in _LONG_ONLY_NS:
+                _ns_violate = True
+                _ns_why = "LONG_ONLY"
+            elif _ns["side"] == "buy" and _ns["sym"] in _SHORT_ONLY_NS:
+                _ns_violate = True
+                _ns_why = "SHORT_ONLY"
+            if _ns_violate:
+                print(f"[NOSLOT_WHITELIST_BLOCK] {_ns['sym']} {_ns['side']} ({_ns_why} 심볼 — 전용 제약)")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("NOSLOT_WHITELIST_BLOCK",
+                               f"{_ns['sym']} {_ns['side']} sig={_ns['sig_sym']} ({_ns_why})")
+                except Exception: pass
+                _noslot_best = None
+        except Exception:
+            pass
     if _noslot_best:
         _ns = _noslot_best
         _ns_prices = snapshot.all_prices or {}

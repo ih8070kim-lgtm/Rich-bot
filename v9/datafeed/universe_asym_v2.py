@@ -298,6 +298,9 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
         new_short = [s for s in new_short if s not in set(new_long)]
 
         # ══ Step 5: Sticky 안정화 ══
+        # ★ V10.31w: sticky 재진입 시에도 LONG_ONLY/SHORT_ONLY 필터 적용
+        # 이전엔 sticky로 재포함될 때 전용 심볼 필터 안 거쳐 위반 케이스 발생
+        # 실측: XRP sticky short → TREND_NOSLOT XRP sell (LONG_ONLY 위반)
         now = time.time()
         prev_long = list(getattr(snapshot, "global_targets_long", None) or [])
         prev_short = list(getattr(snapshot, "global_targets_short", None) or [])
@@ -307,11 +310,17 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
 
         for sym in prev_long:
             if sym not in final_long:
+                # ★ V10.31w: SHORT_ONLY 심볼이 sticky로 long pool에 남지 않도록
+                if sym in SHORT_ONLY_SYMBOLS:
+                    continue
                 added_ts = _sticky_long.get(sym, 0)
                 if added_ts > 0 and (now - added_ts) < UNIVERSE_STICKY_MIN_SEC:
                     final_long.append(sym)
         for sym in prev_short:
             if sym not in final_short:
+                # ★ V10.31w: LONG_ONLY 심볼이 sticky로 short pool에 남지 않도록
+                if sym in LONG_ONLY_SYMBOLS:
+                    continue
                 added_ts = _sticky_short.get(sym, 0)
                 if added_ts > 0 and (now - added_ts) < UNIVERSE_STICKY_MIN_SEC:
                     final_short.append(sym)

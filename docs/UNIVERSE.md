@@ -103,3 +103,24 @@ _hourly_volumes             → beta_cycle.py 거래량 버퍼 (BC 볼륨 필터
 - [ ] ★ V10.31q: snapshot.beta_by_sym 필드가 MarketSnapshot dataclass에 정의되어 있는지
 - [ ] ★ V10.31q: replace()에 `beta_by_sym=_combined_betas` 포함되어 있는지
 - [ ] ★ V10.31q: TREND_NOSLOT/COMP 루프가 `_tr_allowed_pool`로 universe 필터링하는지
+
+## V10.31w: LONG/SHORT ONLY 전용 심볼 보호 — 3중 방어
+
+실측 위반 케이스:
+- 04-22 05:17 FIL/USDT buy TREND_NOSLOT (FIL은 SHORT_ONLY)
+- 04-22 12:45 XRP/USDT sell TREND_NOSLOT (XRP는 LONG_ONLY)
+- 04-22 20:22 XRP/USDT sell HEDGE_COMP (XRP는 LONG_ONLY)
+
+근본 원인: universe sticky 로직이 전용심볼 필터 우회
+  → 과거 universe에 있던 심볼이 sticky 시간 내 유지
+  → 그 후 SHORT_ONLY/LONG_ONLY 규칙 위반해도 계속 pool에 있음
+  → TREND_NOSLOT/HEDGE_COMP가 pool 체크 통과 후 위반 진입
+
+방어선 (다중 체크):
+1. universe_asym_v2 sticky 재진입 시 LONG/SHORT ONLY 필터 적용 (근본 수정)
+2. TREND_NOSLOT 최종 발사 직전 NOSLOT_WHITELIST_BLOCK 체크
+3. HEDGE_COMP 발사 조건 추가 (V10.31w 이전부터 있었음)
+
+로그:
+- `NOSLOT_WHITELIST_BLOCK`: NOSLOT 발사 차단 (sym, side, sig_sym, 이유)
+- `HEDGE_SKIP_WHITELIST`: HEDGE_COMP 발사 차단 (sym, side, MR 반대)
