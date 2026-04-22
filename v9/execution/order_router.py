@@ -150,14 +150,25 @@ async def route_order(
     # ── v10.21: 라우팅 모드 결정 ──
     # TP1: 지정가 (수익 목표 도달 → 슬리피지 0)
     # TRAIL_ON/FORCE_CLOSE: 시장가 (급히 빠져야 → 즉시 체결)
+    # ★ V10.31p: T3_3H_S0~S2 / T3_8H_S0~S2 / is_ptp_limit / is_trim_limit도 LIMIT 보존
+    # 기존 버그: intent_type=CLOSE이면 무조건 시장가 → LIMIT 유리가격 의도 무효화
+    # 실측 증거: AVAX T3_3H_S0 price=9.280 LIMIT 의도, filled @9.322 시장가 → -2.29% 손실
     _meta_role = (intent.metadata or {}).get("role", "")
     _meta_entry = (intent.metadata or {}).get("entry_type", "")
+    _meta = intent.metadata or {}
+    _is_step_limit = (
+        bool(_meta.get("is_t3_3h_limit", False))
+        or bool(_meta.get("is_t3_8h_limit", False))
+        or bool(_meta.get("is_ptp_limit", False))
+        or bool(_meta.get("is_trim_limit", False))
+    )
     from v9.types import IntentType as _IT_route
     _force_market = (
         _is_reduce(intent) and intent.intent_type != _IT_route.TP1  # TP1 제외 — 지정가
-        and not bool((intent.metadata or {}).get("pre_market_limit", False))  # ★ V10.31b: 미장전 limit
+        and not bool(_meta.get("pre_market_limit", False))  # ★ V10.31b: 미장전 limit
+        and not _is_step_limit  # ★ V10.31p: 단계적 LIMIT도 제외
         or _meta_role in ("INSURANCE_SH", "CORE_HEDGE")
-        or bool((intent.metadata or {}).get("force_market", False))
+        or bool(_meta.get("force_market", False))
     )
     order_type = 'market' if (_force_market or not price) else 'limit'
 
