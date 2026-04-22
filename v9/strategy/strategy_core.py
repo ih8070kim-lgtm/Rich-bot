@@ -255,7 +255,8 @@ def apply_order_results(
                 tier        = meta.get("tier", p.get("dca_level", 1) + 1)
                 p["dca_level"]     = tier
                 p["last_dca_time"] = now
-                p["time"]          = now
+                # ★ V10.31t: p["time"] OPEN 시각 유지 — DCA 체결 시 덮어쓰지 않음
+                # (runner._apply_pending_fill 동일 수정, 시간컷 무력화 버그 해결)
                 p["dca_targets"]   = [
                     t for t in p.get("dca_targets", []) if t.get("tier") != tier
                 ]

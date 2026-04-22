@@ -1495,7 +1495,12 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["ep"] = total_cost / p["amt"] if p["amt"] > 0 else avg_price
         p["dca_level"] = tier
         p["last_dca_time"] = now
-        p["time"] = now
+        # ★ V10.31t: p["time"] OPEN 시각 유지 — DCA 체결 시 덮어쓰지 않음
+        # 이전 버그: DCA 체결마다 time 갱신되어 T3 시간컷(3h/8h) 무력화됨
+        # 실측 ARB 04-22: 12:43 OPEN → 16:48 T3 → time=16:48로 덮어써져 18:03 청산까지 시간컷 미발동
+        # 영향받는 기능: planners T3_3H/T3_8H 시간컷, hedge_engine BTC_DECOUPLE,
+        #                runner hold_sec 로그, status_writer hold_min
+        # 최근 상태 변경은 last_dca_time에 기록, time은 OPEN 전용
 
         # ★ v10.14: 사용된 tier를 dca_targets에서 제거
         p["dca_targets"] = [

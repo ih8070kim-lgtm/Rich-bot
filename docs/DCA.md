@@ -7,6 +7,7 @@
 - ★ V10.31c: **plan_dca 함수 자체도 삭제됨** (V10.30 호출 제거 후 함수 정의만 잔존하던 죽은 코드 276줄)
 - T4/T5 코드 잔존하나 DCA_WEIGHTS=[25,25,50] 3티어라 도달 불가 (죽은 코드, 무해)
 - ★ V10.31r: **_apply_pending_fill 중복 호출 방지 가드 필수** — order_id 기준 idempotency. `_APPLIED_FILL_OIDS` 모듈 전역 dict로 최근 1시간 처리된 oid 추적. `_manage_pending_limits` 5초 주기 + `remove_pending_limit` race condition으로 같은 체결이 2회 반영되는 버그 실측 (ARB T3 04-22 16:48:40 amt=13101.9 = 의도 2배). 다행히 `_sync_positions_with_exchange` (30초 주기)가 거래소 실제 qty로 보정해줘서 결과적으로 살아남았으나 중간 32초간 책 불일치. 가드로 원천 차단
+- ★ V10.31t: **DCA 체결 시 p["time"] 보존** — `_apply_pending_fill`와 `strategy_core.apply_order_results` 둘 다에서 DCA 체결 시 p["time"] = now 덮어쓰기 제거. p["time"]은 OPEN 시각 전용, last_dca_time은 별도 필드. 시간컷(T3_3H/T3_8H)이 OPEN 기준 hold로 올바르게 작동하도록 복원. 실측 ARB 04-22 12:43 OPEN → 12:58 T2 → 16:48 T3, 매번 time 덮어써져 18:03 HARD_SL 도달까지 시간컷 미발동 버그 확인 및 수정.
 
 ## DCA 경로 (V10.30)
 ```
