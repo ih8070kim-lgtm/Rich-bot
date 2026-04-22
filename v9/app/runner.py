@@ -1304,17 +1304,56 @@ async def _manage_pending_limits(ex, st, snapshot):
                     part_filled = float(chk.get("filled", 0) or 0)
                     avg_p = float(chk.get("average", 0) or info["price"] or 0)
                     if part_filled > 0:
-                        _apply_pending_fill(st, info, part_filled, avg_p, now, snapshot)
-                        log_fill(info["trace_id"], info["sym"], info["side"],
-                                 avg_p, part_filled, info["tag"] + "_PARTIAL", oid)
-                        print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소")
-                        # ★ V10.17: 부분체결 텔레그램 알림
-                        if _TELEGRAM_OK:
-                            asyncio.ensure_future(_notify_async_fill(
-                                info["sym"], info["side"], avg_p, part_filled,
-                                "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN",
-                                tier=info.get("tier", 0), role=info.get("role", ""),
-                            ))
+                        # ★ V10.31v: OPEN PARTIAL 80% 미만 즉시 시장가 청산
+                        # 근거: limit 부분체결 = 시장이 entry 방향 반대로 움직임 (이미 불리)
+                        #       작은 사이즈로 슬롯 묶이는 것보다 다음 기회 노림이 합리적
+                        # 대상: OPEN intent만 (DCA는 부분체결이라도 기존 포지션에 합산)
+                        _is_open = info.get("intent_type") == "OPEN"
+                        _intended_qty = float(info.get("qty", 0) or 0)
+                        _fill_ratio = (part_filled / _intended_qty) if _intended_qty > 0 else 1.0
+                        if _is_open and _fill_ratio < 0.80 and part_filled > 0:
+                            # 시장가 역방향으로 즉시 청산
+                            _close_side = "sell" if info["side"] == "buy" else "buy"
+                            _pos_side = "LONG" if info["side"] == "buy" else "SHORT"
+                            try:
+                                _mkt_params = {"positionSide": _pos_side} if HEDGE_MODE else {}
+                                _mkt_result = await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        ex.create_order,
+                                        info["sym"], "market", _close_side,
+                                        part_filled, None, _mkt_params,
+                                    ),
+                                    timeout=10.0,
+                                )
+                                print(f"[PENDING_LIMIT] {info['sym']} OPEN PARTIAL {_fill_ratio*100:.0f}%"
+                                      f" → 시장가 정리 ({part_filled} → 0)")
+                                try:
+                                    from v9.logging.logger_csv import log_system
+                                    log_system("OPEN_PARTIAL_CLEAR",
+                                               f"{info['sym']} {info['side']} ratio={_fill_ratio*100:.0f}% "
+                                               f"qty={part_filled:.4f}")
+                                except Exception: pass
+                                # 포지션 등록 skip (이미 청산했으므로)
+                                part_filled = 0.0  # 아래 로직에서 "미체결" 처리
+                            except Exception as _mkt_e:
+                                # 시장가 실패 시 기존 동작 (포지션 등록)
+                                print(f"[PENDING_LIMIT] {info['sym']} PARTIAL 시장가 정리 실패: {_mkt_e}")
+                                _apply_pending_fill(st, info, part_filled, avg_p, now, snapshot)
+                                log_fill(info["trace_id"], info["sym"], info["side"],
+                                         avg_p, part_filled, info["tag"] + "_PARTIAL", oid)
+                                print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소 (fallback)")
+                        else:
+                            _apply_pending_fill(st, info, part_filled, avg_p, now, snapshot)
+                            log_fill(info["trace_id"], info["sym"], info["side"],
+                                     avg_p, part_filled, info["tag"] + "_PARTIAL", oid)
+                            print(f"[PENDING_LIMIT] {info['sym']} 부분체결 {part_filled} 후 취소")
+                            # ★ V10.17: 부분체결 텔레그램 알림
+                            if _TELEGRAM_OK:
+                                asyncio.ensure_future(_notify_async_fill(
+                                    info["sym"], info["side"], avg_p, part_filled,
+                                    "PENDING_DCA" if info["intent_type"] == "DCA" else "PENDING_OPEN",
+                                    tier=info.get("tier", 0), role=info.get("role", ""),
+                                ))
                 except Exception:
                     pass
             remove_pending_limit(oid)

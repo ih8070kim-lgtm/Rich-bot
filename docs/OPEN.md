@@ -85,3 +85,17 @@ BC/CB          → market
 - [ ] _core_long/_core_short 카운팅에 새 role 제외 추가했는지
 - [ ] can_long/can_short 조건에 영향 없는지
 - [ ] TREND_NOSLOT에서 intents.append 사용했는지 (pending 아님)
+
+## V10.31v: OPEN PARTIAL 80% 미만 즉시 청산
+
+- 근거: limit 부분체결 = 시장이 entry 방향 반대로 움직이는 중 = 이미 불리한 시장 신호
+- 작은 사이즈로 슬롯 묶이는 것보다 다음 기회 노림이 합리적
+- 구현: `runner._manage_pending_limits` 5분 타임아웃 후 체결률 계산
+  - `_fill_ratio = part_filled / info["qty"]`
+  - OPEN intent & < 0.80 → 시장가 역방향 청산 (positionSide 유지)
+  - DCA는 기존대로 부분체결도 기존 포지션에 합산 (평단 조정 목적이라 OK)
+- 실측 04-21~22: PARTIAL 2/49건 (4.1%)
+  - SUI 67% 체결 $277 (유지됨)
+  - XRP 12% 체결 $48 (V10.31v 이후 자동 정리 대상)
+- 로그: `OPEN_PARTIAL_CLEAR` 태그 (log_system.csv) — 정리된 심볼/비율/qty 기록
+- fallback: 시장가 청산 실패 시 기존 동작 (부분체결분 포지션 등록)

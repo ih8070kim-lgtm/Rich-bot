@@ -64,6 +64,8 @@ def _parse_trade_line(line: str):
             "roi": round(float(cols[8] or 0), 2),
             "tier": cols[9],
             "reason": reason,
+            # ★ V10.31v: entry_type 추가 (col 15) — HEDGE vs TREND 구분용
+            "entry_type": cols[15] if len(cols) > 15 else "",
             "role": cols[16] if len(cols) > 16 else "",
         }
     except (ValueError, IndexError):
@@ -287,6 +289,15 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 # ★ V10.31c: 코어(MR/TREND) vs 보조(BC/CB) 분리
                 is_core = role not in ("BC", "CB")
 
+                # ★ V10.31v: entry_type 대시보드 표시 구분
+                # TREND + CORE_MR_HEDGE → "HEDGE" (V10.31u 동일 심볼 반대방향)
+                # TREND + CORE_MR → "TREND" (기존 TREND_NOSLOT 다른 심볼)
+                # MR → "MR"
+                if entry_type == "TREND" and role == "CORE_MR_HEDGE":
+                    display_type = "HEDGE"
+                else:
+                    display_type = entry_type
+
                 positions.append({
                     "sym": sym.replace("/USDT", ""),
                     "side": "LONG" if side == "buy" else "SHORT",
@@ -301,6 +312,7 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                     "role": role,
                     "step": step,
                     "entry_type": entry_type,
+                    "display_type": display_type,  # ★ V10.31v: 대시보드 표시용 (MR/TREND/HEDGE)
                     "hold_min": round((now - float(p.get("time", now) or now)) / 60, 0),
                     "is_core": is_core,  # ★ V10.31c
                 })
@@ -344,7 +356,8 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
 
         # ── ★ V10.31c: "오늘" 탭용 — 최근 7일 일별 + 전략별 + 시간대별 ──
         daily_list = []
-        strat_pnl = {"MR": 0.0, "TREND": 0.0, "BC": 0.0, "CB": 0.0, "OTHER": 0.0}
+        # ★ V10.31v: HEDGE 분리 (role=CORE_MR_HEDGE + entry_type=TREND)
+        strat_pnl = {"MR": 0.0, "TREND": 0.0, "HEDGE": 0.0, "BC": 0.0, "CB": 0.0, "OTHER": 0.0}
         hour_pnl = [0.0] * 24  # 오늘 시간대별 (UTC)
         try:
             tail_week = _tail_lines(trades_file, 2000)
@@ -360,16 +373,23 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 _daily_map[d]["trades"] += 1
                 if t["pnl"] > 0:
                     _daily_map[d]["wins"] += 1
-                # 전략별 분류 (role 기반)
+                # 전략별 분류 (role + entry_type 기반)
                 role = (t.get("role", "") or "").upper()
+                entry_type = (t.get("entry_type", "") or "").upper()
                 if role == "BC":
                     strat_pnl["BC"] += t["pnl"]
                 elif role == "CB":
                     strat_pnl["CB"] += t["pnl"]
+                elif role == "CORE_MR_HEDGE":
+                    # ★ V10.31v: 동일 심볼 반대방향 헷지
+                    strat_pnl["HEDGE"] += t["pnl"]
                 elif role in ("CORE_MR", "CORE_BREAKOUT", ""):
-                    # entry_type 있으면 TREND 분리, 없으면 MR
-                    # log_trades에 entry_type 칼럼이 없으므로 기본 MR로
-                    strat_pnl["MR"] += t["pnl"]
+                    # entry_type=TREND → TREND_NOSLOT (다른 심볼)
+                    # entry_type=MR → MR
+                    if entry_type == "TREND":
+                        strat_pnl["TREND"] += t["pnl"]
+                    else:
+                        strat_pnl["MR"] += t["pnl"]
                 else:
                     strat_pnl["OTHER"] += t["pnl"]
                 # 시간대별 (오늘만)
