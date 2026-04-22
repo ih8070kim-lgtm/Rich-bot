@@ -79,6 +79,10 @@ except Exception as _cb_err:
 _last_sync_ts = 0.0
 _SYNC_INTERVAL = 30  # 초
 
+# ★ V10.31r: _apply_pending_fill idempotency — oid별 처리 완료 추적
+# ARB 16:48:40 amt=13101.9 (의도 2배) 재현 방지
+_APPLIED_FILL_OIDS = {}  # {oid: ts}
+
 async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None):
     """바이낸스 실제 포지션과 포지션북 비교, 불일치 시 바이낸스 기준 반영.
     ★ v10.14: snapshot 파라미터 추가 (dca_level 역추정 정확도 개선)
@@ -1352,6 +1356,9 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
     ★ v10.14: strategy_core.apply_order_results와 동일 수준 완전 반영
     OPEN: 새 포지션 생성 (dca_targets, locked_regime 포함)
     DCA: role 교차검증, tier 정확 적용, t5_split, locked_regime 갱신
+    ★ V10.31r: idempotency 가드 — 같은 order_id 중복 처리 방지
+      실측: ARB T3 16:48:40 amt=13101 (의도 2배) → _apply_pending_fill 중복 호출
+      원인: _manage_pending_limits 5초 주기 + remove_pending_limit race condition
     """
     from v9.execution.position_book import ensure_slot, get_p, set_p, iter_positions
     # ★ V10.31c: LEVERAGE module-level 사용 (중복 제거)
@@ -1361,6 +1368,28 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
     side = info["side"]
     itype = info["intent_type"]
     role = info.get("role", "CORE_MR")
+
+    # ★ V10.31r: idempotency 가드
+    # order_id 기준. 같은 주문이 여러 번 반영되는 것 차단.
+    # _APPLIED_FILL_OIDS: 최근 처리 oid 추적 (1시간 후 자동 cleanup)
+    _oid = str(info.get("order_id", "") or info.get("trace_id", ""))
+    if _oid:
+        global _APPLIED_FILL_OIDS
+        # cleanup: 1시간 이상 된 기록 제거
+        _cleanup_cutoff = now - 3600
+        _APPLIED_FILL_OIDS = {k: v for k, v in _APPLIED_FILL_OIDS.items() if v > _cleanup_cutoff}
+        if _oid in _APPLIED_FILL_OIDS:
+            print(f"[PENDING_FILL_DUP] {sym} {side} {itype} oid={_oid} "
+                  f"이미 처리됨 ({now - _APPLIED_FILL_OIDS[_oid]:.1f}s 전) → skip "
+                  f"(중복 체결 반영 차단, qty={filled_qty})")
+            try:
+                from v9.logging.logger_csv import log_system
+                log_system("PENDING_FILL_DUP",
+                           f"{sym} {side} {itype} oid={_oid} qty={filled_qty} skipped")
+            except Exception:
+                pass
+            return
+        _APPLIED_FILL_OIDS[_oid] = now
 
     ensure_slot(st, sym)
     sym_st = st[sym]

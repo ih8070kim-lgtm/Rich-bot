@@ -6,6 +6,7 @@
 - ★ V10.30: DCA 주문 전 목표 노셔널 대비 부족분만 주문 (과주문 방지)
 - ★ V10.31c: **plan_dca 함수 자체도 삭제됨** (V10.30 호출 제거 후 함수 정의만 잔존하던 죽은 코드 276줄)
 - T4/T5 코드 잔존하나 DCA_WEIGHTS=[25,25,50] 3티어라 도달 불가 (죽은 코드, 무해)
+- ★ V10.31r: **_apply_pending_fill 중복 호출 방지 가드 필수** — order_id 기준 idempotency. `_APPLIED_FILL_OIDS` 모듈 전역 dict로 최근 1시간 처리된 oid 추적. `_manage_pending_limits` 5초 주기 + `remove_pending_limit` race condition으로 같은 체결이 2회 반영되는 버그 실측 (ARB T3 04-22 16:48:40 amt=13101.9 = 의도 2배). 다행히 `_sync_positions_with_exchange` (30초 주기)가 거래소 실제 qty로 보정해줘서 결과적으로 살아남았으나 중간 32초간 책 불일치. 가드로 원천 차단
 
 ## DCA 경로 (V10.30)
 ```
