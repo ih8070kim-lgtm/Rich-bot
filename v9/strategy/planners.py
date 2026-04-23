@@ -2070,15 +2070,29 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
 # ═════════════════════════════════════════════════════════════════
 def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
                    system_state: Dict) -> List[Intent]:
-    """★ V10.31f/AB: T3 포지션 시간 초과 시 단계적 정리.
+    """★ V10.31f/AB/AC: T3 포지션 시간 초과 시 단계적 정리.
 
     V10.31AB 변경: 임계 7h~8h → 6h~7h 앞당김
+    V10.31AC 변경: HEDGE(CORE_MR_HEDGE) 포함 (T3 FC 방어)
+
     실측 근거 (4일 MR 99건):
       0~6h 구간: 평균 +$0.8~1.5/건 승률 90%+ (정상 작동)
       6~7h 구간: +$2.06/건 승률 100% (정상 회귀)
       7~8h 구간: -$10.25/건 승률 50% (급전환)
       8h+ 구간: -$4.92/건 승률 50% (계속 손실)
     → 7h가 명확한 변곡점. 7h 시장가 완료로 손실 구간 진입 전 차단.
+
+    HEDGE 포함 근거 (V10.31AC):
+      HEDGE_SIM 15건 100% VIRTUAL_TP1 성공
+      실측 5건: TP1 4건 +$9, T3 FC 1건 -$17.75 (NEAR)
+      HEDGE T3 도달 시 7h 시간컷으로 NEAR 같은 극단 손실 방어
+
+    대상:
+      - entry_type=MR (기존 MR 포지션)
+      - entry_type=TREND + role=CORE_MR_HEDGE (HEDGE_COMP 포지션)
+    제외:
+      - BC/CB (별도 전략)
+      - SOFT_HEDGE/INSURANCE_SH (봇 내부 보험 구조)
 
     단계:
       6h00 (step 0): limit +0.50% 유리방향 배치 (이익권 자연 유지)
@@ -2089,11 +2103,6 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
     유리한 방향:
       롱(buy) 포지션 청산 = sell @ curr × (1 + premium)
       숏(sell) 포지션 청산 = buy @ curr × (1 - premium)
-
-    사용자 결정 (V10.31f):
-      - 대상: T3만
-      - 조건: 시간 초과 무조건 (max_roi 조건 없음)
-      - 일관성 우선: T3_DEF 활성 여부 무시
     """
     import time as _time
 
@@ -2117,14 +2126,19 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
     T_STEP3 = 7 * 3600              # 25200 (7h00 시장가)
 
     for symbol, p in _pos_items(st):
-        # 헷지/트렌드 구조물 제외 (PRE_MKT와 동일)
-        if p.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
-                             "INSURANCE_SH", "CORE_HEDGE"):
+        # ★ V10.31AC: HEDGE(CORE_MR_HEDGE) 컷 대상 포함
+        # 근거: NEAR HEDGE T3 FC -$17.75 (04-23), HEDGE도 T3까지 가면 손실 큼
+        # 제외 대상은 봇 자체 구조물만 (BC/CB/보험 헷지)
+        _role = p.get("role")
+        if _role in ("BC", "CB", "SOFT_HEDGE", "INSURANCE_SH"):
             continue
 
-        # ★ V10.31j: MR only — TREND는 plan_t3_3h_cut_trend가 3h~4h 더 빠른 컷 처리
+        # ★ V10.31AC: MR + HEDGE 모두 허용 (entry_type=TREND + role=CORE_MR_HEDGE 포함)
+        # 기존 V10.31j: MR only (TREND는 plan_t3_3h_cut_trend가 담당했으나 TREND 비활성으로 불필요)
         _entry_type = str(p.get("entry_type", "MR"))
-        if _entry_type != "MR":
+        _is_mr       = (_entry_type == "MR")
+        _is_hedge    = (_entry_type == "TREND" and _role == "CORE_MR_HEDGE")
+        if not (_is_mr or _is_hedge):
             continue
 
         # T3만 대상
