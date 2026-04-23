@@ -2757,20 +2757,23 @@ def generate_all_intents(
             _i.metadata["snap_ts"] = _snap_ts
         return intents
 
-    # ★ V10.31f: T3 8h 컷 (MR only, V10.31j에서 조건 추가)
-    _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
-    intents += _t3_8h_intents
-    _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
+    # ★ V10.31y: T3_3H / T3_8H 시간컷 비활성 — PTP peak-drop trail로 대체
+    # 근거: 임의 시간 기반 방어 대신 실제 portfolio drop 감지 시 대피
+    # MR 철학: 횡보장 이탈 감지 = 평균 회귀 전제 깨짐 = 즉시 청산
+    # _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
+    # intents += _t3_8h_intents
+    # _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
+    _t3_8h_syms = set()
 
-    # ★ V10.31j: T3 3h 컷 (TREND only)
-    _t3_3h_intents = plan_t3_3h_cut_trend(snapshot, st, system_state)
-    intents += _t3_3h_intents
-    _t3_3h_syms = {i.symbol for i in _t3_3h_intents}
+    # _t3_3h_intents = plan_t3_3h_cut_trend(snapshot, st, system_state)
+    # intents += _t3_3h_intents
+    # _t3_3h_syms = {i.symbol for i in _t3_3h_intents}
+    _t3_3h_syms = set()
 
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
-    # T3 시간 컷 대상 심볼은 FC/TP1/TRIM 중복 방지
+    # T3 시간 컷 대상 심볼은 FC/TP1/TRIM 중복 방지 (빈 set이라 무해)
     _exclude = _fc_syms | _t3_8h_syms | _t3_3h_syms
 
     intents += plan_tp1(snapshot, st, exclude_syms=_exclude)

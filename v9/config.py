@@ -118,16 +118,19 @@ def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
     return TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
 
 # ★ V10.31k: Portfolio TP (Peak Trail + Tiered Drop, J안)
-# peak ≥ 1% 도달 후 drop 감지 시 단계적 청산
-# 목적: 횡보 수익 확정 + tier 리셋으로 추세 전환 방어
-# 사용자 결정: K gate(avg_tier) 제외 — 단순 J안 (peak trail + tiered drop)만
-PTP_PEAK_TRIG_PCT         = 1.0   # peak gain 임계 %
-PTP_AVG_TIER_GATE         = 0.0   # ★ V10.31k: 0.0 → 모든 포지션 허용 (K gate 무효화, J안 단독)
-# Tiered drop — peak 높을수록 drop 허용폭 증가 (상승 여유)
+# ★ V10.31y: 즉시 arming + T3_3H/T3_8H 시간컷 대체
+# 철학: MR = 횡보장 평균 회귀 베팅 → portfolio drop = 횡보장 이탈 시그널
+# 임의 시간 컷(3h/8h) 제거, 실제 drop 감지 시 즉시 대피
+PTP_PEAK_TRIG_PCT         = 0.0   # ★ V10.31y: 1.0 → 0.0 (즉시 arming, 진입 즉시 trail)
+PTP_AVG_TIER_GATE         = 0.0   # 0.0 → 모든 포지션 허용
+# Tiered drop — peak 높을수록 drop 허용폭 증가 (상승 여유 인정)
+# V10.31y: peak 0% 근처도 커버 (시작 직후 방어)
 PTP_DROP_BY_PEAK = [
-    (2.0, 0.5),   # peak ≥ 2.0% → drop 0.5%p
+    (2.0, 0.5),   # peak ≥ 2.0% → drop 0.5%p (큰 이익 → 약간 물러서도 수익 확보)
     (1.5, 0.4),   # peak ≥ 1.5% → drop 0.4%p
     (1.0, 0.3),   # peak ≥ 1.0% → drop 0.3%p
+    (0.5, 0.5),   # ★ V10.31y: peak 0.5~1.0% → drop 0.5%p
+    (0.0, 0.7),   # ★ V10.31y: peak 0~0.5% → drop 0.7%p (시작 직후 보수적 방어)
 ]
 
 def _ptp_get_drop_thresh(peak_gain_pct: float):
