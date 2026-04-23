@@ -2616,7 +2616,35 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         return []
     
     # 이전 단계 PTP limit 취소 (step 1~3)
-    if cur_step >= 1:
+    # ★ V10.31z 긴급: PTP 발동 시 TRIM / DCA_PRE / TP1_PRE preorder 전부 취소
+    # 근거: ReduceOnly -2022 대량 발생 (실측 17:08~17:12 TIA/SUI/ADA 수십 회)
+    # 원인: PTP 즉시 arming(V10.31y) + 기존 TRIM preorder ReduceOnly 경쟁
+    # 수정: PTP 첫 step에서 모든 기존 reduce preorder 강제 취소
+    if cur_step == 0:
+        try:
+            from v9.execution.order_router import get_pending_limits
+            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+            _cancelled_all = 0
+            for _pl_oid, _pl_info in list(get_pending_limits().items()):
+                # is_trim / is_tp_pre / is_dca_pre / is_t3_3h_limit / is_t3_8h_limit 모두 취소
+                if (_pl_info.get("is_trim") or _pl_info.get("is_tp_pre") or
+                    _pl_info.get("is_dca_pre") or _pl_info.get("is_t3_3h_limit") or
+                    _pl_info.get("is_t3_8h_limit") or _pl_info.get("is_ptp_limit")):
+                    _TRIM_CANCEL_QUEUE.append({
+                        "sym": _pl_info.get("sym", ""), "oid": _pl_oid,
+                    })
+                    _cancelled_all += 1
+            if _cancelled_all > 0:
+                print(f"[PTP] step 0 진입 — 기존 preorder {_cancelled_all}건 전체 취소")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("PTP_CANCEL_ALL_PREORDERS",
+                               f"step=0 cancelled={_cancelled_all}")
+                except Exception: pass
+        except Exception as _ce:
+            print(f"[PTP] step 0 preorder 취소 실패(무시): {_ce}")
+    elif cur_step >= 1:
+        # 이전 PTP step limit만 취소 (TRIM/DCA는 step 0에서 이미 청소됨)
         try:
             from v9.execution.order_router import get_pending_limits
             from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
@@ -2628,7 +2656,7 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
                     })
                     _cancelled += 1
             if _cancelled > 0:
-                print(f"[PTP] step {cur_step} 이전 limit {_cancelled}건 취소 예약")
+                print(f"[PTP] step {cur_step} 이전 PTP limit {_cancelled}건 취소 예약")
         except Exception as _ce:
             print(f"[PTP] 이전 limit 취소 실패(무시): {_ce}")
     
