@@ -1155,7 +1155,15 @@ def plan_open(
         # HEDGE_SIM 13건 +2% 모두 수익 → 실전 동일 로직 적용
         # entry_type=TREND → T3_3H 시간컷 적용, role=CORE_HEDGE (반대방향 식별용)
 
-        if _trend_signal_side:
+        # ★ V10.31AA: HEDGE_COMP_ENABLED flag 체크 (MR 단일 모드 시 비활성)
+        _hc_flag_ok = True
+        try:
+            from v9.config import HEDGE_COMP_ENABLED
+            if not HEDGE_COMP_ENABLED:
+                _hc_flag_ok = False
+        except Exception: pass
+
+        if _trend_signal_side and _hc_flag_ok:
             _hc_opp_side = "sell" if trigger_side == "buy" else "buy"
             # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼은 HEDGE 제외
             # 예: XRP는 LONG_ONLY → sell HEDGE 금지 (펀딩/토크노믹스 제약)
@@ -1228,6 +1236,14 @@ def plan_open(
             print(f"[HEDGE_SKIP] {symbol} {trigger_side} → MR 시그널 없음({','.join(_ts_reasons) or 'N/A'})")
 
     # ★ V10.29e: TREND_NOSLOT — 루프 종료 후 최고 score 1개만 발사
+    # ★ V10.31AA: TREND_NOSLOT_ENABLED flag 체크 (MR 단일 모드 시 비활성)
+    if _noslot_best:
+        try:
+            from v9.config import TREND_NOSLOT_ENABLED
+            if not TREND_NOSLOT_ENABLED:
+                _noslot_best = None
+        except Exception:
+            pass
     if _noslot_best:
         _ns = _noslot_best
         # ★ V10.31k: 최종 슬롯 재체크 — 루프 중 MR 진입으로 slot 도달했을 수 있음
@@ -2050,19 +2066,25 @@ def plan_pre_market_clear(snapshot: MarketSnapshot, st: Dict,
 
 # ═════════════════════════════════════════════════════════════════
 # T3 8H CUT (V10.31f — T3 8시간 초과 시 단계적 정리)
+# V10.31AB: 임계를 6h~7h로 앞당김 (데이터 기반)
 # ═════════════════════════════════════════════════════════════════
 def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
                    system_state: Dict) -> List[Intent]:
-    """★ V10.31f: T3 포지션 8시간 초과 시 단계적 정리.
+    """★ V10.31f/AB: T3 포지션 시간 초과 시 단계적 정리.
 
-    실측 근거: T3 + hold >= 8h = 25건 -$519 (대부분 손실).
-    T2/T1은 TRIM/TP1이 잘 처리 중이라 제외.
+    V10.31AB 변경: 임계 7h~8h → 6h~7h 앞당김
+    실측 근거 (4일 MR 99건):
+      0~6h 구간: 평균 +$0.8~1.5/건 승률 90%+ (정상 작동)
+      6~7h 구간: +$2.06/건 승률 100% (정상 회귀)
+      7~8h 구간: -$10.25/건 승률 50% (급전환)
+      8h+ 구간: -$4.92/건 승률 50% (계속 손실)
+    → 7h가 명확한 변곡점. 7h 시장가 완료로 손실 구간 진입 전 차단.
 
     단계:
-      7h00 (step 0): limit +0.5% 유리방향 배치
-      7h20 (step 1): 이전 limit 취소, +0.35% 재배치
-      7h40 (step 2): 이전 limit 취소, +0.20% 재배치
-      8h00 (step 3): 시장가 강제 정리
+      6h00 (step 0): limit +0.50% 유리방향 배치 (이익권 자연 유지)
+      6h20 (step 1): 이전 limit 취소, +0.35% 재배치
+      6h40 (step 2): 이전 limit 취소, +0.20% 재배치
+      7h00 (step 3): 시장가 강제 정리
 
     유리한 방향:
       롱(buy) 포지션 청산 = sell @ curr × (1 + premium)
@@ -2070,7 +2092,7 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
 
     사용자 결정 (V10.31f):
       - 대상: T3만
-      - 조건: 8h 초과는 무조건 (max_roi 조건 없음)
+      - 조건: 시간 초과 무조건 (max_roi 조건 없음)
       - 일관성 우선: T3_DEF 활성 여부 무시
     """
     import time as _time
@@ -2079,10 +2101,20 @@ def plan_t3_8h_cut(snapshot: "MarketSnapshot", st: Dict,
     now_ts = _time.time()
 
     # 단계 경계 (초 단위)
-    T_STEP0 = 7 * 3600              # 25200 (7h00)
-    T_STEP1 = 7 * 3600 + 20 * 60    # 26400 (7h20)
-    T_STEP2 = 7 * 3600 + 40 * 60    # 27600 (7h40)
-    T_STEP3 = 8 * 3600              # 28800 (8h00)
+    # ★ V10.31AB: 7h~8h → 6h~7h 앞당김
+    # 근거 (실측 4일 MR hold time 분석):
+    #   6~7h: +$2.06/건 승률 100% (정상 회귀 여지 있음)
+    #   7~8h: -$10.25/건 승률 50% (급전환 구간)
+    #   7h가 명확한 변곡점 → 7h 시장가 완료 필요
+    # 단계 설계:
+    #   6h00: limit +0.50% (이익권이면 체결 안 되고 자연 유지)
+    #   6h20: limit +0.35% (타이트화)
+    #   6h40: limit +0.20%
+    #   7h00: 시장가 강제 (손실 구간 진입 전 확정)
+    T_STEP0 = 6 * 3600              # 21600 (6h00) — V10.31AB
+    T_STEP1 = 6 * 3600 + 20 * 60    # 22800 (6h20)
+    T_STEP2 = 6 * 3600 + 40 * 60    # 24000 (6h40)
+    T_STEP3 = 7 * 3600              # 25200 (7h00 시장가)
 
     for symbol, p in _pos_items(st):
         # 헷지/트렌드 구조물 제외 (PRE_MKT와 동일)
@@ -2785,14 +2817,17 @@ def generate_all_intents(
             _i.metadata["snap_ts"] = _snap_ts
         return intents
 
-    # ★ V10.31y: T3_3H / T3_8H 시간컷 비활성 — PTP peak-drop trail로 대체
-    # 근거: 임의 시간 기반 방어 대신 실제 portfolio drop 감지 시 대피
-    # MR 철학: 횡보장 이탈 감지 = 평균 회귀 전제 깨짐 = 즉시 청산
-    # _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
-    # intents += _t3_8h_intents
-    # _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
-    _t3_8h_syms = set()
+    # ★ V10.31AB: T3_8H (MR only, 6h~7h로 앞당김) 재활성
+    # 근거: 실측 6~7h +$2/건(이익권) / 7~8h -$10/건(급전환)
+    # PTP는 portfolio drop 감지 — 단일 포지션 물림은 놓칠 수 있음
+    # 04-23 OP 7.2h -$14 케이스: 다른 MR +$16 상쇄로 PTP 미발동 → T3_8H가 방어
+    # 주의: 함수명은 plan_t3_8h_cut 유지(호환성) but 내부 임계는 6h~7h (T_STEP0~3)
+    _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
+    intents += _t3_8h_intents
+    _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
 
+    # ★ V10.31y/AA: T3_3H 비활성 유지 — TREND 전용이었으나 TREND 자체 비활성
+    # TREND_NOSLOT_ENABLED=False 상태라 T3_3H 대상 포지션 발생 안 함
     # _t3_3h_intents = plan_t3_3h_cut_trend(snapshot, st, system_state)
     # intents += _t3_3h_intents
     # _t3_3h_syms = {i.symbol for i in _t3_3h_intents}
