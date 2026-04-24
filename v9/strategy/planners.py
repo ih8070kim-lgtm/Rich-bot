@@ -2560,6 +2560,14 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
     if system_state.get("_ptp_trigger_ts"):
         return True
     
+    # ★ V10.31AE: 쿨다운 체크 — 발동 후 1시간 내 재arming 차단
+    # arm=0.0 + drop=0.5%p 초민감 설정의 noise trigger 방지 안전장치
+    # 자정 세션 리셋에도 보존 — 물리 시간 1시간 유효 (예: 23:30 발동 → 00:30까지)
+    from v9.config import PTP_COOLDOWN_SEC
+    _cooldown_until = float(system_state.get("_ptp_cooldown_until", 0.0) or 0.0)
+    if _cooldown_until > 0 and now_ts < _cooldown_until:
+        return False
+    
     # 4) Peak arm (J 조건): peak_gain ≥ 1%
     peak_gain_pct = (peak - session_start) / session_start * 100.0
     if peak_gain_pct < PTP_PEAK_TRIG_PCT:
@@ -2591,6 +2599,8 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
     # 7) 트리거 확정
     system_state["_ptp_trigger_ts"] = now_ts
     system_state["_ptp_last_step"] = -1
+    # ★ V10.31AE: 쿨다운 타임스탬프 — 발동 시각 기준 1시간 후까지 재arming 차단
+    system_state["_ptp_cooldown_until"] = now_ts + PTP_COOLDOWN_SEC
     try:
         from v9.logging.logger_csv import log_system
         log_system("PTP_TRIGGER",

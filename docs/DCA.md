@@ -8,6 +8,11 @@
 - T4/T5 코드 잔존하나 DCA_WEIGHTS=[25,25,50] 3티어라 도달 불가 (죽은 코드, 무해)
 - ★ V10.31r: **_apply_pending_fill 중복 호출 방지 가드 필수** — order_id 기준 idempotency. `_APPLIED_FILL_OIDS` 모듈 전역 dict로 최근 1시간 처리된 oid 추적. `_manage_pending_limits` 5초 주기 + `remove_pending_limit` race condition으로 같은 체결이 2회 반영되는 버그 실측 (ARB T3 04-22 16:48:40 amt=13101.9 = 의도 2배). 다행히 `_sync_positions_with_exchange` (30초 주기)가 거래소 실제 qty로 보정해줘서 결과적으로 살아남았으나 중간 32초간 책 불일치. 가드로 원천 차단
 - ★ V10.31t: **DCA 체결 시 p["time"] 보존** — `_apply_pending_fill`와 `strategy_core.apply_order_results` 둘 다에서 DCA 체결 시 p["time"] = now 덮어쓰기 제거. p["time"]은 OPEN 시각 전용, last_dca_time은 별도 필드. 시간컷(T3_3H/T3_8H)이 OPEN 기준 hold로 올바르게 작동하도록 복원. 실측 ARB 04-22 12:43 OPEN → 12:58 T2 → 16:48 T3, 매번 time 덮어써져 18:03 HARD_SL 도달까지 시간컷 미발동 버그 확인 및 수정.
+- ★ **V10.31AD: `max_roi_by_tier` 저장은 `p["dca_level"] = tier` 할당 이전에 pre-값 캡처 필수**
+  - 버그 (V10.31e~AC): `_pre_tier = int(p.get("dca_level", 1))`을 할당 **뒤** 읽음 → NEW tier 읽혀서 저장 키 한 칸씩 밀림 → 리더는 항상 `"1"` 조회하는데 라이터는 `"2"`/`"3"`에 저장 → `t1_max_roi_pre_dca` 영구 0.0 (실측 12/12 T2+ 청산)
+  - 추가: strategy_core에 중복 저장 블록 존재 → `max_roi_seen=0` 리셋 후 재저장으로 덮어쓰기 (파괴적)
+  - 해결: DCA 블록 맨 위에서 `_pre_tier_val`/`_pre_max_val` 지역변수로 캡처 후 사용. strategy_core 중복 블록 삭제.
+  - 영향 파일: runner.py:1532-1536, strategy_core.py:251-258
 
 ## DCA 경로 (V10.30)
 ```
@@ -43,3 +48,5 @@ _t3_def_m5_logged → False  # T3 디펜스 활성 플래그 (worst≤-5 최초 
 - [ ] **DCA 선주문(dca_preorders)이 DCA fill/trim fill 시 전부 취소되는지**
 - [ ] **DCA 선주문이 타임아웃 면제(is_dca_pre)되는지**
 - [ ] **plan_dca 호출이 제거되었는지 (generate_all_intents)**
+- [ ] **★ V10.31AD: `max_roi_by_tier` 저장 시 `_pre_tier_val`을 `p["dca_level"] = tier` 할당 이전에 캡처했는지 (runner.py + strategy_core.py 양쪽)**
+- [ ] **★ V10.31AD: strategy_core.py에 중복 저장 블록(과거 L347-354) 없는지 — 있으면 0.0 덮어쓰기**

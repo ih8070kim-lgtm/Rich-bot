@@ -1529,6 +1529,13 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
         old_amt = float(p.get("amt", 0))
         old_ep = float(p.get("ep", 0))
+        # ★ V10.31AD FIX: DCA 전 tier/max_roi를 **할당 이전에** 고정
+        # 이전 버그: L1599에서 p.get("dca_level") 재조회 → L1535 할당 후라 NEW tier 읽음
+        # → max_roi_by_tier 저장 키가 한 칸씩 밀려 key="1" 항상 empty → 리더 전원 0.0
+        # 실측 검증: 최근 T2+ 청산 12/12 건 t1_max_roi_pre_dca=0.0 [실측]
+        _pre_tier_val = int(p.get("dca_level", 1) or 1)
+        _pre_max_val  = float(p.get("max_roi_seen", 0.0) or 0.0)
+
         total_cost = (old_amt * old_ep) + (filled_qty * avg_price)
         p["amt"] = old_amt + filled_qty
         p["ep"] = total_cost / p["amt"] if p["amt"] > 0 else avg_price
@@ -1595,9 +1602,8 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["trailing_on_time"] = None
         p["worst_roi"] = 0.0
         # ★ V10.31e: DCA 전 max_roi를 tier별로 보존 (측정 인프라, 로직 영향 없음)
-        _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
-        _pre_tier = int(p.get("dca_level", 1) or 1)
-        p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
+        # ★ V10.31AD: pre-값 쓰기 (블록 맨 위 _pre_tier_val/_pre_max_val 사용)
+        p.setdefault("max_roi_by_tier", {})[str(_pre_tier_val)] = _pre_max_val
         p["max_roi_seen"] = 0.0
         if _stale_tp1_oid:
             from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE

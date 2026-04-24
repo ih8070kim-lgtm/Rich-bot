@@ -249,6 +249,13 @@ def apply_order_results(
                       f"기대={_dca_role} 실제={p.get('role')} → DCA 차단")
                 continue
             if p and avg_px > 0 and filled > 0:
+                # ★ V10.31AD FIX: DCA 전 tier 값을 **할당 이전에** 고정
+                # 이전 버그: L272에서 p.get("dca_level") 재조회 → L256 할당 후라 NEW tier 읽음
+                # → max_roi_by_tier 저장 키가 한 칸씩 밀려 key="1" 항상 empty → 리더 전원 0.0
+                # 실측 검증: 최근 T2+ 청산 12/12 건 t1_max_roi_pre_dca=0.0 [실측]
+                _pre_tier_val = int(p.get("dca_level", 1) or 1)
+                _pre_max_val  = float(p.get("max_roi_seen", 0.0) or 0.0)
+
                 total_cost  = (p["amt"] * p["ep"]) + (filled * avg_px)
                 p["amt"]   += filled
                 p["ep"]     = total_cost / p["amt"] if p["amt"] > 0 else avg_px
@@ -268,9 +275,8 @@ def apply_order_results(
                 p["step"] = 0
                 p["trailing_on_time"] = None
                 # ★ V10.31e: DCA 전 max_roi tier별 보존 (측정 인프라)
-                _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
-                _pre_tier = int(p.get("dca_level", 1) or 1)
-                p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
+                # ★ V10.31AD: pre-값 쓰기 (블록 맨 위 _pre_tier_val/_pre_max_val 사용)
+                p.setdefault("max_roi_by_tier", {})[str(_pre_tier_val)] = _pre_max_val
                 p["max_roi_seen"] = 0.0
                 p["worst_roi"] = 0.0
                 if _stale_tp1_oid:
@@ -344,14 +350,12 @@ def apply_order_results(
                     )
                 except Exception as _ml_e:
                     print(f"[ML_LOG] DCA 기록 실패(무시): {_ml_e}")
-                # ★ V10.26: DCA 체결 → worst_roi/max_roi 0 리셋 (새 출발)
-                # DCA = 새 ep 기준 새 게임. 이전 바닥/고점은 무의미.
-                # ★ V10.31e: 리셋 전 tier별 max_roi 보존 (측정 인프라)
-                _pre_max = float(p.get("max_roi_seen", 0.0) or 0.0)
-                _pre_tier = int(p.get("dca_level", 1) or 1)
-                p.setdefault("max_roi_by_tier", {})[str(_pre_tier)] = _pre_max
-                p["worst_roi"] = 0.0
-                p["max_roi_seen"] = 0.0
+                # ★ V10.31AD: 중복 저장 블록 제거됨
+                # - 기존 L347~354의 두 번째 max_roi_by_tier 저장 + worst_roi/max_roi_seen 리셋은
+                #   L271~275의 첫 번째 블록과 완전 중복. 게다가 L274에서 이미 max_roi_seen=0으로
+                #   리셋된 후라 두 번째 읽기는 항상 0 → _pre_max=0.0으로 덮어쓰는 파괴적 버그.
+                # - V10.31AD: 첫 번째 블록만 남기고 삭제. 값 보존은 _pre_tier_val/_pre_max_val
+                #   지역변수로 블록 맨 위에서 캡처 완료.
                 # ★ V10.29e FIX: market DCA도 trim_to_place 세팅
                 # limit DCA는 runner._apply_pending_fill에서 처리하지만
                 # market DCA(HIGH 레짐)는 여기 도달 → 여기서도 세팅 필요
