@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AE"  # ★ V10.31AE: PTP arm=0.0 + 단일 tier drop 0.5%p (시작 직후부터 peak trail, MR 단독 대응)
+VERSION = "10.31AH"  # ★ V10.31AH: 자정 세션 리셋 제거 — 진짜 무한 peak trail (재시작 무관)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

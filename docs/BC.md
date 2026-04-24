@@ -40,3 +40,13 @@ REHEAT: 1h excess ≥ 5% → 손절 (thesis 실패)
   - `p["bc_peak_roi"]`: 매 틱 갱신되는 최고 ROI
   - 청산 시: `exit=±x% peak=+y% giveback=+z% hold=nh`
   - 2~3주 데이터 수집 후 activation 3%/floor 1.5% 재검토
+
+## ★ V10.31AF: 리포트 집계에서 BC 제외
+- **일일 리포트 총 PnL/WR/avg/tier/reason/trim 전부 BC 제외** — `core_trades` 리스트 분리
+- **7일 히스토리 (`_load_daily_pnl`)에서도 BC 제외** — `role == "BC"` 행 스킵
+- **대시보드 (`_load_trade_stats`)에서도 BC 제외** — 코어 전략 성과에 BC 섞이지 않음
+- **Role 섹션(🎭)에만 BC 별도 라벨 표시** — 참고용으로 건수/PnL 확인 가능
+- **CB도 동일 제외** — CB도 별도 전략(x1 레버리지)이라 같이 분리
+- 영향 파일: `telegram_engine.py` 3곳 (`_load_daily_pnl`, `_load_trade_stats`, `generate_daily_report`)
+- 시뮬 PASS: core 5건 + BC 3건 + CB 2건 → 총 PnL $+11.00 (BC/CB 제외) / 🎭 섹션에 MR/BC/CB/Hedge 모두 표시 ✓
+- 주의: `log_trades.csv` 자체는 변경 없음 (BC 거래도 기록 유지) — 리포트 **표시**만 분리

@@ -63,7 +63,11 @@ def _resolve_log_dir() -> str:
 # 일별 PnL 히스토리 (최근 N일)
 # ═════════════════════════════════════════════════════════════════
 def _load_daily_pnl(days: int = 7) -> list:
-    """최근 N일간 일별 PnL. Returns: [(date_str, pnl, win, total), ...]"""
+    """최근 N일간 일별 PnL. Returns: [(date_str, pnl, win, total), ...]
+    
+    ★ V10.31AF: BC/CB 제외 — 코어 전략(MR/HEDGE/INSURANCE/TREND) PnL만 집계.
+    BC/CB는 별도 전략이고 x1 레버리지라 코어 성과 추적에 노이즈.
+    """
     log_dir = _resolve_log_dir()
     trades_path = os.path.join(log_dir, "log_trades.csv")
     if not os.path.exists(trades_path):
@@ -76,6 +80,9 @@ def _load_daily_pnl(days: int = 7) -> list:
             for row in csv.DictReader(fh):
                 ts = row.get("time", "")
                 if not ts or ts < cutoff:
+                    continue
+                # ★ V10.31AF: BC/CB 제외
+                if str(row.get("role", "") or "") in ("BC", "CB"):
                     continue
                 day_key = ts[:10]
                 try:
@@ -116,6 +123,9 @@ def _load_trade_stats(today_str: str) -> dict:
         with open(trades_path, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 if not row.get("time", "").startswith(today_str):
+                    continue
+                # ★ V10.31AF: BC/CB 제외 — 코어 전략 성과 분리
+                if str(row.get("role", "") or "") in ("BC", "CB"):
                     continue
                 try:
                     pnl = float(row.get("pnl_usdt", 0.0) or 0.0)
@@ -481,19 +491,36 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
             f"트레이드: 0건"
         )
 
-    n = len(trades)
-    wins = sum(1 for t in trades if t["pnl"] > 0)
-    total_pnl = sum(t["pnl"] for t in trades)
+    # ★ V10.31AF: 코어 전략(MR/HEDGE/INSURANCE/TREND)과 BC/CB 분리
+    # 메인 집계(PnL, WR, avg, best/worst, Tier, Reason, Trim, hold)는 core_trades만 사용.
+    # role_map(🎭 섹션)에서만 BC/CB 별도 표시로 참고 가능.
+    core_trades = [t for t in trades if t.get("role", "") not in ("BC", "CB")]
+    sub_trades  = [t for t in trades if t.get("role", "") in ("BC", "CB")]
+    
+    if not core_trades:
+        # 코어 거래 없고 BC/CB만 있는 경우 — 참고용 간단 표시
+        sub_pnl = sum(t["pnl"] for t in sub_trades)
+        sub_n   = len(sub_trades)
+        return (
+            f"📊 <b>일일 리포트</b> ({target_date})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"코어 트레이드: 0건\n"
+            f"(참고) BC/CB: {sub_n}건 ${sub_pnl:+.2f}"
+        )
+
+    n = len(core_trades)
+    wins = sum(1 for t in core_trades if t["pnl"] > 0)
+    total_pnl = sum(t["pnl"] for t in core_trades)
     avg_pnl = total_pnl / n
     wr = wins / n * 100
 
-    best = max(trades, key=lambda t: t["pnl"])
-    worst = min(trades, key=lambda t: t["pnl"])
+    best = max(core_trades, key=lambda t: t["pnl"])
+    worst = min(core_trades, key=lambda t: t["pnl"])
     pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
 
-    # ── Tier 분포 ──
+    # ── Tier 분포 (코어만) ──
     tier_map = {}
-    for t in trades:
+    for t in core_trades:
         tk = t["dca"]
         if tk not in tier_map:
             tier_map[tk] = {"n": 0, "w": 0, "pnl": 0.0}
@@ -509,11 +536,11 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
         tier_lines.append(f"  T{tk}: {d['n']}건 ${d['pnl']:+.1f} ({twr:.0f}%)")
     tier_str = "\n".join(tier_lines)
 
-    # ── 청산 유형 ──
+    # ── 청산 유형 (코어만) ──
     reason_counts = {}
     trim_pnl = 0.0
     trim_count = 0
-    for t in trades:
+    for t in core_trades:
         r = t["reason"]
         if "TRAIL" in r:
             key = "Trail"
@@ -537,13 +564,15 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
 
     exit_str = " / ".join(f"{k} {v}" for k, v in sorted(reason_counts.items(), key=lambda x: -x[1]))
 
-    # ── Role/전략 분포 ──
+    # ── Role/전략 분포 (원본 trades 사용 — BC/CB 별도 라벨 표시) ──
     role_map = {}
     for t in trades:
         rl = t["role"]
         et = t.get("entry", "")
         if rl == "BC":
             rk = "BC"
+        elif rl == "CB":
+            rk = "CB"
         elif "HEDGE" in rl:
             rk = "Hedge"
         elif "INSURANCE" in rl:
@@ -561,8 +590,8 @@ def generate_daily_report(target_date: str = None, active_positions: int = None)
 
     role_str = " / ".join(f"{k} {d['n']}건 ${d['pnl']:+.1f}" for k, d in sorted(role_map.items(), key=lambda x: -x[1]["n"]))
 
-    # ── 평균 보유시간 ──
-    valid_holds = [t["hold"] for t in trades if t["hold"] > 0]
+    # ── 평균 보유시간 (코어만) ──
+    valid_holds = [t["hold"] for t in core_trades if t["hold"] > 0]
     if valid_holds:
         avg_hold_sec = sum(valid_holds) / len(valid_holds)
         if avg_hold_sec >= 3600:

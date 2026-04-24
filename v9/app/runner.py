@@ -3083,13 +3083,20 @@ async def _main_loop(ex_init, dry_run: bool):
 
             apply_order_results(results, intents_map, st, cooldowns, snapshot, system_state=system_state)
 
-            # ── v10.15b: 바이낸스 sync 매틱 복원 ──────────────────
-            # (45초 reconcile → 신규 진입 인식 불가 문제로 되돌림)
-            await _sync_positions_with_exchange(ex, st, snapshot, system_state=system_state)
-
-            # ★ v10.24 Fix B: _manage_pending_limits 호출 추가
-            # 정의만 되고 호출이 누락 → limit order 체결 추적/타임아웃 취소가 전혀 안 됨
+            # ★ V10.31AG: 메인 루프 순서 역전 — _manage_pending_limits → SYNC 순으로
+            # 근본 원인 해결: SYNC와 _apply_pending_fill이 같은 DCA 체결을 이중 반영하던 버그
+            # 실측 04-24 FIL: 거래소 T2 체결(+343.8) → SYNC가 먼저 qty=779.8 덮어씀
+            #                 → 같은 틱에 _apply_pending_fill이 또 +343.8 → amt=1123.6 (의도 2배)
+            # 구조적 해결: pending fill(event 방식, 정밀)을 먼저 book에 반영한 뒤,
+            #              SYNC(snapshot 방식, 검증)가 pending이 놓친 것만 보정하는 safety net 역할
+            # 역할 위계 확정: Pending Fill = 1차 관찰자(정확도), SYNC = 2차 관찰자(완결성)
+            
+            # ★ v10.24 Fix B: _manage_pending_limits 호출 — limit order 체결 추적/타임아웃 취소
             await _manage_pending_limits(ex, st, snapshot)
+
+            # ── v10.15b: 바이낸스 sync 매틱 복원 (순서: pending fill 뒤) ──
+            # 역할: pending fill이 놓친 고아 포지션 복구 + 거래소 qty 검증 (safety net)
+            await _sync_positions_with_exchange(ex, st, snapshot, system_state=system_state)
 
             # ★ V10.31b: T1 선주문 관리 (LOW/NORMAL만, HIGH는 내부에서 스킵)
             await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)

@@ -13,6 +13,19 @@
   - 추가: strategy_core에 중복 저장 블록 존재 → `max_roi_seen=0` 리셋 후 재저장으로 덮어쓰기 (파괴적)
   - 해결: DCA 블록 맨 위에서 `_pre_tier_val`/`_pre_max_val` 지역변수로 캡처 후 사용. strategy_core 중복 블록 삭제.
   - 영향 파일: runner.py:1532-1536, strategy_core.py:251-258
+- ★ **V10.31AG: 메인 루프 순서 역전 — pending_fill → SYNC (이중 qty 반영 원천 차단)**
+  - 버그 (V10.31AF 이전): DCA 체결이 두 경로로 중복 반영
+    - 경로 A: `_sync_positions_with_exchange` → `fetch_positions`로 거래소 전체 스냅샷 → `book_p['amt'] = ex_qty` 덮어쓰기
+    - 경로 B: `_manage_pending_limits` → `_apply_pending_fill` → `p["amt"] += filled_qty` 추가
+    - 메인 루프가 **SYNC 먼저(L3088) → pending_fill 나중(L3092)** 순서라 같은 DCA 체결이 두 번 적용
+  - 실측 04-24 FIL: 거래소 T2 체결(+343.8) → SYNC qty=779.8 덮어쓰기 → 같은 틱 _apply_pending_fill +343.8 → **amt=1123.6 (의도 2배)**. 30초 후 다음 SYNC cycle에서 재조정되지만 그 사이 잘못된 qty로 trim 계산 오염, ReduceOnly -2022 대량 발생
+  - 근본 원인: 두 관찰자(SYNC snapshot vs pending_fill event)가 **같은 이벤트 소스(거래소)를 각자 반영**. 역할 분리 부재.
+  - 해결: 메인 루프 순서 바꿔 **pending_fill 먼저, SYNC 나중**으로 배치
+    - Pending Fill = 1차 관찰자(정확도) → book 업데이트
+    - SYNC = 2차 관찰자(완결성) → pending이 놓친 고아만 보정하는 safety net
+  - 영향 파일: runner.py:3085-3099 (순서 역전 1곳)
+  - 역할 위계 확정: 같은 이벤트의 **단일 진실 공급원(pending fill)** 확립, SYNC는 검증 전용
+  - 엣지 케이스 검증: (1) 순수 고아 포지션(pending 없이 거래소만 있음) → SYNC가 여전히 복구 ✓ (2) WebSocket 체결 + pending + SYNC 3중 → `_APPLIED_FILL_OIDS` 가드가 이중 반영 차단 ✓ (3) pending fill 일시 실패 → 다음 SYNC cycle에서 반영 ✓
 
 ## DCA 경로 (V10.30)
 ```

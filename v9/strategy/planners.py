@@ -2505,45 +2505,29 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
     """
     from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
     
-    # 1) KST 09:00 (UTC 00:00) 세션 경계 + ★ V10.31l 재시작 시 복원
-    # ★ V10.31m: 강제 복원 플래그 — 같은 날짜 안에 V10.31l 첫 가동 시 복원 트리거
-    today_kst = _ptp_session_date_kst(now_ts)
-    _force_restore = not system_state.get("_ptp_v31l_first_run_done")
-    if (system_state.get("_ptp_session_date") != today_kst) or _force_restore:
-        # ★ V10.31l: balance.csv에서 오늘 UTC 00:00 이후 start/peak 복원
-        # 봇 재시작 시에도 "오늘 KST 09:00 대비 peak"를 연속 추적
-        utc_day_start = int(now_ts // 86400) * 86400
-        restored_start, restored_peak = _load_today_balance_stats(utc_day_start)
-        
-        system_state["_ptp_session_date"] = today_kst
-        if restored_start > 0:
-            # 복원 성공 — 오늘 UTC 자정 이후 레코드 존재 (재시작 케이스)
-            system_state["_ptp_session_start"] = restored_start
-            system_state["_ptp_peak_balance"] = max(restored_peak, current_balance)
-            try:
-                from v9.logging.logger_csv import log_system
-                log_system("PTP_SESSION_RESTORE",
-                           f"date={today_kst} start=${restored_start:.2f} "
-                           f"peak=${system_state['_ptp_peak_balance']:.2f} "
-                           f"curr=${current_balance:.2f} (balance.csv 복원)")
-            except Exception:
-                pass
-        else:
-            # 복원 실패 — balance.csv 없거나 오늘 레코드 없음 (신규 세션 또는 첫 부팅)
-            system_state["_ptp_session_start"] = current_balance
-            system_state["_ptp_peak_balance"] = current_balance
-            try:
-                from v9.logging.logger_csv import log_system
-                log_system("PTP_SESSION_RESET",
-                           f"date={today_kst} start=${current_balance:.2f} "
-                           f"(새 세션 — 복원 데이터 없음)")
-            except Exception:
-                pass
-        # 진행 중 상태 정리
-        system_state.pop("_ptp_trigger_ts", None)
-        system_state.pop("_ptp_last_step", None)
-        # ★ V10.31m: 강제 복원 1회 마커 세팅 (이후엔 자정 전환 시에만 리셋)
-        system_state["_ptp_v31l_first_run_done"] = True
+    # ★ V10.31AH: 자정 세션 리셋 로직 완전 제거 — 진짜 무한 트레일 활성
+    # Before(V10.31l~AG): KST 09:00마다 session_start/peak를 current_balance로 재설정
+    #                      → 일자별 peak 분리 (전일 peak 오늘 미반영)
+    # After(V10.31AH): 자정 경계 무시. peak는 upward only로 영구 누적.
+    # 리셋은 오직 2가지 트리거:
+    #   (1) 봇 최초 기동 (system_state에 peak 키 없음) → current_balance로 초기화
+    #   (2) PTP step 3 완료 (아래 L~블록) → current_balance로 리셋 + 쿨다운 1h
+    # 재시작 영향 없음 — `system_state` 전체가 save_position_book으로 이미 persist.
+    # 재시작 시 load_position_book()으로 peak/session_start/cooldown 그대로 복원.
+    # 근거: 사용자 논리 "계속 트레일하다 0.5 떨어지면 청산" = 세션 경계 없는 단일 peak trail
+    # 영구 청산 루프 방지책: step 3 완료 시 peak 리셋(기존 L2762~ 그대로)
+    #
+    # 최초 기동 시 1회 초기화 (peak/start 키가 아예 없을 때만)
+    if "_ptp_session_start" not in system_state or "_ptp_peak_balance" not in system_state:
+        system_state["_ptp_session_start"] = current_balance
+        system_state["_ptp_peak_balance"] = current_balance
+        try:
+            from v9.logging.logger_csv import log_system
+            log_system("PTP_INIT",
+                       f"start=${current_balance:.2f} peak=${current_balance:.2f} "
+                       f"(V10.31AH 무한 트레일 초기화)")
+        except Exception:
+            pass
     
     session_start = float(system_state.get("_ptp_session_start", current_balance) or current_balance)
     if session_start <= 0:
