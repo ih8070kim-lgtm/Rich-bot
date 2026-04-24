@@ -30,25 +30,40 @@ from v9.engines.hedge_core import (
 
 
 # ═════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════
 # ★ V10.31b: MR 가용 잔고 (BC/CB 보유 노셔널 차감)
+# ★ V10.31AM: BC/CB 차감 제거 — TREND off 상태라 마진 여유 충분, KILLSWITCH(margin_ratio)로 통합 관리
+#   근거: 평상시 margin_ratio 30~45% (임계 80% 대비 여유 많음)
+#         BC 노셔널 $400 차감 시 MR T3 노셔널 $1271 → $1121 (13% 축소) — 불필요한 손해
+#         사용자 판단: "TREND 없으면 마진율 널널하니까 차감 말고 전체 마진율만 관리"
+#   안전장치: KILLSWITCH_BLOCK_NEW_MR=0.80 / BLOCK_ALL_MR=0.85 / FREEZE_ALL_MR=0.90 그대로 유지
 # ═════════════════════════════════════════════════════════════════
 def _mr_available_balance(snapshot, st: Dict) -> float:
-    """real_balance_usdt에서 BC/CB 포지션 노셔널을 차감한 MR 가용 잔고."""
-    bal = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
-    prices = getattr(snapshot, "all_prices", {}) or {}
-    bc_notional = 0.0
-    for sym, sym_st in (st or {}).items():
-        if not isinstance(sym_st, dict):
-            continue
-        for _, p in iter_positions(sym_st):
-            if not isinstance(p, dict):
-                continue
-            if p.get("role") in ("BC", "CB"):
-                amt = float(p.get("amt", 0) or 0)
-                cp = float(prices.get(sym, 0) or 0)
-                if amt > 0 and cp > 0:
-                    bc_notional += amt * cp
-    return max(bal - bc_notional, bal * 0.3)  # 최소 30% 보장
+    """★ V10.31AM: BC/CB 차감 제거. real_balance_usdt 전체 반환.
+    
+    과거 (V10.31b~AL): TREND 활성 시 BC/CB 노셔널 만큼 MR 가용 잔고 차감 → 슬롯/마진 충돌 방지.
+    현재 (V10.31AM): TREND off 상태에서 MR 사이즈 부당 축소 — 전체 잔고 기준 사용.
+                    margin_ratio (Binance 실시간) 기반 KILLSWITCH가 마진 한도 관리.
+    
+    재활성 방법: 이 함수 내부만 아래 주석 블록으로 복구. 호출부 5곳 유지.
+    """
+    return float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+    # ─── 과거 BC/CB 차감 로직 (V10.31b~AL) — 롤백 시 주석 해제 ───
+    # bal = float(getattr(snapshot, "real_balance_usdt", 0.0) or 0.0)
+    # prices = getattr(snapshot, "all_prices", {}) or {}
+    # bc_notional = 0.0
+    # for sym, sym_st in (st or {}).items():
+    #     if not isinstance(sym_st, dict):
+    #         continue
+    #     for _, p in iter_positions(sym_st):
+    #         if not isinstance(p, dict):
+    #             continue
+    #         if p.get("role") in ("BC", "CB"):
+    #             amt = float(p.get("amt", 0) or 0)
+    #             cp = float(prices.get(sym, 0) or 0)
+    #             if amt > 0 and cp > 0:
+    #                 bc_notional += amt * cp
+    # return max(bal - bc_notional, bal * 0.3)  # 최소 30% 보장
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -2602,27 +2617,20 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         pass
     system_state["_ptp_active_syms"] = _active_sym_set
     
-    # 단계 진행
+    # ★ V10.31AM: 2-step 구조 — step 0 (limit 0.05%) 1분 → step 1 (시장가)
+    # 기존 4-step × 5분 (15분 소요)은 실측상 limit 대부분 미체결 + 지연 중 추가 손실
     trigger_ts = float(system_state["_ptp_trigger_ts"])
     elapsed = now_ts - trigger_ts
     
     from v9.config import PTP_STEP_INTERVAL_SEC, PTP_PREMIUMS_BY_STEP
     
-    T_STEP0 = PTP_STEP_INTERVAL_SEC          # 5min
-    T_STEP1 = PTP_STEP_INTERVAL_SEC * 2      # 10min
-    T_STEP2 = PTP_STEP_INTERVAL_SEC * 3      # 15min
+    T_STEP0 = PTP_STEP_INTERVAL_SEC          # 1min (AM: 60s)
     
     if elapsed < T_STEP0:
         cur_step = 0
-        premium = PTP_PREMIUMS_BY_STEP.get(0, 0.002)
-    elif elapsed < T_STEP1:
-        cur_step = 1
-        premium = PTP_PREMIUMS_BY_STEP.get(1, 0.0015)
-    elif elapsed < T_STEP2:
-        cur_step = 2
-        premium = PTP_PREMIUMS_BY_STEP.get(2, 0.001)
+        premium = PTP_PREMIUMS_BY_STEP.get(0, 0.0005)
     else:
-        cur_step = 3
+        cur_step = 1  # ★ V10.31AM: 기존 step 3 역할 — 시장가
         premium = 0.0
     
     last_step = int(system_state.get("_ptp_last_step", -1))
@@ -2688,7 +2696,8 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         
         is_long = p.get("side", "") == "buy"
         
-        if cur_step < 3:
+        # ★ V10.31AM: 2-step 구조 — step 0 limit, step 1 시장가
+        if cur_step < 1:
             close_price = curr_p * (1 + premium) if is_long else curr_p * (1 - premium)
             intent_type = IntentType.CLOSE
             reason = f"PTP_S{cur_step}(+{premium*100:.2f}%)"
@@ -2726,8 +2735,8 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
     
     system_state["_ptp_last_step"] = cur_step
     
-    # step 3 완료: 세션 리셋 (자연 쿨다운)
-    if cur_step == 3:
+    # ★ V10.31AM: 최종 step 완료 (기존 step 3 → step 1) — 세션 리셋
+    if cur_step == 1:
         system_state["_ptp_session_start"] = current_balance  # 새 시작점
         system_state["_ptp_peak_balance"] = current_balance
         system_state.pop("_ptp_trigger_ts", None)

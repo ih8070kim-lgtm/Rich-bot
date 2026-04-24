@@ -1,6 +1,22 @@
 # TREND — 체크리스트
 
-## 함정
+> ## ⚠️ **V10.31AL 기준 TREND 전략 사실상 비활성**
+> 
+> **진입 경로 전부 차단됨** (설정상 OFF):
+> - `TREND_NOSLOT_ENABLED = False` (V10.31AA) — 다른 심볼 추세 진입 차단
+> - `TREND_COMP` 로직 제거됨 (V10.31u → HEDGE_COMP로 교체)
+> - `HEDGE_COMP_ENABLED = False` (V10.31AD) — 반대방향 진입 차단
+> - `TREND_ENABLED = True`는 플래그만 남음 (`_trend_signal_side` 계산하지만 **아무도 참조 안 함**, dead signal)
+> 
+> **철학적 근거**: V10.31AD 이후 "MR 집중, 조기 컷" 원칙 확정.
+> - TREND 4일 실측 -$108 (entry_type 기준) — 수익성 입증 실패
+> - 양방향 변동성 수익화 시도 포기 → **MR edge 단일 집중 + PTP 방어** 구조로 수렴
+> 
+> **이 문서 내용**은 과거 TREND 활성 시절의 함정/코드 구조 기록.
+> **참조 가치**: TREND 재도입 시 혹은 MR 진입 시그널 계산과 공유되는 `_calc_trend_score` 수정 시.
+> **실제 진입 로직 수정**은 거의 발생 안 함 (시간 낭비 주의).
+
+## 함정 (과거 TREND 활성 시절 기록)
 - NOSLOT은 pending 구조 금지 — MR fill이 없으므로 intents.append 즉시 발사
 - _noslot_best는 글로벌 최고 score 1개만. 루프 내 즉시 발사하면 다수 동시 진입
 - TREND 포지션은 role=CORE_MR — 슬롯 카운팅에 포함됨 (BC/CB와 다름)

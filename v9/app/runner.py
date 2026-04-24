@@ -1674,7 +1674,18 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             return
 
         old_ep = float(p.get("ep", 0))
-        p["amt"] = max(0.0, float(p.get("amt", 0)) - filled_qty)
+        _new_amt = max(0.0, float(p.get("amt", 0)) - filled_qty)
+        # ★ V10.31AM: float 오차 흡수 — 최소 수량 절반 미만 잔량은 전량 체결로 간주
+        # 근거: 실측 OP 68회 RESIDUAL_CLEANUP 무한루프 (amt=0.0999999999994543, min_qty=0.1)
+        # TP1/TRIM 후 filled_qty 미세 부족으로 float 찌꺼기 남음 → 거래소 MIN_NOTIONAL 미만
+        try:
+            from v9.config import SYM_MIN_QTY as _SMQ_PF, SYM_MIN_QTY_DEFAULT as _SMQD_PF
+            _min_q = _SMQ_PF.get(sym, _SMQD_PF)
+            if 0 < _new_amt < _min_q * 0.5:
+                _new_amt = 0.0
+        except Exception:
+            pass
+        p["amt"] = _new_amt
         p.pop("tp1_limit_oid", None)
 
         # ★ V10.29d: is_trim 우선 체크 (전량 매도 방지)

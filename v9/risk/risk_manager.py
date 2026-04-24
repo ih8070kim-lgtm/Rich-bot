@@ -223,14 +223,22 @@ def evaluate_intent(
             return _reject(RejectCode.REJECT_COOLDOWN, f"cooldown until {cd_until:.0f}")
 
         corr     = (snapshot.correlations or {}).get(sym, 1.0)
+        # ★ V10.31AM: OPEN 체크는 3시간 corr 사용 (단기 decoupling 감지)
+        # DCA/HEDGE는 기존 2일 corr 유지 (이미 진입된 포지션의 장기 연결성)
+        # 3시간 corr 없으면 (fetch 실패) 2일 corr fallback
+        corr_3h = (getattr(snapshot, 'correlations_3h', None) or {}).get(sym, None)
         # ★ V10.27d: OPEN은 OPEN_CORR_MIN(0.50), HEDGE만 0.6, DCA는 DCA_MIN_CORR
         if itype == IntentType.OPEN:
             _is_hedge_open = meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH")
             min_corr = HEDGE_OPEN_CORR_MIN if _is_hedge_open else OPEN_CORR_MIN
+            # ★ V10.31AM: OPEN만 3시간 corr 우선 사용
+            if not _is_hedge_open and corr_3h is not None:
+                corr = corr_3h
         else:
             min_corr = DCA_MIN_CORR
         if corr < min_corr:
-            return _reject(RejectCode.REJECT_CORR_LOW, f"corr={corr:.3f}<{min_corr}")
+            _corr_src = "3h" if (itype == IntentType.OPEN and corr_3h is not None and not meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH")) else "2d"
+            return _reject(RejectCode.REJECT_CORR_LOW, f"corr_{_corr_src}={corr:.3f}<{min_corr}")
 
     # ── Money Caps — v10.7: 단일주문캡/심볼노출캡 제거 (SOFT_HEDGE 등 오거절 방지)
     qty    = float(getattr(intent, "qty", 0.0) or 0.0)

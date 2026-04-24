@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AL"  # ★ V10.31AL: Dead code Phase 4 Tier 1 — CorrGuard + AH 잔존 함수 제거 (~150줄 감소)
+VERSION = "10.31AM"  # ★ V10.31AM: PTP 2-step(1분+시장가) + drop 0.5→0.6 + 3시간 corr 진입 필터
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -154,9 +154,11 @@ def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
 PTP_PEAK_TRIG_PCT         = 0.0   # ★ V10.31AE: 0.3 → 0.0 (세션 시작 즉시 arming)
 PTP_AVG_TIER_GATE         = 0.0   # 모든 포지션 허용
 PTP_COOLDOWN_SEC          = 3600  # ★ V10.31AE: 발동 후 1시간 쿨다운 (trigger 시각 기준)
-# ★ V10.31AE: 단일 tier — peak 위치 무관 0.5%p drop 발동 (start 직후도, 이익 중도 동일)
+# ★ V10.31AM: drop 0.5 → 0.6 상향 — 실측 4일 분석: 0.5%p는 평상시 자주 찍힘 + 방어 미작동
+#   (발동 2건 중 1건 false positive, 1건 하락 지속 중 limit 미체결 → taker 시장가 컷)
+# 근거: 4일 일내 max drop 1.53/2.13/2.94/0.23% — 0.5%는 noise 영역, 0.6부터 의미 있는 drop
 PTP_DROP_BY_PEAK = [
-    (0.0, 0.5),   # peak ≥ 0.0% → drop 0.5%p (유일 tier)
+    (0.0, 0.6),   # ★ V10.31AM: 0.5 → 0.6 (유일 tier)
 ]
 
 def _ptp_get_drop_thresh(peak_gain_pct: float):
@@ -171,13 +173,15 @@ def _ptp_get_drop_thresh(peak_gain_pct: float):
             return d_thresh
     return None
 
-# 단계적 청산 (V10.31j T3_3H 패턴)
-PTP_STEP_INTERVAL_SEC     = 300   # 5분 간격
+# ★ V10.31AM: 단계적 청산 간소화 — 1분 간격 × 2 step (limit 0.05% → 시장가)
+# 근거: 기존 4 step × 5분 = 15분 소요 → 실측상 premium limit 대부분 미체결 (하락 중 역방향 limit)
+#   PTP 1 (04-24 08:23): 6 positions 중 2개만 청산, 15분 지연 중 반등으로 false positive
+#   PTP 2 (04-24 11:17): 3 positions 중 2개만 청산, 추가 -0.24% 하락 후 taker
+# 설계 변경: limit 체결 거의 없으니 1분만 기다려 보고 시장가로 확실히 컷
+PTP_STEP_INTERVAL_SEC     = 60    # ★ V10.31AM: 300 → 60 (5분 → 1분)
 PTP_PREMIUMS_BY_STEP      = {
-    0: 0.0020,  # +0.20%
-    1: 0.0015,  # +0.15%
-    2: 0.0010,  # +0.10%
-    # step 3: 시장가 (premium=0)
+    0: 0.0005,  # ★ V10.31AM: 0.05% premium (운 좋으면 체결)
+    # step 1: 시장가 (premium 없음, taker 확실 컷)
 }
 # ★ V10.31AL: PTP_SESSION_TZ_OFFSET_SEC 제거 — V10.31AH에서 자정 세션 리셋 제거되며 이 상수도 dead
 
@@ -239,7 +243,9 @@ SYM_MIN_QTY_DEFAULT = 1.0
 # OPEN / CORR
 # ═══════════════════════════════════════════════════════════════════
 HEDGE_OPEN_CORR_MIN     = 0.40   # ★ V10.29: 0.6→0.40 (진입과 동일 — FET 헷지 15회 REJECT 방지)
-OPEN_CORR_MIN           = 0.60   # ★ V10.29c: 0.40→0.60 (저상관 심볼 진입 차단 — OP/ARB 손실 방지)
+OPEN_CORR_MIN           = 0.50   # ★ V10.31AM: 0.60 → 0.50 (3시간 corr 기준 완화 — 단기 값 절대적으로 낮음)
+                                 #   기존 2일 corr 기준 0.60 → 3시간 corr 기준 0.50으로 재조정
+                                 #   극단 decoupling(OP 같은 corr 0.2~0.3)은 여전 차단, 정적 구간 노이즈는 통과
 HEDGE_STAGE1_MULTIPLIER = 1.4
 HEDGE_STAGE2_MULTIPLIER = 2.4
 HEDGE_MAX_MULTIPLIER    = 3.0

@@ -1,5 +1,19 @@
 # BC — 체크리스트
 
+## ★ V10.31AM: BC/CB 노셔널 차감 제거 (MR 사이즈 복원)
+
+**Before (V10.31b~AL)**: `_mr_available_balance()`가 BC/CB 포지션 노셔널만큼 real_balance에서 차감 (최소 30% 보장). TREND 활성 시 슬롯/마진 충돌 방지 목적.
+
+**After (V10.31AM)**: TREND off 상태 (V10.31AD 이후)라 마진 여유 충분. 함수 내부만 `return real_balance_usdt` (전체 반환)으로 단순화. 호출부 6곳 시그니처 유지.
+
+**안전장치**: KILLSWITCH (margin_ratio 기반 80/85/90% 3단계)가 통합 관리. BC x1 + MR x3 혼재 상태도 Binance margin_ratio에 통합 반영됨.
+
+**기대 효과**: BC $400 활성 시 MR T3 노셔널 $1121→$1271 (+13.4%).
+
+**재활성 방법**: `planners.py _mr_available_balance()` 내부 주석 블록 복원.
+
+---
+
 ## 함정
 - 상방 베타만 사용 (BTC 상승봉). 전체 베타 쓰면 하락 반등도 잡아서 손실
 - BC/CB는 모든 슬롯 카운팅에서 제외 — SLOTS.md 5곳 확인

@@ -1,5 +1,23 @@
 # Trinity V10.26 — System Architecture
 
+> ## ⚠️ DEPRECATED — V10.31AL 기준으로 크게 달라짐
+>
+> 이 문서는 **V10.26 시점 아키텍처** 기록이며 현재 구조와 상당히 다름.
+> 
+> **V10.26 → V10.31AL 주요 변화**:
+> - 잔고 $2,000 → $3,389+ (현재)
+> - 슬롯 10 → 8 (롱4/숏4, BC/CB는 별도)
+> - DCA 4단 → 3단 (T1/T2/T3)
+> - 스큐 관리 → 제거 (V10.30)
+> - HEDGE 다종 → off (V10.31AD)
+> - TREND → off (V10.31AA)
+> - PTP 도입 (V10.31k~AL)
+> 
+> **현재 설계 참조**: `CLAUDE.md` + `docs/STRATEGY.md` V10.31AL 섹션
+> 
+> **이 문서 가치**: V10.26 당시 설계 근거 역사적 기록만.
+> **수정 금지** — 업데이트할 거면 STRATEGY.md에 반영.
+
 ## 1. 시스템 개요
 
 Binance USDT-M 선물 자동 매매 봇. Mean Reversion(MR) 전략 기반, 4단 DCA + 부분 익절 + 스큐 관리.

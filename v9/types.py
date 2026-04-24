@@ -115,6 +115,8 @@ class MarketSnapshot:
     all_fundings: dict = field(default_factory=dict)
     # ★ V10.31q: universe 선정 시 계산된 심볼별 beta (TREND_NOSLOT 로그용)
     beta_by_sym: dict = field(default_factory=dict)
+    # ★ V10.31AM: 3시간 correlation (진입 필터 전용, 단기 decoupling 감지)
+    correlations_3h: dict = field(default_factory=dict)
 
 
 # ── Intent ──────────────────────────────────────────────────────

@@ -1,5 +1,39 @@
 # TRIM / TP1 — 체크리스트
 
+## ★ V10.31AM: 잔량 float 오차 방어 (OP 68회 루프 해결)
+
+### 증상
+TP1/TRIM 전량 체결 후 `amt` 에 float 오차 잔량 남음 (예: `0.0999999999994543` vs min_qty 0.1).
+hedge_engine의 RESIDUAL_CLEANUP이 시도하지만 노셔널 $5 미만 → 거래소 MIN_NOTIONAL 거절 → 무한 반복.
+
+### 2중 방어
+**1. 발생 원천 차단** (`runner.py:1677`)
+```python
+_new_amt = max(0.0, float(p.get("amt", 0)) - filled_qty)
+# float 오차 흡수 — 최소 수량 절반 미만이면 전량 체결로 간주
+if 0 < _new_amt < min_qty * 0.5:
+    _new_amt = 0.0
+p["amt"] = _new_amt
+```
+
+**2. 잔량 강제 클리어** (`hedge_engine.py:141~`)
+```python
+# 기존: _res_below_min만 체크 → 5분 쿨다운
+# AM: min_qty OR MIN_NOTIONAL 미달 시 즉시 clear_position
+_res_below_min_qty = _res_amt < _res_min_qty * 0.9999
+_res_below_min_notional = _res_notional < 5.0  # Binance 기본
+if (_res_below_min_qty or _res_below_min_notional) and _res_amt > 0:
+    clear_position(st, symbol, p.get("side", ""))
+    log_system("RESIDUAL_FORCE_CLEAR", ...)
+    continue  # 이 틱 skip
+```
+
+### 효과
+- TP1/TRIM 후 찌꺼기 amt 원천 차단
+- 기존 찌꺼기 포지션(배포 전)은 첫 틱 내 RESIDUAL_FORCE_CLEAR로 완전 제거
+
+---
+
 ## 함정
 - ★ V10.31b: 전 tier trail 통합 — T1/T2/T3 모두 동일한 trail 메커니즘
 - ★ V10.31c: `_manage_tp1_preorders`는 **LOW/NORMAL 레짐에서 활성 유지** (runner.py:2628에서 호출 중). V10.31b의 "선주문 시스템 전면 제거" 기재는 틀렸음 — 실제로는 HIGH에서만 trail 사용, LOW/NORMAL은 TP1 선주문 유지
