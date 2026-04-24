@@ -181,8 +181,7 @@ def load_position_book() -> dict:
             'baseline_date': '',
             'initial_balance': 0.0,
             'utilization_rate': 1.0,
-            'corr_guard_last_ts': 0.0,
-            'corr_guard_breach_ts': {},
+            # ★ V10.31AL: corr_guard_* state 키 제거 (CorrGuard 완전 제거)
         }
     }
 

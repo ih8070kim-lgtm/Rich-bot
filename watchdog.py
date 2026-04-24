@@ -4,7 +4,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ★ v10.12: venv python 경로 자동 감지
 _PYTHON = sys.executable
@@ -42,7 +42,8 @@ def main():
     CHECK_INTERVAL = 30    # 30초 주기로 상태 검사
 
     while True:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ▶ 메인 엔진(main.py) 프로세스 생성...")
+        # ★ V10.31AK: UTC 명시 — 서버 재시작 로그 타임존 독립
+        print(f"\n[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] ▶ 메인 엔진(main.py) 프로세스 생성...")
         # ★ v10.12: sys.executable 사용
         process = subprocess.Popen([_PYTHON, "main.py"])
         send_alert("🛡️ [Watchdog] 메인 엔진을 (재)가동합니다.")

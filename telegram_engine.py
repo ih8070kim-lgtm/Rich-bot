@@ -11,7 +11,10 @@ import asyncio
 import csv
 import json
 import os
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
+
+# ★ V10.31AK: 텔레그램 표시용 KST 명시 — 로그 파일은 UTC지만 사용자 메시지는 한국 시간
+KST = timezone(timedelta(hours=9))
 
 import requests
 from dotenv import load_dotenv
@@ -309,7 +312,7 @@ async def notify_fill(result, intent, st: dict = None, snapshot=None, pos_snap: 
             return
 
         short_sym = sym.replace("/USDT", "")
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now(KST).strftime('%H:%M:%S')  # ★ V10.31AK: KST 명시
 
         if itype == IntentType.OPEN:
             _dir = "📈L" if side == "buy" else "📉S"
@@ -402,7 +405,7 @@ async def notify_async_fill(
 
         notional = avg_px * filled
         short_sym = sym.replace("/USDT", "")
-        ts = datetime.now().strftime('%H:%M:%S')
+        ts = datetime.now(KST).strftime('%H:%M:%S')  # ★ V10.31AK: KST 명시
 
         if fill_type in ("TP1_PRE", "TP1_LIMIT"):
             icon = "🟢" if pnl >= 0 else "🔴"

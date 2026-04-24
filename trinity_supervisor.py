@@ -15,7 +15,7 @@ import queue
 import threading
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -125,7 +125,8 @@ def send_telegram(text: str):
 # =========================================================
 
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # ★ V10.31AK: UTC 명시 — supervisor 로그 타임존 독립
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 def print_log(msg: str):
     print(f"[{now_str()}] {msg}", flush=True)

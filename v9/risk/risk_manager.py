@@ -290,106 +290,14 @@ def evaluate_intent(
 
 
 # ═════════════════════════════════════════════════════════════════
-# CorrGuard
+# ★ V10.31AL: CorrGuard 완전 제거 — V10.31b에서 runner 호출은 제거됐으나
+# 정의부/상수/state 키/import 잔존 (Phase 3에서 놓침). Phase 4 Tier 1 작업.
+# 제거 범위:
+#   - CORR_GUARD_* 상수 4개
+#   - generate_corrguard_intents() 함수 (92줄)
+#   - position_book.py state 키 'corr_guard_last_ts', 'corr_guard_breach_ts'
+#   - runner.py L50 import
+#   - utils_math.py docstring 멘션
+# 총 감소: ~100줄. 롤백 필요 시 git log V10.31b 이전에서 복원.
 # ═════════════════════════════════════════════════════════════════
-CORR_GUARD_CORR_THRESH = 0.5
-CORR_GUARD_ROI_THRESH  = -4.0
-CORR_GUARD_CHECK_SEC   = 300
-CORR_GUARD_BREACH_SEC  = 60
 
-import uuid as _uuid
-
-
-def generate_corrguard_intents(
-    snapshot: MarketSnapshot,
-    st: dict,
-    system_state: dict,
-) -> list:
-    """
-    CorrGuard 강제청산 Intent.
-    - corr < 0.5 AND roi ≤ -4% AND 5분 주기 breach 기록 → 60초 후 limit
-    - 60초 경과 → market fallback
-    """
-    # ★ V10.31c: calc_roi_pct module-level 사용 (중복 제거)
-
-    intents  = []
-    now_ts   = time.time()
-    prices   = getattr(snapshot, "all_prices",  {}) or {}
-    corr_map = getattr(snapshot, "correlations", {}) or {}
-
-    last_chk = float(system_state.get("corr_guard_last_ts", 0.0) or 0.0)
-    do_check = (now_ts - last_chk >= CORR_GUARD_CHECK_SEC)
-    if do_check:
-        system_state["corr_guard_last_ts"] = now_ts
-
-    breach_ts_map = system_state.setdefault("corr_guard_breach_ts", {})
-
-    for sym, sym_st in (st or {}).items():
-        if not (isinstance(sym_st, dict) and is_active(sym_st)):
-            breach_ts_map.pop(sym, None)
-            continue
-
-        # corr은 심볼 단위 — 포지션 루프 밖에서 한 번만 체크
-        corr = float(corr_map.get(sym, 1.0))
-        cp   = float(prices.get(sym, 0.0) or 0.0)
-        if cp <= 0:
-            continue
-
-        # [BUG-1+2 FIX] hedge mode 지원: 포지션별로 독립 판단
-        for pos_side, p in iter_positions(sym_st):
-            # ★ v10.6: HEDGE role은 CorrGuard 대상 제외 (헷지는 자체 exit 로직 사용)
-            # ★ V10.29e: BC/CB 독립전략도 제외 (x1, 자체 SL/TP 사용)
-            if p.get("role") in ("HEDGE", "CORE_HEDGE", "SOFT_HEDGE",
-                                 "INSURANCE_SH", "BC", "CB"):
-                continue
-            ep      = float(p.get("ep", 0.0) or 0.0)
-            roi_pct = calc_roi_pct(ep, cp, pos_side, LEVERAGE) if ep > 0 else 0.0
-
-            # roi 조건 미달 → breach 해제
-            if roi_pct > CORR_GUARD_ROI_THRESH:
-                breach_ts_map.pop(f"{sym}:{pos_side}", None)
-                continue
-
-            # corr 조건 미달 → breach 해제
-            if corr >= CORR_GUARD_CORR_THRESH:
-                breach_ts_map.pop(f"{sym}:{pos_side}", None)
-                continue
-
-            # 두 조건 모두 충족 → breach 기록
-            breach_key = f"{sym}:{pos_side}"
-            if do_check:
-                breach_ts_map.setdefault(breach_key, now_ts)
-            if breach_key not in breach_ts_map:
-                continue
-
-            amt = float(p.get("amt", 0.0) or 0.0)
-            if amt <= 0:
-                breach_ts_map.pop(breach_key, None)
-                continue
-
-            if p.get("pending_close") or int(p.get("step", 0) or 0) >= 1:
-                continue
-
-            elapsed    = now_ts - breach_ts_map[breach_key]
-            close_side = "sell" if pos_side == "buy" else "buy"  # [BUG-1 FIX] side → pos_side
-
-            if elapsed < CORR_GUARD_BREACH_SEC:
-                intents.append(Intent(
-                    trace_id=str(_uuid.uuid4())[:8],
-                    symbol=sym, side=close_side,
-                    intent_type=IntentType.CLOSE,
-                    qty=amt, price=cp,
-                    reason="CORR_GUARD_LIMIT",
-                    metadata={"corr": corr, "roi_pct": roi_pct},
-                ))
-            else:
-                intents.append(Intent(
-                    trace_id=str(_uuid.uuid4())[:8],
-                    symbol=sym, side=close_side,
-                    intent_type=IntentType.FORCE_CLOSE,
-                    qty=amt, price=None,
-                    reason="CORR_GUARD_MARKET",
-                    metadata={"corr": corr, "roi_pct": roi_pct},
-                ))
-
-    return intents

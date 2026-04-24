@@ -4,7 +4,7 @@ V9 Logger CSV
 """
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from v9.config import LOG_DIR
 from v9.logging.schemas import (
@@ -30,7 +30,8 @@ def _log_path(filename: str) -> str:
 
 
 def _now_str() -> str:
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # ★ V10.31AK: UTC 명시 — 서버 타임존 독립, Binance/ccxt와 일치
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
 # ★ V10.29c: 시스템 이벤트 로그 (부팅/복원/BB/트림 등 — CSV 추출 가능)

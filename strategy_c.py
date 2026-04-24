@@ -10,7 +10,7 @@ main.py → V9 runner 전환 후 이 파일은 import되지 않습니다.
 # ── 레거시 import 유지 (다른 모듈이 참조할 경우 대비) ──────────
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     from telegram_engine import send_telegram_message
@@ -26,7 +26,8 @@ _SC_EVENT_LOG = "log_events.jsonl"
 def _sc_append_event(event_type: str, payload: dict):
     try:
         record = {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # ★ V10.31AK: UTC 명시
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "type": event_type,
             **payload,
         }

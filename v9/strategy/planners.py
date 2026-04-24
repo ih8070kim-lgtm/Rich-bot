@@ -2436,63 +2436,12 @@ def _ptp_get_drop_thresh(peak_pct: float) -> float:
     return 999.0  # peak < 1% → 사실상 미발동
 
 
-def _ptp_session_date_kst(now_ts: float) -> str:
-    """일일 세션 날짜 — ★ KST 09:00 (UTC 00:00) 기준.
-    
-    텔레그램 일일 수익률 리셋 시각과 통일 (_daily_pnl_report).
-    PTP_SESSION_TZ_OFFSET_SEC = 0 → UTC 자정 기준 = KST 09:00 기준.
-    """
-    from v9.config import PTP_SESSION_TZ_OFFSET_SEC
-    import time as _t
-    return _t.strftime("%Y-%m-%d", _t.gmtime(now_ts + PTP_SESSION_TZ_OFFSET_SEC))
-
-
-def _load_today_balance_stats(utc_day_start_ts: float) -> tuple:
-    """★ V10.31l: log_balance.csv에서 오늘 UTC 00:00 이후 (start, peak) 복원.
-    
-    서버 타임존 UTC 가정 (log_balance.csv 시각 = UTC).
-    오늘 UTC 00:00 (= KST 09:00) 이후 첫 레코드 = session_start,
-    이후 모든 레코드 중 최대 = peak.
-    
-    Returns:
-        (session_start, session_peak) — 데이터 없으면 (0.0, 0.0)
-    """
-    import os
-    import time as _t
-    from v9.config import LOG_DIR
-    
-    fpath = os.path.join(LOG_DIR, "log_balance.csv")
-    if not os.path.exists(fpath):
-        return (0.0, 0.0)
-    
-    # UTC day start → "YYYY-MM-DD HH:MM" 문자열 비교 (CSV 시각 포맷과 동일)
-    boundary_str = _t.strftime("%Y-%m-%d %H:%M", _t.gmtime(utc_day_start_ts))
-    
-    session_start = 0.0
-    session_peak = 0.0
-    try:
-        with open(fpath, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split(',')
-                if len(parts) != 2:
-                    continue
-                ts_str = parts[0].strip()
-                try:
-                    bal = float(parts[1].strip())
-                except (ValueError, IndexError):
-                    continue
-                if ts_str < boundary_str:
-                    continue
-                if session_start == 0.0:
-                    session_start = bal
-                if bal > session_peak:
-                    session_peak = bal
-    except Exception:
-        return (0.0, 0.0)
-    return (session_start, session_peak)
+# ★ V10.31AL: AH 이후 dead code 제거
+# V10.31AH에서 자정 세션 리셋 로직을 완전 제거하면서 다음 함수들이 호출되지 않음:
+#   - _ptp_session_date_kst: KST 자정 경계 판정용 (AH 이후 세션 경계 없음)
+#   - _load_today_balance_stats: 재시작 시 오늘 balance 복원 (AH 이후 persist로 자동)
+# 롤백 필요 시 git log V10.31AH 이전 버전에서 복원 가능.
+# PTP_SESSION_TZ_OFFSET_SEC config 상수도 함께 제거.
 
 
 def _ptp_update_state(system_state: Dict, current_balance: float,

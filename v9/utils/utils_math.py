@@ -112,7 +112,7 @@ def calc_roi_pct(ep: float, cp: float, side: str, leverage: float) -> float:
     """
     레버리지 반영 ROI를 퍼센트(%) 단위로 반환 (수수료 미반영 gross).
     반환값 예시: -7.5, +1.2, -15.0
-    용도: DCA 트리거, 헷지 트리거, CorrGuard (포지션 방어 결정)
+    용도: DCA 트리거, 헷지 트리거 (포지션 방어 결정)
     """
     if ep <= 0 or cp <= 0:
         return 0.0

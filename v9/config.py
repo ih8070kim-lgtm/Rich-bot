@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AJ"  # ★ V10.31AJ: PTP 활성 중 trim/tp1/dca preorder 재생성 차단 (ReduceOnly -2022 근본 해결)
+VERSION = "10.31AL"  # ★ V10.31AL: Dead code Phase 4 Tier 1 — CorrGuard + AH 잔존 함수 제거 (~150줄 감소)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -179,10 +179,7 @@ PTP_PREMIUMS_BY_STEP      = {
     2: 0.0010,  # +0.10%
     # step 3: 시장가 (premium=0)
 }
-# 일일 세션 경계 — ★ KST 09:00 (UTC 00:00) 통일
-# - 텔레그램 일일 수익률 리포트와 동일한 기준 (_daily_pnl_report)
-# - 거래소 펀딩 정산 주기와도 정렬
-PTP_SESSION_TZ_OFFSET_SEC = 0   # UTC 자정 = KST 09:00 — 텔레그램 일일 리셋 시각과 통일
+# ★ V10.31AL: PTP_SESSION_TZ_OFFSET_SEC 제거 — V10.31AH에서 자정 세션 리셋 제거되며 이 상수도 dead
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거

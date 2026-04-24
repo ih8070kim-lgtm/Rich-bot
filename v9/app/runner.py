@@ -8,7 +8,7 @@ import os
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ccxt
 from dotenv import load_dotenv
@@ -47,7 +47,7 @@ try:
 except Exception as _tg_err:
     print(f"[V9 Runner] telegram_engine import 실패 (알림 비활성): {_tg_err}")
     _TELEGRAM_OK = False
-from v9.risk.risk_manager import generate_corrguard_intents
+# ★ V10.31AL: CorrGuard import 제거 — 함수 정의부도 risk_manager.py에서 제거됨
 
 # ★ Beta Cycle 엔진
 try:
@@ -627,7 +627,8 @@ def _write_system_state_compat(snapshot: "MarketSnapshot", system_state: dict, s
         kill_switch_on = (mr >= 0.8) or bool(system_state.get("shutdown_active", False))
 
         payload = {
-            "updated_at":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # ★ V10.31AK: UTC 명시 — 상태 JSON의 updated_at 타임존 독립
+            "updated_at":    datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             "kill_switch_on": kill_switch_on,
             "margin_ratio":  mr,
             "total_equity":  float(snapshot.real_balance_usdt) if snapshot else 0.0,
@@ -3029,7 +3030,8 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ── Intent 생성 ──────────────────────────────────────
             intents = generate_all_intents(snapshot, st, cooldowns, system_state)
-            # ★ V10.31b: CorrGuard 제거 — -4% 조기컷이 T3 회복 차단
+            # ★ V10.31b: CorrGuard 호출 제거 (-4% 조기컷이 T3 회복 차단)
+            # ★ V10.31AL: CorrGuard 정의부/상수/state 전부 제거 완료 (Phase 4 Tier 1)
 
             # ★ Beta Cycle 통합
             if _BC_ENABLED:
