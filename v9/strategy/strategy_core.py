@@ -419,7 +419,10 @@ def apply_order_results(
                         _tp1_side = p.get("side", pos_side)
                         _tp1_cpx  = float(avg_px if avg_px > 0 else
                                           (snapshot.all_prices or {}).get(sym, _tp1_ep))
-                        _tp1_roi_full = (calc_roi_pct(_tp1_ep, _tp1_cpx, _tp1_side, LEVERAGE)
+                        # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용
+                        _tp1_role = p.get("role", "") or ""
+                        _tp1_lev  = 1 if _tp1_role in ("BC", "CB") else LEVERAGE
+                        _tp1_roi_full = (calc_roi_pct(_tp1_ep, _tp1_cpx, _tp1_side, _tp1_lev)
                                          if _tp1_ep > 0 and _tp1_cpx > 0 else 0.0)
                         _tp1_rpnl = getattr(result, 'realized_pnl', 0.0) or 0.0
                         _tp1_raw = ((_tp1_cpx - _tp1_ep) / _tp1_ep if _tp1_side == "buy"
@@ -574,7 +577,10 @@ def apply_order_results(
                     _amt  = float(p.get("amt", 0.0) or 0.0)
                     _side = p.get("side", pos_side)
                     _cpx  = float(avg_px if avg_px > 0 else (snapshot.all_prices or {}).get(sym, _ep))
-                    _roi  = calc_roi_pct(_ep, _cpx, _side, LEVERAGE) if _ep > 0 and _cpx > 0 else 0.0
+                    # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용
+                    _role = p.get("role", "") or ""
+                    _lev  = 1 if _role in ("BC", "CB") else LEVERAGE
+                    _roi  = calc_roi_pct(_ep, _cpx, _side, _lev) if _ep > 0 and _cpx > 0 else 0.0
                     # ★ V10.31d-3 FIX: realizedPnl 부분값 오류 방어
                     # 배경: V10.31b에서 order_router가 order['trades']에서 realizedPnl 추출.
                     # 그러나 FORCE_CLOSE/TRAIL_ON 대량 체결 시 trades 배열에 첫 1~2 조각만

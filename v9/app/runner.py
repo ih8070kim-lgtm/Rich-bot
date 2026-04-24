@@ -1717,7 +1717,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                     _trim_pnl = filled_qty * (avg_price - old_ep)
                 else:
                     _trim_pnl = filled_qty * (old_ep - avg_price)
-                _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE)
+                # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용
+                _trim_role = p.get("role", "") or ""
+                _trim_lev  = 1 if _trim_role in ("BC", "CB") else LEVERAGE
+                _trim_roi = calc_roi_pct(old_ep, avg_price, pos_side, _trim_lev)
                 _trim_icon = "✅" if _trim_pnl >= 0 else "🔴"
                 print(f"[TRIM_FILL] {sym} {pos_side} T{_old_tier}→T{_target_tier} "
                       f"pnl=${_trim_pnl:+.2f} roi={_trim_roi:+.1f}%")
@@ -1767,7 +1770,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             from v9.execution.position_book import clear_position
             from v9.logging.logger_csv import log_trade
             _hold = now - float(p.get("time", now) or now)
-            _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
+            # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용
+            _rp_role = p.get("role", "") or ""
+            _rp_lev  = 1 if _rp_role in ("BC", "CB") else LEVERAGE
+            _roi = calc_roi_pct(old_ep, avg_price, pos_side, _rp_lev) if old_ep > 0 else 0
             # ★ V10.31b: 바이낸스 realizedPnl 우선 사용
             _rpnl = float(info.get("_realized_pnl", 0) or 0)
             if _rpnl != 0.0:
@@ -1814,7 +1820,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 _pnl = filled_qty * (avg_price - old_ep)
             else:
                 _pnl = filled_qty * (old_ep - avg_price)
-            _roi = calc_roi_pct(old_ep, avg_price, pos_side, LEVERAGE) if old_ep > 0 else 0
+            # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용
+            _part_role = p.get("role", "") or ""
+            _part_lev  = 1 if _part_role in ("BC", "CB") else LEVERAGE
+            _roi = calc_roi_pct(old_ep, avg_price, pos_side, _part_lev) if old_ep > 0 else 0
             try:
                 from v9.logging.logger_csv import log_trade as _lt_part
                 _hold_part = now - float(p.get("time", now) or now)

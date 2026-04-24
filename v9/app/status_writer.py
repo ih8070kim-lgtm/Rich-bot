@@ -182,12 +182,14 @@ def _record_balance(bal: float):
 
 
 def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
-    """★ V10.31n: PTP 상태 요약 — 대시보드 표시용.
+    """★ V10.31AI: PTP 상태 요약 — 대시보드 표시용.
     
+    ★ V10.31AE 이후 arm 임계 = PTP_PEAK_TRIG_PCT (동적). AH에서 자정 리셋 제거.
     상태 구분:
-      - idle:    peak_gain < 1% (arming 안 됨)
-      - armed:   peak_gain ≥ 1% + drop 미달 (대기 중)
+      - idle:    peak_gain < PTP_PEAK_TRIG_PCT (arming 미달)
+      - armed:   peak_gain ≥ PTP_PEAK_TRIG_PCT + drop 미달 (대기 중)
       - active:  trigger 중 (단계 진행 중)
+      - cooldown: 발동 후 쿨다운 내 (재arming 차단)
     """
     result = {
         "state": "idle",
@@ -196,7 +198,9 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
         "peak_gain_pct": 0.0,
         "current_drop_pct": 0.0,
         "drop_thresh_pct": 0.0,
+        "arm_trig_pct": 0.0,
         "last_step": -1,
+        "cooldown_remaining_sec": 0,
     }
     if not system_state or current_balance <= 0:
         return result
@@ -214,7 +218,16 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
     result["peak_gain_pct"] = round(peak_gain_pct, 3)
     result["current_drop_pct"] = round(current_drop_pct, 3)
     
-    # tiered drop 임계 계산
+    # ★ V10.31AI: arm 임계를 config에서 동적 조회 (AH arm=0.0 반영)
+    try:
+        from v9.config import PTP_PEAK_TRIG_PCT
+        result["arm_trig_pct"] = round(float(PTP_PEAK_TRIG_PCT), 3)
+    except Exception:
+        pass
+    
+    # ★ V10.31AI: tiered drop 임계 계산 — 올바른 import 경로로 수정
+    # 이전 버그: from v9.config import _ptp_get_drop_thresh (config에도 있지만)
+    # planners.py 버전이 실제 사용되는 것 — 일관성을 위해 config 버전 사용(둘 다 동일 로직)
     try:
         from v9.config import _ptp_get_drop_thresh
         _dt = _ptp_get_drop_thresh(peak_gain_pct)
@@ -223,12 +236,28 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
     except Exception:
         pass
     
+    # ★ V10.31AI: 쿨다운 남은 시간 (AE에서 도입된 _ptp_cooldown_until)
+    try:
+        import time as _t
+        _cd_until = float(system_state.get("_ptp_cooldown_until", 0) or 0)
+        if _cd_until > 0:
+            _remain = int(_cd_until - _t.time())
+            if _remain > 0:
+                result["cooldown_remaining_sec"] = _remain
+    except Exception:
+        pass
+    
     # 상태 분류
     if system_state.get("_ptp_trigger_ts"):
         result["state"] = "active"
         result["last_step"] = int(system_state.get("_ptp_last_step", -1))
-    elif peak_gain_pct >= 1.0:
-        result["state"] = "armed"
+    elif result["cooldown_remaining_sec"] > 0:
+        result["state"] = "cooldown"
+    else:
+        # ★ V10.31AI: 하드코드 "1.0" → 동적 임계 (AH arm=0에선 peak_gain ≥ 0.0 = 항상 armed)
+        _arm_trig = result["arm_trig_pct"]
+        if peak_gain_pct >= _arm_trig:
+            result["state"] = "armed"
     
     return result
 
@@ -273,9 +302,11 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 worst_roi = float(p.get("worst_roi", 0) or 0)
                 entry_type = p.get("entry_type", "MR")
 
-                roi = calc_roi_pct(ep, cp, side, LEVERAGE) if ep > 0 and cp > 0 else 0.0
+                # ★ V10.31AI: BC/CB는 x1 — role 기반 레버리지 적용 (대시보드 ROI 정확 표시)
+                _dash_lev = 1 if role in ("BC", "CB") else LEVERAGE
+                roi = calc_roi_pct(ep, cp, side, _dash_lev) if ep > 0 and cp > 0 else 0.0
                 notional = amt * cp if cp > 0 else amt * ep
-                pnl_est = notional * roi / 100 / LEVERAGE if notional > 0 else 0.0
+                pnl_est = notional * roi / 100 / _dash_lev if notional > 0 else 0.0
 
                 if side == "buy":
                     long_count += 1

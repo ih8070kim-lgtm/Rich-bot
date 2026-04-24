@@ -139,3 +139,26 @@ def calc_roi_pct_net(ep: float, cp: float, side: str, leverage: float,
     # 왕복 수수료 (진입가 기준 정규화)
     fee_pct = (ep + cp) * fee_rate / ep * leverage * 100.0
     return gross_pct - fee_pct
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ★ V10.31AI: role 기반 레버리지 자동 처리
+# ═══════════════════════════════════════════════════════════════════
+# BC(Beta Cycle), CB(Crash Bounce)는 x1 레버리지 독립 전략. 나머지는 LEVERAGE(=3).
+# 기존 calc_roi_pct(..., LEVERAGE) 호출부 중 BC/CB가 거치는 경로에서만 사용.
+# MR/HEDGE 전용 경로(planners heavy_rois, hedge_engine 등)는 기존 그대로 유지.
+
+def role_leverage(role: str) -> int:
+    """role 기반 실제 레버리지 반환. BC/CB=1, 나머지=LEVERAGE(3)."""
+    from v9.config import LEVERAGE
+    return 1 if role in ("BC", "CB") else int(LEVERAGE)
+
+
+def calc_roi_pct_by_role(ep: float, cp: float, side: str, role: str) -> float:
+    """role 기반 레버리지 자동 적용 ROI 계산 (gross, 수수료 미포함).
+    
+    BC/CB 포지션은 x1 레버리지로 실제 체결되므로 ROI도 x1 기준이어야
+    대시보드/로그 표시가 실제 PnL%와 일치.
+    """
+    return calc_roi_pct(ep, cp, side, role_leverage(role))
+

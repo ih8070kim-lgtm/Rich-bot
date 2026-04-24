@@ -50,3 +50,14 @@ REHEAT: 1h excess ≥ 5% → 손절 (thesis 실패)
 - 영향 파일: `telegram_engine.py` 3곳 (`_load_daily_pnl`, `_load_trade_stats`, `generate_daily_report`)
 - 시뮬 PASS: core 5건 + BC 3건 + CB 2건 → 총 PnL $+11.00 (BC/CB 제외) / 🎭 섹션에 MR/BC/CB/Hedge 모두 표시 ✓
 - 주의: `log_trades.csv` 자체는 변경 없음 (BC 거래도 기록 유지) — 리포트 **표시**만 분리
+
+## ★ V10.31AI: BC/CB x1 ROI 일관 반영
+- **버그**: `log_trades.csv` roi_pct 컬럼과 `status_writer.py` 대시보드에서 BC/CB ROI가 x3 계산되고 있었음 — 실제 체결은 x1인데 표시만 x3이라 3배 뻥튀기
+- **실증 [실측]**: DYM BC 실거래 기록 `roi=-27.785%`, 실제 가격 변화 `-9.262%` (정확히 3배 차이)
+- **helper 함수 도입** (`v9/utils/utils_math.py`):
+  - `role_leverage(role)` → BC/CB=1, 나머지=LEVERAGE(3)
+  - `calc_roi_pct_by_role(ep, cp, side, role)` → role 기반 자동 적용
+- **5곳 수정**: `strategy_core.py` L422, L580 / `runner.py` L1720, L1773, L1823 / `status_writer.py` L276 — BC/CB role이 실제 거치는 경로만 선별
+- **이미 올바른 곳**: `logger_ml.py:286`, `telegram_engine.py:201,357` (V10.29d~e부터 처리됨)
+- **영향 없음**: MR/HEDGE 경로 30+ 곳은 기존 `LEVERAGE` 그대로 유지 — BC/CB 도달 불가
+- **과거 오염 데이터**: 수정 불가(이미 기록됨). V10.31AF BC/CB 제외 필터로 리포트 노출은 차단됨. 신규 청산부터 정확 기록
