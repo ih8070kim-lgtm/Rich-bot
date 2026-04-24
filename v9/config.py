@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AI"  # ★ V10.31AI: BC/CB x1 ROI 반영(5곳) + PTP 대시보드 AH 동기화(arm 동적/쿨다운 표시)
+VERSION = "10.31AJ"  # ★ V10.31AJ: PTP 활성 중 trim/tp1/dca preorder 재생성 차단 (ReduceOnly -2022 근본 해결)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

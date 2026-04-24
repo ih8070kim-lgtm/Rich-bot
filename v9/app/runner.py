@@ -743,7 +743,7 @@ async def _cancel_tp1_preorder(ex, p: dict, sym: str):
     return await _impl(ex, p, sym)
 
 
-async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
+async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=None):
     """TP1 목표가에 지정가 선주문 배치/갱신/취소.
 
     매 틱 실행. 포지션별로:
@@ -754,10 +754,17 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False):
     # ★ V10.31c: LEVERAGE/calc_roi_pct module-level import 사용 (중복 제거)
     from v9.config import TP1_PARTIAL_RATIO, HEDGE_MODE, TP1_FIXED
 
+    # ★ V10.31AJ: PTP 활성 심볼은 TP1 preorder 재생성/관리 스킵
+    # 근거: PTP가 reduce limit 이미 배치 → TP1 preorder도 reduce → qty 경쟁 -2022
+    _ptp_active = set(system_state.get("_ptp_active_syms", set()) or set()) if system_state else set()
+    
     prices = snapshot.all_prices or {}
 
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
+            continue
+        # ★ V10.31AJ: PTP 활성 심볼 스킵 (재생성 차단)
+        if sym in _ptp_active:
             continue
         for pos_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
@@ -1854,7 +1861,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
 
 # ═════════════════════════════════════════════════════════════════
 # ═════════════════════════════════════════════════════════════════
-async def _place_dca_preorders(ex, st, snapshot):
+async def _place_dca_preorders(ex, st, snapshot, system_state=None):
     """★ V10.30: DCA 선주문 — 스마트 활성화/비활성화.
     
     흐름:
@@ -1880,8 +1887,14 @@ async def _place_dca_preorders(ex, st, snapshot):
     if bal <= 0:
         return
 
+    # ★ V10.31AJ: PTP 활성 심볼은 DCA preorder 재생성/관리 스킵
+    _ptp_active = set(system_state.get("_ptp_active_syms", set()) or set()) if system_state else set()
+
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
+            continue
+        # ★ V10.31AJ: PTP 활성 심볼 스킵
+        if sym in _ptp_active:
             continue
         for pos_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
@@ -2160,7 +2173,7 @@ async def _daily_pnl_report(st):
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.28b: Trim 선주문 관리
 # ═════════════════════════════════════════════════════════════════
-async def _place_trim_preorders(ex, st, snapshot):
+async def _place_trim_preorders(ex, st, snapshot, system_state=None):
     """DCA 체결 후 trim_to_place 플래그 → 바이낸스 limit 주문 + pending_limits 등록."""
     from v9.execution.position_book import ensure_slot, get_p, iter_positions
     from v9.execution.order_router import _PENDING_LIMITS
@@ -2168,8 +2181,14 @@ async def _place_trim_preorders(ex, st, snapshot):
     from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT
     import asyncio
 
+    # ★ V10.31AJ: PTP 활성 심볼은 trim preorder 재생성/관리 스킵
+    _ptp_active = set(system_state.get("_ptp_active_syms", set()) or set()) if system_state else set()
+
     for sym, sym_st in st.items():
         if not isinstance(sym_st, dict):
+            continue
+        # ★ V10.31AJ: PTP 활성 심볼 스킵
+        if sym in _ptp_active:
             continue
         for pos_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
@@ -3108,13 +3127,14 @@ async def _main_loop(ex_init, dry_run: bool):
             await _sync_positions_with_exchange(ex, st, snapshot, system_state=system_state)
 
             # ★ V10.31b: T1 선주문 관리 (LOW/NORMAL만, HIGH는 내부에서 스킵)
-            await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run)
+            # ★ V10.31AJ: system_state 전달 — PTP 활성 심볼 preorder 재생성 차단
+            await _manage_tp1_preorders(ex, st, snapshot, dry_run=dry_run, system_state=system_state)
 
             # ★ V10.31b: Trim 선주문 (LOW/NORMAL만, HIGH는 내부에서 스킵)
-            await _place_trim_preorders(ex, st, snapshot)
+            await _place_trim_preorders(ex, st, snapshot, system_state=system_state)
 
             # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
-            await _place_dca_preorders(ex, st, snapshot)
+            await _place_dca_preorders(ex, st, snapshot, system_state=system_state)
 
             # ★ V10.31e-6: HEDGE_SIM 가상 헷지 시뮬 업데이트 (관찰 전용, 실전 영향 0)
             _tick_hedge_sim(system_state, snapshot)

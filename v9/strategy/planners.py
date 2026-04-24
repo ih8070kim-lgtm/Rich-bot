@@ -2628,6 +2628,31 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
     if not _ptp_update_state(system_state, current_balance, st, now_ts):
         return []
     
+    # ★ V10.31AJ: trigger 활성 진입 즉시 _ptp_active_syms 세팅 (step gap 방지)
+    # 이유: 기존 코드는 step 발사 시점에만 세팅 → 4~5분 step 사이에 공백
+    # → 그 동안 trim/tp1/preorder가 재생성되어 ReduceOnly -2022 재발
+    # 해결: trigger 활성 동안 매 틱 _ptp_active_syms 유지
+    # 대상: 청산 대상인 모든 활성 포지션 심볼 (CORE_MR/CORE_MR_HEDGE, BC/CB 제외)
+    _active_sym_set = set()
+    try:
+        from v9.execution.position_book import iter_positions as _ip_ptp
+        for _s, _ss in st.items():
+            if not isinstance(_ss, dict):
+                continue
+            for _sd, _pp in _ip_ptp(_ss):
+                if not isinstance(_pp, dict):
+                    continue
+                if float(_pp.get("amt", 0) or 0) <= 0:
+                    continue
+                _r = _pp.get("role", "")
+                # BC/CB/INSURANCE/SOFT_HEDGE/CORE_HEDGE는 PTP 대상 아님 (청산 제외)
+                if _r in ("BC", "CB", "INSURANCE_SH", "SOFT_HEDGE", "CORE_HEDGE"):
+                    continue
+                _active_sym_set.add(_s)
+    except Exception:
+        pass
+    system_state["_ptp_active_syms"] = _active_sym_set
+    
     # 단계 진행
     trigger_ts = float(system_state["_ptp_trigger_ts"])
     elapsed = now_ts - trigger_ts
@@ -2758,6 +2783,7 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         system_state["_ptp_peak_balance"] = current_balance
         system_state.pop("_ptp_trigger_ts", None)
         system_state.pop("_ptp_last_step", None)
+        system_state.pop("_ptp_active_syms", None)  # ★ V10.31AJ: preorder 차단 해제
         try:
             from v9.logging.logger_csv import log_system
             log_system("PTP_COMPLETE",
@@ -2844,8 +2870,13 @@ def generate_all_intents(
     _fc_intents = plan_force_close(snapshot, st, system_state, _bad_regime_active)
     intents += _fc_intents
     _fc_syms = {i.symbol for i in _fc_intents}
+    # ★ V10.31AJ: PTP trigger 활성 심볼은 trim/tp1에서 제외 (ReduceOnly -2022 방지)
+    # 근거: PTP가 reduce limit 이미 배치한 상태에서 trim/tp1이 또 reduce 재시도 시
+    #       거래소 reduce qty 합이 포지션 초과 → -2022 대량 발생 (실측 04-24 11:22+ INJ)
+    # _ptp_active_syms는 plan_portfolio_tp가 step 발사 시 세팅, step3 완료 시 제거
+    _ptp_active_syms = system_state.get("_ptp_active_syms", set()) or set()
     # T3 시간 컷 대상 심볼은 FC/TP1/TRIM 중복 방지 (빈 set이라 무해)
-    _exclude = _fc_syms | _t3_8h_syms | _t3_3h_syms
+    _exclude = _fc_syms | _t3_8h_syms | _t3_3h_syms | _ptp_active_syms
 
     intents += plan_tp1(snapshot, st, exclude_syms=_exclude)
     intents += plan_trim_trail(snapshot, st, exclude_syms=_exclude)
