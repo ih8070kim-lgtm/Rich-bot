@@ -2671,14 +2671,23 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
             from v9.execution.order_router import get_pending_limits
             from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
             _cancelled = 0
+            _has_pending_ptp = False
             for _pl_oid, _pl_info in list(get_pending_limits().items()):
                 if _pl_info.get("is_ptp_limit"):
                     _TRIM_CANCEL_QUEUE.append({
                         "sym": _pl_info.get("sym", ""), "oid": _pl_oid,
                     })
                     _cancelled += 1
+                    _has_pending_ptp = True
             if _cancelled > 0:
-                print(f"[PTP] step {cur_step} 이전 PTP limit {_cancelled}건 취소 예약")
+                print(f"[PTP] step {cur_step} 이전 PTP limit {_cancelled}건 취소 예약 — 다음 tick에 force_close")
+            # ★ V10.31AM HOTFIX: cancel과 force_close가 같은 tick에서 발생하면
+            # 거래소에 limit 살아있는 채 시장가 도달 → -2022 ReduceOnly Rejected (실측 ATOM 04-25 01:10:36)
+            # 해결: cancel 발생한 tick은 intent 발사 skip — 다음 tick (5초 뒤)에 cancel 완료된 상태에서 force_close
+            if _has_pending_ptp:
+                # last_step만 갱신하지 말고, 다음 tick에 다시 cur_step==1로 들어와서 처리되도록
+                # last_step은 그대로 두고 빈 intents 반환
+                return []
         except Exception as _ce:
             print(f"[PTP] 이전 limit 취소 실패(무시): {_ce}")
     

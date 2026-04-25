@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AM"  # ★ V10.31AM: PTP 2-step(1분+시장가) + drop 0.5→0.6 + 3시간 corr 진입 필터
+VERSION = "10.31AM2"  # ★ V10.31AM2: AM 핫픽스 — SYNC_RECOVERED_BLOCKED + PTP step 1 race condition
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

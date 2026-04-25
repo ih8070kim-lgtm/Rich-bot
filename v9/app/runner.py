@@ -154,6 +154,28 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                 if ep_diff:  _what.append(f"ep:{old_ep:.6f}→{ex_ep:.6f}")
                 print(f"[SYNC] ★ {sym} {side} 수정: {' | '.join(_what)}")
         else:
+            # ★ V10.31AM: 거래소 잔량이 MIN_NOTIONAL 미달이면 RECOVERED 차단
+            # 근거: SUI 케이스 (04-25 06:03) — RESIDUAL_FORCE_CLEAR 후 12초 만에 sync로 부활 → 무한루프
+            # 거래소 청산 불가능한 잔량 ($5 미만 또는 min_qty 미달)은 book에 등록할 가치 없음
+            try:
+                from v9.config import SYM_MIN_QTY as _SYNC_SMQ, SYM_MIN_QTY_DEFAULT as _SYNC_SMQD
+                _sync_min_qty = _SYNC_SMQ.get(sym, _SYNC_SMQD)
+                _sync_notional = ex_qty * ex_ep if ex_ep > 0 else 0.0
+                if ex_qty < _sync_min_qty * 0.9999 or _sync_notional < 5.0:
+                    # MIN_NOTIONAL 미달 — sync 등록 차단 (RESIDUAL 무한루프 원천 차단)
+                    print(f"[SYNC] ★ {sym} {side} RECOVERED 차단: "
+                          f"qty={ex_qty:.8f} notional=${_sync_notional:.4f} "
+                          f"(min_qty={_sync_min_qty}, min_notional=$5) — 청산 불가능 잔량")
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("SYNC_RECOVERED_BLOCKED",
+                                   f"{sym} {side} qty={ex_qty:.8f} notional=${_sync_notional:.4f} 청산 불가")
+                    except Exception:
+                        pass
+                    continue  # 이 심볼/side skip
+            except Exception:
+                pass
+
             # ★ v10.15c: pending_limit 메타데이터가 있으면 role/dca 반영
             _pl_role = "CORE_MR"
             _pl_dca = None  # None이면 역추정 사용
