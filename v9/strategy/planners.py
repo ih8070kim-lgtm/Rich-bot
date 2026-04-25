@@ -1498,6 +1498,12 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         _remaining = total_qty - close_qty
         if 0 < _remaining < _sym_min_qty:
             close_qty = total_qty
+        # ★ V10.31AM3: 잔량 MIN_NOTIONAL 방어 — 잔량 노셔널 $5 미달이면 전량 매도
+        # 근거: 실측 [04-25] APT/ATOM 트림/TP1 후 lot 정상이지만 노셔널 미달 잔량 발생
+        # 해결: TP1 qty 결정 시 잔량 노셔널이 $5 미만 예상이면 전량
+        _remaining_notional = (total_qty - close_qty) * curr_p
+        if 0 < _remaining_notional < 5.0:
+            close_qty = total_qty
         close_qty = min(close_qty, total_qty)
         if close_qty <= 0:
             continue

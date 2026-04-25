@@ -413,6 +413,13 @@ async def notify_async_fill(
                 f"✅ <b>{short_sym}</b> TP1 Limit\n"
                 f"{icon} {roi:+.1f}% <b>${pnl:+.2f}</b>  {ts}"
             )
+        elif fill_type == "PTP_LIMIT":
+            # ★ V10.31AM3: PTP limit 체결 알림 (이전엔 PENDING_OPEN으로 잘못 분류됨)
+            icon = "🟢" if pnl >= 0 else "🔴"
+            await send_telegram_message(
+                f"🛑 <b>{short_sym}</b> PTP Limit T{tier}\n"
+                f"{icon} {roi:+.1f}% <b>${pnl:+.2f}</b>  {ts}"
+            )
         elif fill_type == "TRIM_FILL":
             icon = "🟢" if pnl >= 0 else "🔴"
             await send_telegram_message(

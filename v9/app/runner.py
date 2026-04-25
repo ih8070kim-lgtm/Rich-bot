@@ -1226,7 +1226,27 @@ async def _manage_pending_limits(ex, st, snapshot):
             # ★ V10.17: Pending limit 체결 텔레그램 알림
             if _TELEGRAM_OK:
 
-                if info.get("is_trim"):
+                # ★ V10.31AM3: PTP limit 체결 알림 — 기존엔 is_trim/TP1/DCA 어디에도 안 잡혀 PENDING_OPEN으로 잘못 분류됨
+                #   사용자 보고 [04-26]: "ptp 지정가 체결된애들 알림 안오더라"
+                #   원인: info.intent_type=CLOSE + is_ptp_limit=True인 케이스 분기 없음
+                if info.get("is_ptp_limit"):
+                    _pl_type = "PTP_LIMIT"
+                    # PnL 계산 — 포지션 EP 기준 (TP1과 동일 패턴)
+                    _ptp_ep = float(info.get("entry_price", 0) or 0)
+                    if _ptp_ep <= 0:
+                        _ptp_pos_side = "sell" if info["side"] == "buy" else "buy"
+                        _ptp_p = get_p(st.get(sym, {}), _ptp_pos_side) if st else None
+                        _ptp_ep = float(_ptp_p.get("ep", 0) or 0) if isinstance(_ptp_p, dict) else 0.0
+                    if _ptp_ep > 0 and avg_price > 0:
+                        if info["side"] == "sell":
+                            _trim_pnl = filled_qty * (avg_price - _ptp_ep)
+                        else:
+                            _trim_pnl = filled_qty * (_ptp_ep - avg_price)
+                        _trim_roi = calc_roi_pct(_ptp_ep, avg_price,
+                            "sell" if info["side"] == "buy" else "buy", LEVERAGE)
+                    else:
+                        _trim_roi = _trim_pnl = 0.0
+                elif info.get("is_trim"):
                     _pl_type = "TRIM_FILL"
                     if _rpnl != 0.0:
                         _trim_pnl = _rpnl

@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AM2"  # ★ V10.31AM2: AM 핫픽스 — SYNC_RECOVERED_BLOCKED + PTP step 1 race condition
+VERSION = "10.31AM3"  # ★ V10.31AM3: 잔량 MIN_NOTIONAL 발생 차단 (TP1/TRIM 시 잔량 $5 미달 → 전량) + PTP limit 체결 알림 분기 추가
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -511,10 +511,24 @@ def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0
         if trim_notional <= 0:
             return 0.0
         qty = trim_notional / price
-        return min(qty, max_trim_qty)  # ★ 안전 캡
+        qty = min(qty, max_trim_qty)  # ★ 안전 캡
+        # ★ V10.31AM3: 잔량 MIN_NOTIONAL 방어 — 트림 후 잔량 노셔널이 $5 미만이면 전량 매도
+        # 근거: 실측 [04-25] ATOM/APT 트림 후 0.01~2.10 lot 잔량 ($0.02~$2.04) 발생
+        # 거래소 MIN_NOTIONAL 미달이라 후속 청산 불가 → 사용자 수동 청산 부담
+        # 해결: 트림 시 잔량이 $5 미달 예상이면 전량 청산
+        residual_notional = (total_amt - qty) * price
+        if 0 < residual_notional < 5.0:
+            qty = total_amt  # 전량 매도
+        return qty
 
     # fallback: 비율 방식 (bal 없을 때)
-    return min(total_amt * (tier_w / cum_w_current), max_trim_qty)
+    qty = min(total_amt * (tier_w / cum_w_current), max_trim_qty)
+    # ★ V10.31AM3: fallback 경로도 동일 방어 (bal 없을 땐 price 기반 미달 검사)
+    if price > 0:
+        residual_notional = (total_amt - qty) * price
+        if 0 < residual_notional < 5.0:
+            qty = total_amt
+    return qty
 
 
 def calc_tp1_thresh(dca_level: int, worst_roi: float) -> float:
