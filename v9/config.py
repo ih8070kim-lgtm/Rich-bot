@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AM3"  # ★ V10.31AM3: 잔량 MIN_NOTIONAL 발생 차단 (TP1/TRIM 시 잔량 $5 미달 → 전량) + PTP limit 체결 알림 분기 추가
+VERSION = "10.31AM3"  # ★ V10.31AM3: 잔량 MIN_NOTIONAL 차단 (TP1/TRIM/preorder) + PTP limit 알림 + PTP 후 OPEN 1h 쿨다운
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

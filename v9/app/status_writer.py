@@ -375,6 +375,7 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
         today_pnl = 0.0
         today_trades = 0
         today_wins = 0
+        today_ghost = 0  # ★ V10.31AM3: PTP/sync로 PnL 미캡처된 거래 수
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
         tail_today = _tail_lines(trades_file, 300)
         for line in tail_today:
@@ -384,6 +385,40 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 today_trades += 1
                 if t["pnl"] > 0:
                     today_wins += 1
+            else:
+                # ★ V10.31AM3: GHOST_CLEANUP 별도 카운트 (PTP 청산 등 PnL 미캡처)
+                # _parse_trade_line이 None 반환 (reason in "" or "GHOST_CLEANUP")
+                # 오늘 날짜인지 직접 확인
+                try:
+                    cols = line.strip().split(",")
+                    if len(cols) >= 12 and cols[0].startswith(today_str) and cols[11] == "GHOST_CLEANUP":
+                        today_ghost += 1
+                except Exception:
+                    pass
+
+        # ★ V10.31AM3: 오늘 잔고 변화 — GHOST 거래 손익 검증용
+        # 자정(UTC) 시점 잔고 vs 현재 잔고 차이 = 진짜 일일 손익
+        # today_pnl과 차이가 크면 PTP 같은 미캡처 거래의 영향 추정 가능
+        today_balance_diff = None
+        try:
+            if os.path.exists(_BAL_HISTORY):
+                bal_lines = _tail_lines(_BAL_HISTORY, 1500)
+                today_first_bal = None
+                today_last_bal = None
+                for bl in bal_lines:
+                    bl_cols = bl.strip().split(",")
+                    if len(bl_cols) >= 2 and bl_cols[0].startswith(today_str):
+                        try:
+                            _b = float(bl_cols[1])
+                            if today_first_bal is None:
+                                today_first_bal = _b
+                            today_last_bal = _b
+                        except Exception:
+                            continue
+                if today_first_bal and today_last_bal:
+                    today_balance_diff = round(today_last_bal - today_first_bal, 2)
+        except Exception:
+            pass
 
         # ── ★ V10.31c: "오늘" 탭용 — 최근 7일 일별 + 전략별 + 시간대별 ──
         daily_list = []
@@ -636,6 +671,9 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
                 "trades": today_trades,
                 "wins": today_wins,
                 "wr": round(today_wins / today_trades * 100, 0) if today_trades > 0 else 0,
+                # ★ V10.31AM3: GHOST_CLEANUP 카운트 + 잔고 변화 (PTP 손익 미캡처 검증)
+                "ghost": today_ghost,
+                "balance_diff": today_balance_diff,
             },
             "recent_trades": recent_trades[-15:],
             "bal_history": bal_history,

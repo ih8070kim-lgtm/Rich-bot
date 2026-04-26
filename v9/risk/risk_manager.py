@@ -222,6 +222,19 @@ def evaluate_intent(
         if now < cd_until:
             return _reject(RejectCode.REJECT_COOLDOWN, f"cooldown until {cd_until:.0f}")
 
+        # ★ V10.31AM3: PTP 발동 후 신규 OPEN 쿨다운 — 사용자 결정 [04-26]으로 제거
+        # 도입 근거: PTP가 청산한 자리 즉시 재진입 시 같은 손실 패턴 우려
+        # 제거 근거: 사용자 실측 관찰 [04-26 PTP 케이스]
+        #   FET/WLD/SUI 진입 후 즉시 양수 (평균 +0.09%, 6분 시점)
+        #   "추세 타고 멈춘 뒤 정확한 MR 자리가 형성된다"
+        #   PTP가 청산한 후 시장 일시 정지점 = 양호한 MR 진입 기회
+        # 재도입 검토 시점: PTP 직후 진입 5회 이상 누적 후 평균 손익 음수일 때
+        # if itype == IntentType.OPEN:
+        #     _ptp_cd = float((system_state or {}).get("_ptp_cooldown_until", 0.0) or 0.0)
+        #     if _ptp_cd > 0 and now < _ptp_cd:
+        #         return _reject(RejectCode.REJECT_COOLDOWN,
+        #                        f"ptp_cooldown {_ptp_cd - now:.0f}s")
+
         corr     = (snapshot.correlations or {}).get(sym, 1.0)
         # ★ V10.31AM: OPEN 체크는 3시간 corr 사용 (단기 decoupling 감지)
         # DCA/HEDGE는 기존 2일 corr 유지 (이미 진입된 포지션의 장기 연결성)

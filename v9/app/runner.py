@@ -878,6 +878,13 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
             remaining = total_qty - close_qty
             if 0 < remaining < _min_qty:
                 close_qty = total_qty
+            # ★ V10.31AM3 HOTFIX: preorder 경로에도 잔량 MIN_NOTIONAL 방어 추가
+            # 실측 [04-26 04:48 UNI]: preorder 경로 사용 시 잔량 1.0 ($3.24) 발생.
+            # plan_tp1에만 AM3 적용했고 _manage_tp1_preorders 누락 → AM3 무력화.
+            # 해결: 동일 로직 — 잔량 노셔널 $5 미달이면 전량 매도
+            _remaining_notional = (total_qty - close_qty) * target_price
+            if 0 < _remaining_notional < 5.0:
+                close_qty = total_qty
             if close_qty <= 0:
                 continue
 

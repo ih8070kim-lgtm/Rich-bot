@@ -127,7 +127,7 @@ function render(){
   $('kpis').innerHTML=`
     <div class="kpi"><div class="l">Balance</div><div class="v">$${data.balance.toLocaleString()}</div><div class="s">MR ${(data.margin_ratio*100).toFixed(1)}%</div></div>
     <div class="kpi"><div class="l">미실현</div><div class="v" style="color:${c(s.unrealized_pnl)}">${s.unrealized_pnl>0?'+':''}$${s.unrealized_pnl.toFixed(1)}</div><div class="s">${s.total_positions}포지션 (L${s.long} S${s.short})</div></div>
-    <div class="kpi"><div class="l">오늘 PnL</div><div class="v" style="color:${c(td.pnl)}">${td.pnl>0?'+':''}$${td.pnl.toFixed(1)}</div><div class="s">${td.trades}건 WR${td.wr}%</div></div>
+    <div class="kpi"><div class="l">오늘 PnL</div><div class="v" style="color:${c(td.pnl)}">${td.pnl>0?'+':''}$${td.pnl.toFixed(1)}</div><div class="s">${td.trades}건 WR${td.wr}%${td.ghost?` <span style="color:var(--a)">G${td.ghost}</span>`:''}${td.balance_diff!==null && td.balance_diff!==undefined ? ` · 잔고${td.balance_diff>0?'+':''}$${td.balance_diff.toFixed(1)}` : ''}</div></div>
     <div class="kpi"><div class="l">Urgency</div><div class="v" style="color:${data.skew.urgency>30?'var(--r)':data.skew.urgency>15?'var(--a)':'var(--c)'}">${data.skew.urgency||0}</div><div class="s">${data.skew.heavy_side||'-'} ${data.skew.heavy_roi||0}%</div></div>
   `;
 
