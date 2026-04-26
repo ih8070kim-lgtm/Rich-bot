@@ -118,3 +118,31 @@ HEDGE_SIM_COLUMNS = [
     "sim_close_reason",       # VIRTUAL_TP1 / VIRTUAL_HARD_SL / ACTUAL_TREND_CLOSE
     "hold_sec",
 ]
+
+# ★ V10.31AM3: DCA_SIM — DCA 폭 변경 백테스트용 시계열 가격 로그 (사용자 결정 [04-26])
+# 사용자 통찰: "구체적인 단가를 남기면 로그로 백테스트 가능"
+# 목적: 실거래 영향 0인 상태로 미래 백테스트 가능한 가격 흐름 데이터 확보
+#   - 60초 간격 throttle (자원 영향 최소)
+#   - 활성 MR(T1+) 포지션마다 mark_price + 현재 ROI 기록
+#   - 사후 분석 시 "T2 -1.0%, T3 -2.0%였다면?" 임의 파라미터 시뮬 가능
+# 사용법:
+#   bt_dca_replay.py에서 (sym, t1_ep, t1_open_ts) 키로 시계열 재구성
+#   가상 DCA 트리거 → 가상 평단 → 가상 TP1/HARD_SL 시뮬
+DCA_SIM_COLUMNS = [
+    "time",                # 기록 시각 (UTC)
+    "trace_id",            # T1 진입 trace_id (포지션 식별)
+    "symbol",
+    "side",                # buy/sell (T1 OPEN 기준)
+    "t1_ep",               # T1 진입가 (DCA 후에도 변경 안 됨 — 백테스트 기준점)
+    "t1_open_ts",          # T1 진입 시각 (epoch sec)
+    "t1_amt",              # T1 진입 수량
+    "mark_price",          # 현재 mark price (실측)
+    "t1_roi_pct",          # T1 진입가 기준 ROI% (DCA 무관 raw 가격 변동)
+    "actual_tier",         # 실제 tier (1/2/3) — 비교용
+    "actual_blended_ep",   # 실제 blended ep (DCA 발생 시 변경)
+    "actual_amt",          # 실제 보유 수량 (DCA 누적)
+    # ★ V10.31AM3 옵션 A: PTP 시뮬 + 슬롯 한계 시뮬용 추가 (사용자 결정 [04-26])
+    # 사용자 시나리오: PTP drop 0.4, T3 폐지, DCA 33/67 등 극단 스캘핑 시뮬 정확도 ↑
+    "balance",             # 그 시점 계좌 잔고 (PTP drop 0.4 시뮬용)
+    "active_count",        # 그 시점 활성 포지션 수 (슬롯 한계 시뮬용)
+]

@@ -2083,6 +2083,88 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
+def _tick_dca_sim(system_state: dict, st: dict, snapshot):
+    """★ V10.31AM3: DCA 폭 변경 백테스트용 시계열 가격 로그 (관찰 전용).
+    
+    사용자 결정 [04-26]: "구체적인 단가를 남기면 로그로 백테스트 가능"
+    옵션 A 확장: balance + active_count 추가 (PTP drop / 슬롯 한계 시뮬용)
+    
+    동작:
+        활성 MR T1+ 포지션마다 60초 throttle로 mark_price + ROI 기록
+        실거래 영향 0. 자원 영향 최소 (1분에 1번 + 활성 포지션 수만큼).
+    
+    데이터 사용:
+        log_dca_sim.csv → (sym, t1_open_ts) 키로 시계열 그룹핑
+        가상 DCA 트리거 (예: T2 -1.0%, T3 -2.0%) 임의 시뮬 가능
+        PTP drop 시뮬: balance peak → drop 도달 시점
+        슬롯 한계 시뮬: active_count로 신규 진입 가능성 판정
+    
+    예외 시 조용히 무시 (try/except).
+    """
+    try:
+        if not system_state or not snapshot or not st:
+            return
+        _last_ts = system_state.get("_dca_sim_last_ts", 0.0)
+        now = time.time()
+        if now - _last_ts < 60:  # 60초 throttle
+            return
+        _prices = getattr(snapshot, "all_prices", None) or {}
+        from v9.config import LEVERAGE
+        from v9.logging.logger_csv import log_dca_sim
+        from v9.utils.utils_math import calc_roi_pct as _calc_roi
+
+        # ★ V10.31AM3 옵션 A: balance + active_count 한 번 계산 (모든 row에 동일 적용)
+        _balance = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+        _active_count = 0
+        for _s, _ss in st.items():
+            if not isinstance(_ss, dict):
+                continue
+            for _ps in ("p_long", "p_short"):
+                if isinstance(_ss.get(_ps), dict) and float(_ss[_ps].get("amt", 0) or 0) > 0:
+                    _active_count += 1
+
+        for sym, sym_st in st.items():
+            if not isinstance(sym_st, dict):
+                continue
+            mark = float(_prices.get(sym, 0) or 0)
+            if mark <= 0:
+                continue
+            for pos_side in ("buy", "sell"):
+                p = sym_st.get(f"p_{'long' if pos_side == 'buy' else 'short'}")
+                if not isinstance(p, dict):
+                    continue
+                # MR/CB/COUNTER만 — BC 제외 (BC는 별도 전략)
+                _role = p.get("role", "")
+                if _role in ("BC", "INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE"):
+                    continue
+                _t1_ep = float(p.get("t1_ep", 0) or 0)
+                if _t1_ep <= 0:
+                    continue  # 구버전 포지션 (재시작 전 데이터) — 스킵
+                _t1_ts = float(p.get("t1_open_ts", 0) or 0)
+                _t1_amt = float(p.get("t1_amt", 0) or 0)
+                _trace = p.get("tag", "") or f"sim_{sym}_{int(_t1_ts)}"
+                # T1 진입가 기준 ROI (DCA 무관 raw 가격 변동)
+                _t1_roi = _calc_roi(_t1_ep, mark, pos_side, LEVERAGE)
+                log_dca_sim(
+                    trace_id=_trace,
+                    symbol=sym,
+                    side=pos_side,
+                    t1_ep=_t1_ep,
+                    t1_open_ts=_t1_ts,
+                    t1_amt=_t1_amt,
+                    mark_price=mark,
+                    t1_roi_pct=_t1_roi,
+                    actual_tier=int(p.get("dca_level", 1) or 1),
+                    actual_blended_ep=float(p.get("ep", 0) or 0),
+                    actual_amt=float(p.get("amt", 0) or 0),
+                    balance=_balance,
+                    active_count=_active_count,
+                )
+        system_state["_dca_sim_last_ts"] = now
+    except Exception as e:
+        print(f"[DCA_SIM] 무시: {e}")
+
+
 def _tick_hedge_sim(system_state: dict, snapshot):
     """매 틱 실행: _hedge_sim dict의 가상 포지션들을 현재 가격 기준으로 업데이트.
     DCA 임계 도달 시 평단 압축, TP1/HARD_SL 도달 시 가상 청산 + log_hedge_sim.
@@ -3200,6 +3282,10 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ V10.31e-6: HEDGE_SIM 가상 헷지 시뮬 업데이트 (관찰 전용, 실전 영향 0)
             _tick_hedge_sim(system_state, snapshot)
+
+            # ★ V10.31AM3: DCA_SIM — DCA 폭 변경 백테스트용 시계열 가격 로그
+            # 60초 throttle, 실거래 영향 0. 사후 백테스트로 임의 DCA 파라미터 시뮬 가능
+            _tick_dca_sim(system_state, st, snapshot)
 
             # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
             try:

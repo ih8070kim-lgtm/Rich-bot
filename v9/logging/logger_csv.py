@@ -17,6 +17,7 @@ from v9.logging.schemas import (
     RISK_COLUMNS,
     TRADES_COLUMNS,
     UNIVERSE_COLUMNS,
+    DCA_SIM_COLUMNS,
 )
 
 
@@ -359,3 +360,51 @@ def log_hedge_sim(
         "hold_sec": int(hold_sec),
     }
     _append_csv(_log_path("log_hedge_sim.csv"), HEDGE_SIM_COLUMNS, row)
+
+
+# ── log_dca_sim (★ V10.31AM3: DCA 폭 변경 백테스트용 시계열 가격 로그) ─────
+def log_dca_sim(
+    trace_id: str,
+    symbol: str,
+    side: str,
+    t1_ep: float,
+    t1_open_ts: float,
+    t1_amt: float,
+    mark_price: float,
+    t1_roi_pct: float,
+    actual_tier: int,
+    actual_blended_ep: float,
+    actual_amt: float,
+    balance: float = 0.0,
+    active_count: int = 0,
+):
+    """DCA 백테스트용 시계열 가격 로그.
+    
+    60초 throttle 호출 — runner.py에서 last_sim_ts 관리.
+    실거래 영향 0. 사후 백테스트로 임의 DCA 파라미터 시뮬 가능.
+    
+    백테스트 사용:
+        df = pd.read_csv("log_dca_sim.csv")
+        # (sym, t1_open_ts) 키로 그룹핑하여 각 T1 포지션의 시계열 추적
+        # 가상 DCA 트리거 시뮬 (예: T2 -1.0%, T3 -2.0%)
+        # 가상 평단/TP1/HARD_SL 계산
+        # PTP drop 0.4 시뮬: balance peak 추적 → drop 도달 시점 청산
+        # 슬롯 한계 시뮬: active_count로 새 진입 가능성 판정
+    """
+    row = {
+        "time": _now_str(),
+        "trace_id": str(trace_id),
+        "symbol": symbol,
+        "side": side,
+        "t1_ep": round(float(t1_ep), 8),
+        "t1_open_ts": round(float(t1_open_ts), 1),
+        "t1_amt": round(float(t1_amt), 8),
+        "mark_price": round(float(mark_price), 8),
+        "t1_roi_pct": round(float(t1_roi_pct), 4),
+        "actual_tier": int(actual_tier),
+        "actual_blended_ep": round(float(actual_blended_ep), 8),
+        "actual_amt": round(float(actual_amt), 8),
+        "balance": round(float(balance), 2),
+        "active_count": int(active_count),
+    }
+    _append_csv(_log_path("log_dca_sim.csv"), DCA_SIM_COLUMNS, row)

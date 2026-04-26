@@ -200,6 +200,10 @@ def apply_order_results(
                 "side":             intent.side,
                 "ep":               avg_px if avg_px > 0 else snapshot.all_prices.get(sym, 0.0),
                 "original_ep":      avg_px if avg_px > 0 else snapshot.all_prices.get(sym, 0.0),
+                # ★ V10.31AM3: DCA 백테스트용 — T1 진입가/시각/수량 영구 보존 (DCA 후에도 변경 X)
+                "t1_ep":            avg_px if avg_px > 0 else snapshot.all_prices.get(sym, 0.0),
+                "t1_open_ts":       now,
+                "t1_amt":           filled,
                 "amt":              filled,
                 "time":             now,
                 "last_dca_time":    now,

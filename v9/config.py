@@ -197,7 +197,11 @@ TP1_PCT = 1.8   # ★ v10.8: 방어형 — 빠른 확정 (레거시, 미사용)
 # ★ V10.27: TP1 고정 threshold (ROI%) — worst_roi/ATR 스케일링 전부 제거
 # T1~T3: 고정값. T4만 worst_roi+2.0 (plan_tp1에서 처리)
 # ★ V10.29: T3/T4 TP 두배
-TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}  # T1 스캘핑 2.0% 유지
+# ★ V10.31AM3: TP1 변경 롤백 (baseline 데이터 수집 우선, 사용자 결정 [04-26], 옵션 A)
+#   원래 변경 시도: T1 2.0→1.5, T2 1.5→1.0 (사용자 미끄러짐 관찰 25건)
+#   롤백 이유: log_dca_sim 1주 baseline 데이터 누적 후 시뮬로 검증 → 결정
+#   변수 분리 원칙 — TP1/TRIM/DCA 동시 변경 시 효과 측정 불가
+TP1_FIXED = {1: 2.0, 2: 1.5, 3: 2.4, 4: 1.6}  # T1 스캘핑 2.0% baseline 유지
 
 # ★ V10.27c: HARD_SL = DCA 트리거 -1% / T4는 체결가 -2%
 # ★ V10.29: SL = 다음 DCA 트리거 - 2%
@@ -584,7 +588,7 @@ BC_MAX_POS          = 2         # ★ 테스트: 슬롯 2개
 BC_SIZE_DIVISOR     = 10        # ★ 테스트: equity/10 ≈ 10%
 BC_MAX_HOLD_HOURS   = 336       # 14일
 BC_ARMED_EXPIRY_H   = 720       # ★ V10.29d: ARMED 만료 (시간, 30일)
-BC_PULLBACK_MAX     = 0.05      # ★ V10.31b: 고점 대비 5% 이상 빠지면 스킵 (이미 회귀 진행)
+BC_PULLBACK_MAX     = 0.08      # ★ V10.31AM3: 5%→8% — 거래량/RSI 진정 검증 추가에 따른 진입 윈도우 확대 (사용자 결정 [04-26], 옵션 A)
 BC_PULLBACK_MIN     = 0.005     # 0.5% 미만이면 대기
 BC_UNI_TOP_N        = 20        # 일일 유니버스 상위 20개
 BC_BETA_WINDOW      = 168       # ★ V10.29d: beta 계산 윈도우 (1h bars = 7일)

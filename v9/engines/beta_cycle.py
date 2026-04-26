@@ -299,22 +299,23 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                     _v_avg = sum(_vols[-168:]) / min(168, len(_vols))  # 7일 평균
                     if _v_recent > 0 and _v_avg > 0:
                         _vol_ratio_avg = _v_recent / _v_avg
-                        if _vol_ratio_avg > 1.2:
-                            print(f"[BC] ⏭ SKIP {sym} 거래량 미진정 (평균 대비 {_vol_ratio_avg:.1f}x > 1.2x)")
+                        # ★ V10.31AM3 옵션A: 1.2x → 1.5x (평균 자체에 peak 포함되어 부풀려짐 보정)
+                        if _vol_ratio_avg > 1.5:
+                            print(f"[BC] ⏭ SKIP {sym} 거래량 미진정 (평균 대비 {_vol_ratio_avg:.1f}x > 1.5x)")
                             continue
                     # peak 비교 보조 검증 (peak 대비 충분히 감소)
                     _peak_vol = arm.get("peak_vol", 0.0)
                     if _peak_vol > 0 and _v_recent > 0:
                         _vol_ratio_peak = _v_recent / _peak_vol
-                        if _vol_ratio_peak > 0.5:
-                            # peak 대비 절반 이상이면 아직 식는 중
-                            print(f"[BC] ⏭ SKIP {sym} 거래량 peak 대비 {_vol_ratio_peak:.1%} > 50% (충분히 감소 안됨)")
+                        # ★ V10.31AM3 옵션A: 50% → 70% (진입 가능성 확보)
+                        if _vol_ratio_peak > 0.7:
+                            print(f"[BC] ⏭ SKIP {sym} 거래량 peak 대비 {_vol_ratio_peak:.1%} > 70% (충분히 감소 안됨)")
                             continue
 
                 # ── 하락 모멘텀 — RSI 1h 식어가는 중 + 하락 방향 ──
                 # 사용자 요청 [04-26]: 음봉 카운트보다 RSI/EMA가 깔끔
                 # 컨셉:
-                #   RSI < 65 = peak 과매수에서 식어가는 중 (60대 = 식는 초입)
+                #   RSI < 60 = peak 과매수에서 식어가는 중 (60 = 식는 영역 진입)
                 #   RSI[-1] < RSI[-2] = 모멘텀 하락 방향 확정
                 # 음봉 카운트 대비 장점: 정량적, 봉 노이즈 둔감
                 if len(_ohlcv_1h) >= 17:
@@ -325,8 +326,9 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                         _rsi_now = calc_rsi(_closes_now, 14)
                         _rsi_prev = calc_rsi(_closes_prev, 14)
                         # 조건 1: RSI 식어가는 중 (peak 영역 통과)
-                        if _rsi_now >= 65:
-                            print(f"[BC] ⏭ SKIP {sym} RSI 미식음 (RSI 1h={_rsi_now:.1f} >= 65)")
+                        # ★ V10.31AM3 옵션A: 65 → 60 (RSI 65는 너무 일찍, 60이 식음 진입점)
+                        if _rsi_now >= 60:
+                            print(f"[BC] ⏭ SKIP {sym} RSI 미식음 (RSI 1h={_rsi_now:.1f} >= 60)")
                             continue
                         # 조건 2: RSI 하락 방향 (모멘텀 식음 진행)
                         if _rsi_now >= _rsi_prev:
