@@ -202,33 +202,58 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
 
             if sym not in _armed:
                 _bl = _calc_baseline_excess(sym)
+                # ★ V10.31AM3: peak 시점 거래량 저장 (진정 검증용)
+                _peak_vol = 0.0
+                try:
+                    _arm_ohlcv = (snapshot.ohlcv_pool or {}).get(sym, {}).get('1h', [])
+                    if _arm_ohlcv and len(_arm_ohlcv[-2]) > 5:
+                        _peak_vol = float(_arm_ohlcv[-2][5])
+                except Exception:
+                    pass
                 _armed[sym] = {
                     "ts": time.time(),
                     "peak_excess": arm_excess,
                     "peak_price": cur_p,
+                    "peak_vol": _peak_vol,
                     "beta": arm_beta,
                     "tf": arm_tf,
                     "baseline": _bl if _bl is not None else 0.0,
                 }
-                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β↑={arm_beta:.2f} tf={arm_tf} baseline={_armed[sym]['baseline']:+.1%}")
+                print(f"[BC] 🔔 ARMED {sym} excess={arm_excess:+.1%} β↑={arm_beta:.2f} tf={arm_tf} baseline={_armed[sym]['baseline']:+.1%} peak_vol={_peak_vol:.0f}")
             else:
                 if arm_excess > _armed[sym]["peak_excess"]:
                     _armed[sym]["peak_excess"] = arm_excess
                 if cur_p > _armed[sym]["peak_price"]:
                     _armed[sym]["peak_price"] = cur_p
+                    # ★ V10.31AM3: peak 갱신 시 peak_vol도 갱신
+                    try:
+                        _arm_ohlcv = (snapshot.ohlcv_pool or {}).get(sym, {}).get('1h', [])
+                        if _arm_ohlcv and len(_arm_ohlcv[-2]) > 5:
+                            _armed[sym]["peak_vol"] = float(_arm_ohlcv[-2][5])
+                    except Exception:
+                        pass
                 # ★ V10.29e: 1d가 나중에 트리거되면 tf 승격 + 만료 연장
                 if arm_tf == "1d" and _armed[sym].get("tf") == "1h":
                     _armed[sym]["tf"] = "1d"
                     _armed[sym]["ts"] = time.time()
 
-        # ── SHORT 진입: 1h excess가 baseline(72h 정상 수준)으로 복귀해야 진입 ──
+        # ── SHORT 진입: ARM tf에 맞춰 excess 식음 체크 ──
         # ★ V10.30: 고정 NORM_THRESH 제거 → 심볼별 baseline 적응형
+        # ★ V10.31AM3: 1d ARM은 1d excess로 식음 체크 (사용자 보고 [04-26]: "일 기준 매수 안됨")
+        #   기존: tf 무관 1h excess만 체크 → 1d ARM 후 1h만 식어도 진입 시도
+        #   변경: 1h ARM이면 1h excess, 1d ARM이면 1d excess 기준
         norm_triggered = False
         if sym in _armed:
             _bl = _armed[sym].get("baseline", 0.0)
-            # 1h excess가 baseline 이하 = "진짜 식었다"
-            if excess_1h is not None and excess_1h <= _bl:
-                norm_triggered = True
+            _arm_tf = _armed[sym].get("tf", "1h")
+            if _arm_tf == "1d":
+                # 1d ARM → 1d excess가 baseline 복귀해야 (24h 누적 식음)
+                if excess_d is not None and excess_d <= _bl:
+                    norm_triggered = True
+            else:
+                # 1h ARM (기본) → 1h excess
+                if excess_1h is not None and excess_1h <= _bl:
+                    norm_triggered = True
 
         # ★ V10.29e: excess 완전 되돌림(≤0) → ARMED 해제 (기회 소멸)
         if sym in _armed:
@@ -252,6 +277,65 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
                 continue
             if pullback < CFG.BC_PULLBACK_MIN:
                 continue
+
+            # ★ V10.31AM3: BC 진입 "진정 상태" 검증 — 사용자 컨셉 [04-26]
+            #   "peak 후 거래량 식음 → 계단식 하락 시작 → 그 계단에 합류"
+            #   사용자 통찰: peak 거래량은 일반 대비 600% → 평균(7일) 비교가 진짜 식음
+            #   사용자 요청: 음봉 카운트 대신 RSI 사용 (정량적, 노이즈 둔감)
+            #
+            #   3중 검증 (AND):
+            #     1. 거래량 평균 대비 ≤ 1.2x (식음)
+            #     2. 거래량 peak 대비 ≤ 50% (충분히 감소)
+            #     3. RSI 1h < 65 + 하락 방향 (모멘텀 식어가는 중)
+            try:
+                _ohlcv_1h = (snapshot.ohlcv_pool or {}).get(sym, {}).get('1h', [])
+
+                # ── 거래량 평균 대비 진정도 (7일 평균 기준) ──
+                if sym in _hourly_volumes and len(_hourly_volumes[sym]) >= 48:
+                    _vols = list(_hourly_volumes[sym])
+                    _v_recent = float(_ohlcv_1h[-2][5]) if len(_ohlcv_1h) >= 2 and len(_ohlcv_1h[-2]) > 5 else 0
+                    if _v_recent <= 0 and len(_vols) >= 1:
+                        _v_recent = _vols[-1]
+                    _v_avg = sum(_vols[-168:]) / min(168, len(_vols))  # 7일 평균
+                    if _v_recent > 0 and _v_avg > 0:
+                        _vol_ratio_avg = _v_recent / _v_avg
+                        if _vol_ratio_avg > 1.2:
+                            print(f"[BC] ⏭ SKIP {sym} 거래량 미진정 (평균 대비 {_vol_ratio_avg:.1f}x > 1.2x)")
+                            continue
+                    # peak 비교 보조 검증 (peak 대비 충분히 감소)
+                    _peak_vol = arm.get("peak_vol", 0.0)
+                    if _peak_vol > 0 and _v_recent > 0:
+                        _vol_ratio_peak = _v_recent / _peak_vol
+                        if _vol_ratio_peak > 0.5:
+                            # peak 대비 절반 이상이면 아직 식는 중
+                            print(f"[BC] ⏭ SKIP {sym} 거래량 peak 대비 {_vol_ratio_peak:.1%} > 50% (충분히 감소 안됨)")
+                            continue
+
+                # ── 하락 모멘텀 — RSI 1h 식어가는 중 + 하락 방향 ──
+                # 사용자 요청 [04-26]: 음봉 카운트보다 RSI/EMA가 깔끔
+                # 컨셉:
+                #   RSI < 65 = peak 과매수에서 식어가는 중 (60대 = 식는 초입)
+                #   RSI[-1] < RSI[-2] = 모멘텀 하락 방향 확정
+                # 음봉 카운트 대비 장점: 정량적, 봉 노이즈 둔감
+                if len(_ohlcv_1h) >= 17:
+                    try:
+                        from v9.utils.utils_math import calc_rsi
+                        _closes_now = [float(b[4]) for b in _ohlcv_1h[-16:-1]]   # 직전 15봉
+                        _closes_prev = [float(b[4]) for b in _ohlcv_1h[-17:-2]]  # 그 이전 15봉
+                        _rsi_now = calc_rsi(_closes_now, 14)
+                        _rsi_prev = calc_rsi(_closes_prev, 14)
+                        # 조건 1: RSI 식어가는 중 (peak 영역 통과)
+                        if _rsi_now >= 65:
+                            print(f"[BC] ⏭ SKIP {sym} RSI 미식음 (RSI 1h={_rsi_now:.1f} >= 65)")
+                            continue
+                        # 조건 2: RSI 하락 방향 (모멘텀 식음 진행)
+                        if _rsi_now >= _rsi_prev:
+                            print(f"[BC] ⏭ SKIP {sym} RSI 하락 미확정 (RSI 1h {_rsi_prev:.1f} → {_rsi_now:.1f})")
+                            continue
+                    except Exception as _rsi_e:
+                        print(f"[BC] RSI 검증 실패(무시): {_rsi_e}")
+            except Exception as _calm_e:
+                print(f"[BC] 진정 검증 실패(무시): {_calm_e}")
 
             equity = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
             if equity <= 0:
