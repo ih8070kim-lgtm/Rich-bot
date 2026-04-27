@@ -2829,6 +2829,55 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
             f"sim_only=True bal=${current_balance:.2f} drop={_drop_log:.2f}%p "
             f"peak=${_peak_log:.2f} avg_tier={_avg_tier_log:.2f} (실청산 X — T3 사다리/HARD_SL 위임)")
         print(f"[PTP_SIM] 발동 조건 충족 but 청산 차단 (hotfix-12) — drop={_drop_log:.2f}%p")
+
+        # ★ V10.31AM3 hotfix-13: PTP 발동 시점 BTC 컨텍스트 기록 (사용자 결정 [04-27])
+        #   목적: PTP_SIM_ONLY 발동 시기 BTC 환경 [실측] 누적
+        #   1주 후 분석: PTP 자주 발동한 환경 (1h/6h/devma/ema_gap/regime) 패턴
+        #   결과로 환경 조건부 PTP 재도입 결정 (예: 1h ≤ -1.5% 시만 청산)
+        try:
+            from v9.logging.logger_csv import log_btc_context as _lbc_ptp
+            _btc_p   = float(getattr(snapshot, "btc_price", 0) or 0)
+            _btc_1h  = float(getattr(snapshot, "btc_1h_change", 0) or 0)
+            _btc_6h  = float(getattr(snapshot, "btc_6h_change", 0) or 0)
+            _btc_dev = float(getattr(snapshot, "dev_ma", 0) or 0)
+            # ema_gap 계산 (BTC 5m vs 15m EMA 직접 — _btc_vol_regime에서 가능하나 비싸서 0 fallback)
+            _ema_gap = 0.0
+            try:
+                from v9.utils.utils_math import calc_ema as _calc_ema
+                _btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
+                _o5 = _btc_pool.get("5m", []) or []
+                _o15 = _btc_pool.get("15m", []) or []
+                if len(_o5) >= 20 and len(_o15) >= 20:
+                    _e5 = _calc_ema([c[4] for c in _o5], 20)
+                    _e15 = _calc_ema([c[4] for c in _o15], 20)
+                    if _e5 > 0 and _e15 > 0:
+                        _ema_gap = (_e5 - _e15) / _e15
+            except Exception:
+                pass
+            _trend = "UP" if _ema_gap > 0.002 else ("DOWN" if _ema_gap < -0.002 else "FLAT")
+            _regime = _btc_vol_regime(snapshot)
+            _strict = (_btc_1h <= -0.015 or _btc_6h <= -0.04 or _btc_dev <= -3.0 or
+                       _btc_1h >=  0.015 or _btc_6h >=  0.04 or _btc_dev >=  3.0)
+            _loose  = (_btc_1h <= -0.007 or _btc_6h <= -0.02 or _btc_dev <= -1.5 or
+                       _btc_1h >=  0.007 or _btc_6h >=  0.02 or _btc_dev >=  1.5)
+            _lbc_ptp(
+                trace_id=f"PTP_SIM_{int(now_ts)}",
+                symbol="PTP_TRIGGER",   # 진입 아닌 PTP 발동 시점 마커
+                side="-",
+                entry_type="PTP",
+                btc_price=_btc_p,
+                btc_1h_change=_btc_1h,
+                btc_6h_change=_btc_6h,
+                btc_dev_ma=_btc_dev,
+                ema_gap_pct=_ema_gap,
+                trend_tag=_trend,
+                regime=_regime,
+                regime_score=float(_regime_ema_pctl) if _regime_ema_pctl is not None else 0.5,
+                strict_block=_strict,
+                loose_block=_loose,
+            )
+        except Exception:
+            pass
     except Exception:
         pass
     # 트리거 상태 정리 — 다음 발동 위해 cooldown 처럼 작동
