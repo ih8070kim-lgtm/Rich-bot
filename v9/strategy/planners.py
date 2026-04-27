@@ -1548,6 +1548,12 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         _remaining_notional = (total_qty - close_qty) * curr_p
         if 0 < _remaining_notional < 5.0:
             close_qty = total_qty
+        # ★ V10.31AM3 hotfix-14: TP1 잔량 정밀도 방어 (사용자 결정 [04-28])
+        #   배경: 04-27 ETH 0.001 ($2.27) 좀비 잔여 → SYNC_RECOVERED_BLOCKED 30초마다 24회 반복
+        #   원인: float 정밀도로 amount_to_precision(close_qty)이 step 단위 floor 후 1 step 잔여 가능
+        #   해결: 잔량이 min_qty 1.5배 이내면 전량 청산 (float 정밀도 잔여 차단)
+        if 0 < (total_qty - close_qty) < _sym_min_qty * 1.5:
+            close_qty = total_qty
         close_qty = min(close_qty, total_qty)
         if close_qty <= 0:
             continue
@@ -1672,6 +1678,14 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
         _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
         if trim_qty < _min_qty:
             continue
+        # ★ V10.31AM3 hotfix-14: TRIM 잔량 정밀도 방어 (TP1과 동일 패턴)
+        #   잔량이 min_qty 1.5배 이내면 전량 청산 (float 정밀도 잔여 차단)
+        if 0 < (amt - trim_qty) < _min_qty * 1.5:
+            trim_qty = amt
+        # ★ V10.31AM3 hotfix-14: 잔량 노셔널 $5 미달이면 전량 청산
+        _remaining_notional_trim = (amt - trim_qty) * curr_p
+        if 0 < _remaining_notional_trim < 5.0:
+            trim_qty = amt
         intents.append(Intent(
             trace_id=_tid(),
             intent_type=IntentType.TP1,
@@ -1829,6 +1843,12 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
                 _trim_qty = calc_trim_qty(_amt, 3, ep=ep, bal=_bal, mark_price=curr_p)
                 if _trim_qty < _min_qty:
                     continue
+                # ★ V10.31AM3 hotfix-14: T3_DEF_V2 TRIM 잔량 정밀도 방어
+                if 0 < (_amt - _trim_qty) < _min_qty * 1.5:
+                    _trim_qty = _amt
+                _remaining_notional_t3 = (_amt - _trim_qty) * curr_p
+                if 0 < _remaining_notional_t3 < 5.0:
+                    _trim_qty = _amt
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.TP1,
