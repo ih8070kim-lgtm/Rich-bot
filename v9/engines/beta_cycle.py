@@ -290,18 +290,23 @@ def _check_signals(snapshot, st: Dict, intents: List[Intent]):
             try:
                 _ohlcv_1h = (snapshot.ohlcv_pool or {}).get(sym, {}).get('1h', [])
 
-                # ── 거래량 평균 대비 진정도 (7일 평균 기준) ──
+                # ── 거래량 평균 대비 진정도 (7일 median 기준) ──
                 if sym in _hourly_volumes and len(_hourly_volumes[sym]) >= 48:
                     _vols = list(_hourly_volumes[sym])
                     _v_recent = float(_ohlcv_1h[-2][5]) if len(_ohlcv_1h) >= 2 and len(_ohlcv_1h[-2]) > 5 else 0
                     if _v_recent <= 0 and len(_vols) >= 1:
                         _v_recent = _vols[-1]
-                    _v_avg = sum(_vols[-168:]) / min(168, len(_vols))  # 7일 평균
-                    if _v_recent > 0 and _v_avg > 0:
-                        _vol_ratio_avg = _v_recent / _v_avg
-                        # ★ V10.31AM3 옵션A: 1.2x → 1.5x (평균 자체에 peak 포함되어 부풀려짐 보정)
+                    # ★ V10.31AM3 HOTFIX: mean → median 전환 (근본 해결)
+                    #   기존 mean 사용 시 7일 평균에 peak 시점 거래량(평균 대비 600%급)이 포함되어
+                    #   평균 자체가 부풀려짐 → 임계 1.5x는 사실상 mean 1.0x 수준의 약한 필터였음.
+                    #   median은 peak outlier 영향 거의 없음 → "정상 베이스라인" 정의에 정합.
+                    #   주의: 임계 1.5x는 mean 시절 값 유지 — median 기준으론 더 엄격해짐.
+                    #   진입 빈도 1주 모니터링 후 임계 재조정 검토 (1.5 → 1.8~2.0 가능성).
+                    _v_baseline = float(np.median(_vols[-168:])) if len(_vols) >= 1 else 0.0
+                    if _v_recent > 0 and _v_baseline > 0:
+                        _vol_ratio_avg = _v_recent / _v_baseline
                         if _vol_ratio_avg > 1.5:
-                            print(f"[BC] ⏭ SKIP {sym} 거래량 미진정 (평균 대비 {_vol_ratio_avg:.1f}x > 1.5x)")
+                            print(f"[BC] ⏭ SKIP {sym} 거래량 미진정 (median 대비 {_vol_ratio_avg:.1f}x > 1.5x)")
                             continue
                     # peak 비교 보조 검증 (peak 대비 충분히 감소)
                     _peak_vol = arm.get("peak_vol", 0.0)

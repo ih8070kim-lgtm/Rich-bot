@@ -1,5 +1,46 @@
 # BC — 체크리스트
 
+## ★ V10.31AM3: 진입 진정 검증 3중 AND (사용자 컨셉 [04-26])
+
+사용자 컨셉: "peak 후 거래량 식음 → 계단식 하락 시작 → 그 계단에 합류"
+
+기존 BC ENTRY는 ARM tf의 1h excess가 baseline으로 회귀했는지만 확인 → "베타가 식었나"만 보고 "거래량/모멘텀이 식었나"는 안 봄. peak 직후 모멘텀 살아있는 상태에서 진입 → 아직 식지 않은 하락에 휘말리는 패턴 관찰됨 (NOT BC peak +18.6% 직후 진입 케이스). 3중 AND 가드 추가:
+
+```
+1. 거래량 median 대비 ≤ 1.5x  (★ V10.31AM3 hotfix-2: mean → median)
+2. 거래량 peak 대비 ≤ 70%
+3. RSI 1h < 60 + 하락 방향 (RSI[-1] < RSI[-2])
+```
+
+### baseline 산정 (mean → median)
+
+**기존 mean의 결함**: 7일=168시간 윈도우에 ARM 시점 peak 거래량(평균 대비 600%급)이 자기포함되어 baseline 자체가 부풀려짐. 임계 1.5x는 사실상 mean 1.0x 수준의 약한 필터로 작동. 코드 주석 "1.2→1.5x 완화 (peak 포함 보정)"은 임시 보정.
+
+**V10.31AM3 hotfix-2**: `np.median(_vols[-168:])` 도입. peak outlier 영향 거의 없는 견고한 추정량 → "정상 베이스라인" 정의에 정합. 임계 1.5x 유지 시 median 기준으론 **실효성 강화**.
+
+```python
+# beta_cycle.py:305
+_v_baseline = float(np.median(_vols[-168:])) if len(_vols) >= 1 else 0.0
+if _v_recent / _v_baseline > 1.5:  # 임계 mean 시절 그대로
+    continue
+```
+
+### NORM_THRESH tf 정합
+
+**ARM tf 기준 NORM 체크**:
+- 1h ARM → 1h excess ≤ baseline
+- 1d ARM → 1d excess ≤ baseline (이전엔 1h만 봐서 1d ARM 진입 못 함 버그)
+
+ARM 시 `peak_vol` 저장 (peak 비교용 기준점, 7일 median과 별개로 peak 자체와의 비율도 검증).
+
+### 진입 빈도 모니터링
+
+`[직관]` median 도입은 진입 빈도 감소 방향 — AM3의 BC_PULLBACK_MAX 5→8(윈도우 확대)와 일부 충돌. 1주 모니터 후 진입 부족 시 임계 1.5 → 1.8~2.0 완화 검토.
+
+검증 가능 로그: `[BC] ⏭ SKIP {sym} 거래량 미진정 (median 대비 X.Xx > 1.5x)` 빈도 추적.
+
+---
+
 ## ★ V10.31AM: BC/CB 노셔널 차감 제거 (MR 사이즈 복원)
 
 **Before (V10.31b~AL)**: `_mr_available_balance()`가 BC/CB 포지션 노셔널만큼 real_balance에서 차감 (최소 30% 보장). TREND 활성 시 슬롯/마진 충돌 방지 목적.

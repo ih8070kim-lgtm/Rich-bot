@@ -1511,6 +1511,13 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             "side":             side,
             "ep":               avg_price,
             "original_ep":      avg_price,
+            # ★ V10.31AM3 HOTFIX: limit OPEN 경로에도 t1_* 보존 (strategy_core OPEN 분기 미러링)
+            #   누락 영향: limit OPEN으로 진입한 포지션은 _tick_dca_sim에서 _t1_ep<=0 가드로 영구 스킵
+            #   → log_dca_sim.csv 표본에서 누락 → 백테스트 인프라 핵심 기능 무력화
+            #   strategy_core.py:204~206과 동일 패턴 (DCA 후에도 변경 X — 백테스트 기준점)
+            "t1_ep":            avg_price,
+            "t1_open_ts":       now,
+            "t1_amt":           filled_qty,
             "amt":              filled_qty,
             "time":             now,
             "last_dca_time":    now,
