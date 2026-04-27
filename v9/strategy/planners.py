@@ -2808,6 +2808,41 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
     if not _ptp_update_state(system_state, current_balance, st, now_ts):
         return []
     
+    # ★ V10.31AM3 hotfix-12: PTP 청산 차단, 시뮬 로깅만 (사용자 결정 [04-27])
+    #   배경: 04-27 PTP 3차 발동 분석 [실측]:
+    #     1차 (05:15) -$20, 2차 (06:32) -$15, 3차 (15:22) -$20.82
+    #     3차 직후 같은 심볼(XRP) 재진입 → +$2.00 익절
+    #     즉 PTP가 회복 가능한 포지션을 강제 청산 = 회복 기회 차단
+    #   사용자 컨셉 회귀: "PTP도 시뮬만 돌리고 꺼버려"
+    #     단일 포지션 손절은 hf-4 T3 사다리 + HARD_SL_BY_TIER에 위임
+    #     PTP는 portfolio level 시그널만 기록, 청산 X
+    #   효과 [추정 04-27]: PTP 3건 모두 시뮬 시 +$18 회복 기회 보존
+    #   위험: 04-22~24 같은 변동성 시기 portfolio 보호 약화
+    #         단 T3 사다리(-2%~-4.5%) + HARD_SL(T1 -3.8%, T2 -5.6%, T3 -10%)이 단일 보호
+    try:
+        # PTP 발동 시그널은 그대로 기록 (검증용)
+        _avg_tier_log = float(system_state.get("_ptp_avg_tier_at_trigger", 0) or 0)
+        _peak_log = float(system_state.get("_ptp_peak_balance", 0) or 0)
+        _drop_log = ((_peak_log - current_balance) / _peak_log * 100) if _peak_log > 0 else 0
+        from v9.logging.logger_csv import log_system as _ls
+        _ls("PTP_SIM_ONLY",
+            f"sim_only=True bal=${current_balance:.2f} drop={_drop_log:.2f}%p "
+            f"peak=${_peak_log:.2f} avg_tier={_avg_tier_log:.2f} (실청산 X — T3 사다리/HARD_SL 위임)")
+        print(f"[PTP_SIM] 발동 조건 충족 but 청산 차단 (hotfix-12) — drop={_drop_log:.2f}%p")
+    except Exception:
+        pass
+    # 트리거 상태 정리 — 다음 발동 위해 cooldown 처럼 작동
+    system_state["_ptp_session_start"] = current_balance
+    system_state["_ptp_peak_balance"] = current_balance
+    system_state.pop("_ptp_trigger_ts", None)
+    system_state.pop("_ptp_last_step", None)
+    system_state.pop("_ptp_active_syms", None)  # trim/T3_DEF_V2 정상 작동
+    # ★ hotfix-12: cooldown 유지 (시뮬 로그 스팸 방지)
+    from v9.config import PTP_COOLDOWN_SEC as _PCS
+    system_state["_ptp_cooldown_until"] = now_ts + _PCS
+    return []
+    
+    # ↓↓↓ 아래는 hotfix-12에서 unreachable. 롤백 시 위 블록 제거.
     # ★ V10.31AJ: trigger 활성 진입 즉시 _ptp_active_syms 세팅 (step gap 방지)
     # 이유: 기존 코드는 step 발사 시점에만 세팅 → 4~5분 step 사이에 공백
     # → 그 동안 trim/tp1/preorder가 재생성되어 ReduceOnly -2022 재발
