@@ -109,8 +109,8 @@ DCA_ENTRY_ROI     = -1.8   # 레거시 호환 (T2 기본값)
 DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
 
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
-# T3(+0.5%) → T2(+1.0%) → T1 TP(+2.0%) 계단식 익절
-TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.5}  # ★ V10.31c: T3 1.0 → 0.5 (DCA 33/33/34 전환으로 blended ROI 약 1%p 더 깊어지는 것 보정)
+# 계단식 익절: T1 TP(+1.5%) → T2 trim(+1.0%) → T3 trim(+0.5%) — 압축 깊을수록 빠른 회수
+TRIM_BLENDED_ROI_BY_TIER = {3: 0.5, 2: 1.0}  # ★ V10.31AM3 hotfix-3: T2 1.5 → 1.0 복원 (V10.31c~AM 사이 drift 추정, CHANGELOG 기록 없음). T3 0.5는 V10.31c 보정값 그대로. 디펜스 모드(worst_roi 진입)는 별도 유지.
 # ★ V10.31d: TRIM_TRAIL_FLOOR 제거 — V10.31c에서 FLOOR 로직 이미 제거됐으나 상수/import 잔존했던 것 정리
 
 # ★ V10.31j: Tier별 디펜스 모드 (worst_roi 기반 동적 TRIM 임계)

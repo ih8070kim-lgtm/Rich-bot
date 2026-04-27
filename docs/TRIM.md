@@ -45,8 +45,8 @@ if (_res_below_min_qty or _res_below_min_notional) and _res_amt > 0:
 ## V10.31j 동적 임계 (디펜스 모드)
 ```
 기본 (worst>-2 for T2, worst>-5 for T3):
-  T2: 1.5% (기존 TRIM_BLENDED_ROI_BY_TIER[2])
-  T3: 0.5% (기존 TRIM_BLENDED_ROI_BY_TIER[3])
+  T2: 1.0% (TRIM_BLENDED_ROI_BY_TIER[2]) ← ★ V10.31AM3 hotfix-3: 1.5 → 1.0 복원
+  T3: 0.5% (TRIM_BLENDED_ROI_BY_TIER[3])
 
 디펜스 (worst 통과 시):
   T2 worst≤-2.0 → TRIM 임계 0.5 (약반등 포획)
