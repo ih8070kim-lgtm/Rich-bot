@@ -19,6 +19,7 @@ from v9.logging.schemas import (
     UNIVERSE_COLUMNS,
     DCA_SIM_COLUMNS,
     SKEW_COLUMNS,
+    BTC_CONTEXT_COLUMNS,
 )
 
 
@@ -335,6 +336,48 @@ def log_skew(
         "urgency": round(urgency, 2),
     }
     _append_csv(_log_path("log_skew.csv"), SKEW_COLUMNS, row)
+
+
+# ── log_btc_context (★ V10.31AM3 hotfix-10: BTC 컨텍스트 검증 인프라)
+def log_btc_context(
+    trace_id: str,
+    symbol: str,
+    side: str,
+    entry_type: str,
+    btc_price: float,
+    btc_1h_change: float,
+    btc_6h_change: float,
+    btc_dev_ma: float,
+    ema_gap_pct: float,
+    trend_tag: str,
+    regime: str,
+    regime_score: float,
+    strict_block: bool,
+    loose_block: bool,
+):
+    """OPEN intent 발사 시점 BTC 컨텍스트 기록.
+
+    사용자 결정 [04-27, hf-10]: "둘 다 (STRICT/LOOSE) 섀도우 누적"
+    1주 데이터 후 임계 정확도 [실측] 비교 — STRICT vs LOOSE vs ema_gap vs 조합.
+    """
+    row = {
+        "time": _now_str(),
+        "trace_id": trace_id,
+        "symbol": symbol,
+        "side": side,
+        "entry_type": entry_type,
+        "btc_price": round(btc_price, 2),
+        "btc_1h_change": round(btc_1h_change, 5),
+        "btc_6h_change": round(btc_6h_change, 5),
+        "btc_dev_ma": round(btc_dev_ma, 3),
+        "ema_gap_pct": round(ema_gap_pct, 5),
+        "trend_tag": trend_tag,
+        "regime": regime,
+        "regime_score": round(regime_score, 4),
+        "strict_block": bool(strict_block),
+        "loose_block": bool(loose_block),
+    }
+    _append_csv(_log_path("log_btc_context.csv"), BTC_CONTEXT_COLUMNS, row)
 
 
 # ── log_universe ────────────────────────────────────────────────

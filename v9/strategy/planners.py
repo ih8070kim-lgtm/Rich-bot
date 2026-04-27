@@ -535,6 +535,18 @@ def plan_open(
     system_state: Dict,
 ) -> List[Intent]:
     intents: List[Intent] = []
+    # ★ V10.31AM3 hotfix-9: PTP 후 진입 cooldown (사용자 결정 [04-27] "이벤트 끝난 두시간")
+    #   PTP_COMPLETE 시점에 _ptp_entry_cooldown_until 세팅됨 (planners.py:2939 부근)
+    #   해당 시각 이전엔 모든 OPEN intent 차단 (1차/2차 추세 cover)
+    _pec_until = float(system_state.get("_ptp_entry_cooldown_until", 0.0) or 0.0)
+    if _pec_until > 0 and time.time() < _pec_until:
+        _pec_remain = _pec_until - time.time()
+        # 1분에 1회만 로그 (스팸 방지)
+        _pec_last_log = getattr(plan_open, "_pec_last_log_ts", 0)
+        if time.time() - _pec_last_log >= 60:
+            print(f"[PTP_ENTRY_LOCK] OPEN 차단 — PTP 후 cooldown {_pec_remain/60:.0f}분 남음")
+            plan_open._pec_last_log_ts = time.time()
+        return intents
     # ★ V10.31j: 미장전 진입 차단 비활성 (사용자 결정, 주석처리)
     # ★ V10.31b: 미장전 신규 진입 차단
     # if system_state.get("_pmc_block_entry"):
@@ -1080,8 +1092,10 @@ def plan_open(
         # 추세 방향 태깅 (역방향 MR 추적용)
         if ema_20_5m > 0 and ema_20_15m > 0:
             _trend_tag = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
+            _ema_gap_pct = (ema_20_5m - ema_20_15m) / ema_20_15m  # 기울기 정량화
         else:
             _trend_tag = "FLAT"
+            _ema_gap_pct = 0.0
         reason = reason + f"_TREND({_trend_tag})"
 
         # ════════════════════════════════════════════════════════════
@@ -1095,6 +1109,34 @@ def plan_open(
             _fs_1h  = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
             _fs_6h  = float(getattr(snapshot, "btc_6h_change", 0.0) or 0.0)
             _fs_dev = float(getattr(snapshot, "dev_ma", 0.0) or 0.0)
+
+            # ★ V10.31AM3 hf-10: 모든 OPEN intent에 BTC 컨텍스트 기록 (사용자 결정 (3))
+            #   기존 TREND_FILTER_SIM은 STRICT/LOOSE block 시점만 (편향).
+            #   본 로깅은 모든 진입에 기록 → 1주 후 STRICT/LOOSE/ema_gap/조합 정확도 비교 가능.
+            try:
+                _strict_block_eval = ((trigger_side == "buy"  and (_fs_1h <= -0.015 or _fs_6h <= -0.04 or _fs_dev <= -3.0)) or
+                                       (trigger_side == "sell" and (_fs_1h >=  0.015 or _fs_6h >=  0.04 or _fs_dev >=  3.0)))
+                _loose_block_eval = ((trigger_side == "buy"  and (_fs_1h <= -0.007 or _fs_6h <= -0.02 or _fs_dev <= -1.5)) or
+                                      (trigger_side == "sell" and (_fs_1h >=  0.007 or _fs_6h >=  0.02 or _fs_dev >=  1.5)))
+                from v9.logging.logger_csv import log_btc_context as _lbc
+                _lbc(
+                    trace_id=str(int(now_ts)),
+                    symbol=symbol,
+                    side=trigger_side,
+                    entry_type=entry_type_tag,
+                    btc_price=float(getattr(snapshot, "btc_price", 0) or 0),
+                    btc_1h_change=_fs_1h,
+                    btc_6h_change=_fs_6h,
+                    btc_dev_ma=_fs_dev,
+                    ema_gap_pct=_ema_gap_pct,
+                    trend_tag=_trend_tag,
+                    regime=_btc_regime,
+                    regime_score=float(_regime_ema_pctl) if _regime_ema_pctl is not None else 0.5,
+                    strict_block=_strict_block_eval,
+                    loose_block=_loose_block_eval,
+                )
+            except Exception as _lbc_e:
+                pass  # 로깅 실패 silent
 
             _fs_down_strict = (_fs_1h <= -0.015) or (_fs_6h <= -0.04) or (_fs_dev <= -3.0)
             _fs_up_strict   = (_fs_1h >=  0.015) or (_fs_6h >=  0.04) or (_fs_dev >=  3.0)
@@ -2925,11 +2967,16 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         system_state.pop("_ptp_trigger_ts", None)
         system_state.pop("_ptp_last_step", None)
         system_state.pop("_ptp_active_syms", None)  # ★ V10.31AJ: preorder 차단 해제
+        # ★ V10.31AM3 hotfix-9: PTP 후 신규 진입 차단 (사용자 결정 [04-27])
+        #   "이벤트 끝난 두시간 정도" — 1차/2차 추세 cover, 추세 진정 후 진입
+        from v9.config import PTP_ENTRY_COOLDOWN_SEC as _PEC
+        system_state["_ptp_entry_cooldown_until"] = now_ts + _PEC
         try:
             from v9.logging.logger_csv import log_system
             log_system("PTP_COMPLETE",
-                       f"bal=${current_balance:.2f} positions_closed={len(intents)}")
-            print(f"[PTP] 완료 — 세션 리셋 bal=${current_balance:.2f}")
+                       f"bal=${current_balance:.2f} positions_closed={len(intents)} "
+                       f"entry_cooldown={_PEC}s")
+            print(f"[PTP] 완료 — 세션 리셋 bal=${current_balance:.2f} entry lock {_PEC//60}분")
         except Exception:
             pass
     else:

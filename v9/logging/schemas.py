@@ -108,6 +108,30 @@ SKEW_COLUMNS = [
     "urgency",         # urgency score (skew + heavy_pain)
 ]
 
+# ── log_btc_context (★ V10.31AM3 hotfix-10: BTC 방향성/기울기 시그널 검증 인프라)
+#   사용자 발상 [04-27]: "기울기같은 거 기록 — 플렛/역방향/정방향"
+#   목적: 1주 데이터 누적 후 STRICT/LOOSE 임계 정확도 [실측] 검증
+#         + 다른 시그널 조합 (1h만/6h만/devma만/ema_gap) 효과 비교
+#   참고: 기존 TREND_FILTER_SIM은 STRICT/LOOSE block 시점에만 기록 (선택 편향)
+#         본 로그는 모든 OPEN intent에 기록 (편향 없음)
+BTC_CONTEXT_COLUMNS = [
+    "time",
+    "trace_id",
+    "symbol",
+    "side",                # buy/sell at OPEN
+    "entry_type",          # MR/MR_E30/HF_MR 등
+    "btc_price",           # BTC 절대가
+    "btc_1h_change",       # BTC 1h 가격 변화율 (decimal, ex 0.015 = +1.5%)
+    "btc_6h_change",       # BTC 6h
+    "btc_dev_ma",          # BTC MA 거리 (%)
+    "ema_gap_pct",         # 5m vs 15m EMA gap (기울기) — TREND 결정 raw
+    "trend_tag",           # UP/FLAT/DOWN (5m vs 15m EMA, ±0.2%)
+    "regime",              # LOW/NORMAL/HIGH
+    "regime_score",        # 0~1 raw
+    "strict_block",        # bool — STRICT 임계 도달 시 진입 차단됐을 케이스
+    "loose_block",         # bool — LOOSE 임계 도달 시 진입 차단됐을 케이스
+]
+
 # ── log_universe ────────────────────────────────────────────────
 UNIVERSE_COLUMNS = [
     "time", "trace_id", "top10", "long_4", "short_4",

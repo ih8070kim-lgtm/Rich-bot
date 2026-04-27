@@ -213,6 +213,15 @@ def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
 PTP_PEAK_TRIG_PCT         = 0.0   # ★ V10.31AE: 0.3 → 0.0 (세션 시작 즉시 arming)
 PTP_AVG_TIER_GATE         = 0.0   # 모든 포지션 허용
 PTP_COOLDOWN_SEC          = 3600  # ★ V10.31AE: 발동 후 1시간 쿨다운 (trigger 시각 기준)
+# ★ V10.31AM3 hotfix-9 → hotfix-11 회귀 [04-27]
+#   사용자 결정 [04-27 후반부]: "MR의 진입 알파를 믿어야지" — 컨셉 회귀
+#   배경: hf-9 도입 시뮬 [실측 25시간]: 17건 차단 매칭 10건 +$19.37 (모두 익절)
+#         vs PTP 회피 +$15 = 순 -$4 자해
+#   진단: PTP 직후 회복 시기 진입이 MR 진입 알파 강함 (T1 WR 83%, 04-26~27 100%)
+#         시간 기반 cooldown은 환경 무관 = 평상시 자해 + 변동성 시기만 가치
+#   결정: hf-9 비활성 (값 0). MR 시그널 진입 알파 보존, 손절은 T3 사다리(hf-4) + PTP(hf-5)에 위임
+#   1주 후 재검토: hf-10 BTC context 데이터로 정밀 cooldown 조건 결정 (예: 1h ≤ -1.5% 시만)
+PTP_ENTRY_COOLDOWN_SEC    = 0     # ★ V10.31AM3 hotfix-11: hf-9 비활성 (MR 진입 알파 보존)
 # ★ V10.31AM: drop 0.5 → 0.6 상향 — 실측 4일 분석: 0.5%p는 평상시 자주 찍힘 + 방어 미작동
 #   (발동 2건 중 1건 false positive, 1건 하락 지속 중 limit 미체결 → taker 시장가 컷)
 # 근거: 4일 일내 max drop 1.53/2.13/2.94/0.23% — 0.5%는 noise 영역, 0.6부터 의미 있는 drop
