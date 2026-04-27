@@ -296,6 +296,8 @@ from v9.config import (
     DCA_ENTRY_ROI_BY_TIER,
     TP1_FIXED, HARD_SL_BY_TIER,  # ★ V10.31e-6: HEDGE_SIM용
     calc_trim_qty, calc_tp1_thresh, get_sl_entry,
+    # ★ V10.31AM3 hotfix-4: T3 다단계 디펜스
+    calc_t3_defense_action, T3_DEFENSE_LADDER,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -1644,6 +1646,172 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
 
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V10.31AM3 hotfix-4: T3 다단계 디펜스 (사용자 결정 [04-27])
+# ═════════════════════════════════════════════════════════════════
+def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
+                        system_state: Dict = None,
+                        exclude_syms: set = None) -> List[Intent]:
+    """T3 다단계 디펜스 — 사다리 임계 기반 TRIM/SL/HARD_SL.
+
+    사용자 컨셉: T3 진입 후 worst 깊이 비례 빠른 탈출.
+    "모든 구간에서 조금 반등해도 탈출 가능한 시나리오"
+
+    사다리 (config.T3_DEFENSE_LADDER):
+        worst -2.0% → ROI ≥ 0%   TRIM (T3 사이즈만 부분 청산)
+        worst -2.5% → ROI ≥ -0.5% TRIM
+        worst -3.0% → ROI ≥ -1.5% SL (전량)
+        worst -3.5% → ROI ≥ -2.2% SL
+        worst -4.0% → ROI ≥ -3.0% SL
+        worst -4.5%               HARD_SL (즉시 전량)
+
+    PTP 차단 정책 (사용자 결정 1.B):
+        _ptp_active_syms 활성 심볼 → 본 함수 차단
+        → PTP 정상 작동 시 portfolio 일괄 청산 우선
+        → T3 다단계는 PTP 미발동 시기에만 작동
+
+    중복 발동 방지:
+        포지션별 _t3_def_v2_last_step (worst_enter 값) 추적
+        같은 단계 한 번만 발동 후 다음 단계까지 대기
+    """
+    intents: List[Intent] = []
+    if exclude_syms is None:
+        exclude_syms = set()
+
+    # PTP 활성 심볼 → 차단
+    _ptp_active = set((system_state or {}).get("_ptp_active_syms", set()) or set())
+
+    for symbol, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        if symbol in exclude_syms or symbol in _ptp_active:
+            continue
+        for _iter_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            # T3 도달 + CORE_MR/CORE_MR_HEDGE만
+            if int(p.get("dca_level", 1) or 1) != 3:
+                continue
+            _role = p.get("role", "")
+            if _role not in ("CORE_MR", "CORE_MR_HEDGE"):
+                continue
+            _amt = float(p.get("amt", 0) or 0)
+            if _amt <= 0:
+                continue
+            ep = float(p.get("ep", 0) or 0)
+            if ep <= 0:
+                continue
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0) or 0)
+            if curr_p <= 0:
+                continue
+
+            side = p.get("side", "")
+            roi = calc_roi_pct(ep, curr_p, side, LEVERAGE)
+            worst = float(p.get("worst_roi", 0) or 0)
+            max_r = float(p.get("max_roi_seen", 0) or 0)
+
+            # 사다리 액션 결정
+            action = calc_t3_defense_action(worst, max_r)
+            if action is None:
+                continue
+            mode, exit_roi = action
+
+            # 중복 발동 방지: 같은 단계는 한 번만
+            _last_step = float(p.get("_t3_def_v2_last_step", 0) or 0)
+            # action 결정 시 사용된 worst_enter 값 (matched 사다리)
+            _curr_step_worst = None
+            for w_enter, _ex, _md in T3_DEFENSE_LADDER:
+                if worst <= w_enter:
+                    _curr_step_worst = w_enter
+                else:
+                    break
+            if _curr_step_worst is None:
+                continue
+            # 같은 단계 이미 처리됨 → skip
+            if _last_step <= _curr_step_worst:
+                # _last_step이 이미 더 깊은 단계 (더 음수) — 같거나 깊은 단계 처리됨
+                # 단 HARD_SL은 무조건 처리 (즉시 청산)
+                if mode != "HARD_SL":
+                    continue
+
+            # 발동 조건 체크
+            _fire = False
+            _reason = ""
+            if mode == "HARD_SL":
+                _fire = True
+                _reason = f"T3_DEF_HARD_SL(worst={worst:.2f}%)"
+            elif mode == "SL":
+                # current_roi >= exit_roi (음수에서 회복) 도달 시 컷
+                if roi >= exit_roi:
+                    _fire = True
+                    _reason = f"T3_DEF_SL(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
+            elif mode == "TRIM":
+                # current_roi >= exit_roi 도달 시 부분 청산
+                if roi >= exit_roi:
+                    _fire = True
+                    _reason = f"T3_DEF_TRIM(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
+
+            if not _fire:
+                continue
+
+            # 발동 단계 기록 (다음 더 깊은 단계까지 대기)
+            p["_t3_def_v2_last_step"] = _curr_step_worst
+
+            _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+            _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+
+            if mode in ("SL", "HARD_SL"):
+                # 전량 컷 (force_close)
+                _qty = _amt
+                if _qty < _min_qty:
+                    continue
+                intents.append(Intent(
+                    trace_id=_tid(),
+                    intent_type=IntentType.CLOSE,
+                    symbol=symbol,
+                    side="sell" if side == "buy" else "buy",
+                    qty=_qty,
+                    price=curr_p,
+                    reason=_reason,
+                    metadata={
+                        "force_market": True,  # 시장가 즉시 컷
+                        "is_force_close": True,
+                        "t3_defense_v2": True,
+                        "t3_def_mode": mode,
+                        "t3_def_step_worst": _curr_step_worst,
+                        "snap_ts": getattr(snapshot, "ts", 0),
+                    },
+                ))
+                print(f"[T3_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
+            else:  # TRIM
+                # T3 사이즈만 부분 청산 (calc_trim_qty 활용 — tier=3 → T3 weight)
+                _trim_qty = calc_trim_qty(_amt, 3, ep=ep, bal=_bal, mark_price=curr_p)
+                if _trim_qty < _min_qty:
+                    continue
+                intents.append(Intent(
+                    trace_id=_tid(),
+                    intent_type=IntentType.TP1,
+                    symbol=symbol,
+                    side="sell" if side == "buy" else "buy",
+                    qty=_trim_qty,
+                    price=curr_p,
+                    reason=_reason,
+                    metadata={
+                        "force_market": True,  # 시장가 (반등 시점 즉시 캡쳐)
+                        "is_trim": True,
+                        "target_tier": 2,  # T3 → T2 복귀
+                        "t3_defense_v2": True,
+                        "t3_def_mode": mode,
+                        "t3_def_step_worst": _curr_step_worst,
+                        "roi_gross": roi,
+                        "snap_ts": getattr(snapshot, "ts", 0),
+                    },
+                ))
+                print(f"[T3_DEF_V2] ✂ {symbol} {side} TRIM qty={_trim_qty} roi={roi:+.2f}% worst={worst:+.2f}% (T3→T2)")
+
+    return intents
+
+
+# ═════════════════════════════════════════════════════════════════
 # TRAIL ON Planner
 # ═════════════════════════════════════════════════════════════════
 def plan_trail_on(snapshot: MarketSnapshot, st: Dict) -> List[Intent]:
@@ -2853,6 +3021,9 @@ def generate_all_intents(
 
     intents += plan_tp1(snapshot, st, exclude_syms=_exclude)
     intents += plan_trim_trail(snapshot, st, exclude_syms=_exclude)
+    # ★ V10.31AM3 hotfix-4: T3 다단계 디펜스 (사다리 기반 TRIM/SL/HARD_SL)
+    #   PTP 활성 시 차단 (사용자 결정 1.B) — 함수 내부에서 _ptp_active_syms 체크
+    intents += plan_t3_defense_v2(snapshot, st, system_state=system_state, exclude_syms=_exclude)
     intents += plan_trail_on(snapshot, st)
     # ★ V10.31c: plan_dca 호출 제거 완료 (함수 자체도 삭제됨)
     # ★ V10.31j: 미장전 진입 차단 비활성 (주석처리) — 항상 진입 허용

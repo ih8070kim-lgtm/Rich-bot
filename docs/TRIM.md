@@ -1,5 +1,61 @@
 # TRIM / TP1 — 체크리스트
 
+## ★ V10.31AM3 hotfix-4: T3 다단계 디펜스/SL 사다리 [04-27]
+
+### 컨셉
+사용자: "모든 구간에서 조금 반등해도 탈출 가능한 시나리오". T3 진입 후 worst 깊이 비례 빠른 탈출 — 깊이 갈수록 회복 기대치 ↓ → 작은 회복(또는 즉시)에서도 cut.
+
+### 사다리 (config.T3_DEFENSE_LADDER)
+```
+worst 도달  → ROI 임계   액션
+─────────────────────────────────
+-2.0%       → 0%         TRIM (T3 사이즈만, T3→T2 복귀)
+-2.5%       → -0.5%      TRIM
+-3.0%       → -1.5%      SL (전량)
+-3.5%       → -2.2%      SL (전량)
+-4.0%       → -3.0%      SL (전량)
+-4.5%       → 즉시       HARD_SL (전량)
+```
+
+### 작동 (planners.py plan_t3_defense_v2)
+- 매 tick T3 포지션 순회
+- `calc_t3_defense_action(worst, max_roi)` → matched 단계 (mode, exit_roi)
+- HARD_SL: max_roi 무관 즉시 발동
+- SL/TRIM: current_roi >= exit_roi 도달 시 발동
+- TRIM은 `calc_trim_qty(amt, tier=3)` → T3 사이즈만 부분 청산, target_tier=2
+- SL/HARD_SL은 `force_market=True` CLOSE intent → 시장가 즉시 컷
+
+### 중복 발동 방지
+포지션 metadata `_t3_def_v2_last_step`에 가장 깊은 발동 단계의 worst_enter 저장. 같은 또는 더 얕은 단계 재발동 차단. HARD_SL은 예외 (무조건 발동).
+
+### PTP 차단 (사용자 결정 1.B)
+`system_state["_ptp_active_syms"]` 활성 심볼 → 본 함수에서 skip. PTP가 portfolio 일괄 청산 우선. T3 다단계는 **PTP 미발동 시기에만 작동** — 04-22~24 같은 PTP 미정상 시기 보호용.
+
+### 기존 디펜스 모드와의 관계
+- **기존 T3_DEF_M5_*** (config.py:122-123, hedge_engine.py:300대): worst≤-5% + ROI -0.5% trim. **상수/코드는 유지** (호환). 새 사다리가 더 얕은 단계(-2.0%)부터 작동하므로 사실상 새 사다리가 우선 발동.
+- **HARD_SL_BY_TIER[3]=-10%** (config.py:215): 최후의 보루. 새 사다리 -4.5% HARD_SL이 먼저 발동되어 도달 거의 안 됨 [추정].
+
+### 검증 가능 로그
+```
+[T3_DEF_V2] ✂ {sym} {side} TRIM qty={qty} roi=+0.0% worst=-2.1% (T3→T2)
+[T3_DEF_V2] ⛔ {sym} {side} SL qty={qty} roi=-1.5% worst=-3.1%
+[T3_DEF_V2] ⛔ {sym} {side} HARD_SL qty={qty} roi=-X.X% worst=-4.6%
+```
+
+### 한계
+- 4일치 시뮬 표본 작음 (T3 9 FC만)
+- max_roi 컬럼이 양수만 기록 → 음수 임계(-0.5/-1.5 등) 도달 추적 어려움 → current_roi로 호출부에서 체크
+- PTP 정상 환경에선 T3 도달 자체 적어 효과 측정 어려움
+- 기존 hedge_engine T3_DEF 로직과 양립 — 두 시스템 동시 작동 시 동작 검증 필요
+
+### 수정 시 체크
+- [ ] T3_DEFENSE_LADDER 변경 시 calc_t3_defense_action 동작 단위테스트
+- [ ] _t3_def_v2_last_step DCA 체결 시 리셋 (현 미구현, T3 재진입 케이스 발생 시 추가)
+- [ ] BC/CB 제외 (role 체크 — `CORE_MR`/`CORE_MR_HEDGE`만)
+- [ ] PTP exclude 체크 (`_ptp_active_syms`)
+
+---
+
 ## ★ V10.31AM: 잔량 float 오차 방어 (OP 68회 루프 해결)
 
 ### 증상

@@ -104,9 +104,68 @@ DCA_MIN_CORR          = 0.5
 # ★ V10.28b: Entry 기준 DCA — 이전 tier 체결가에서 X% 하락 시 트리거
 # EP 기준이 아닌 실제 가격 간격 유지 (EP 압축 방지)
 DCA_ENTRY_BASED   = False  # ★ V10.29b: 블렌디드 EP 기준 통일 (바이낸스 ROI = 봇 ROI)
-DCA_ENTRY_ROI     = -1.8   # 레거시 호환 (T2 기본값)
-# ★ V10.29: T3/T4 DCA 거리 두배 — 노이즈 DCA 방지
-DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V10.29b: T4 제거
+DCA_ENTRY_ROI     = -1.5   # 레거시 호환 (T2 기본값)
+# ★ V10.31AM3 hotfix-4: T2 -1.8→-1.5, T3 -3.6→-2.0 — 빠른 평단 압축
+#   사용자 결정 [04-27]: "DCA 1.5/2.0으로 바꾸고 T3 디펜스 모드 변경"
+#   취지: 모든 구간에서 조금 반등해도 탈출 가능하도록 평단 빨리 압축
+#   리스크: 추세 케이스에서 T3까지 풀로딩 빨라짐 → T3 다단계 디펜스/SL로 보호 (아래 T3_DEFENSE_LADDER)
+DCA_ENTRY_ROI_BY_TIER = {2: -1.5, 3: -2.0}  # ★ V10.31AM3 hotfix-4
+
+# ★ V10.31AM3 hotfix-4: T3 다단계 디펜스/SL 사다리
+#   사용자 결정 [04-27]: "0.5까진 트림, 나머진 SL처리"
+#   컨셉: T3 진입 후 worst 깊이 비례 빠른 탈출 — 깊이 갈수록 회복 기대치 ↓
+#
+#   사다리 (worst_enter, exit_roi, mode):
+#     -2.0% → 0%      TRIM (T3 사이즈만 부분 청산, 평단 회복하면 T2로 복귀)
+#     -2.5% → -0.5%   TRIM (약손실 탈출)
+#     -3.0% → -1.5%   SL (전량 컷)
+#     -3.5% → -2.2%   SL (전량 컷)
+#     -4.0% → -3.0%   SL (전량 컷)
+#     -4.5%           HARD_SL (즉시 전량 컷, max_roi 무관)
+#
+#   PTP 차단 정책 (사용자 결정 1.B): _ptp_active_syms 활성 시 본 로직 차단
+#     → PTP가 portfolio level에서 일괄 청산 우선
+#     → T3 다단계는 PTP 미발동 시기에만 작동
+T3_DEFENSE_LADDER = [
+    # (worst_enter, exit_roi, mode)
+    (-2.0, 0.0,  "TRIM"),
+    (-2.5, -0.5, "TRIM"),
+    (-3.0, -1.5, "SL"),
+    (-3.5, -2.2, "SL"),
+    (-4.0, -3.0, "SL"),
+    (-4.5, None, "HARD_SL"),  # 즉시 컷
+]
+
+def calc_t3_defense_action(worst_roi: float, max_roi: float):
+    """★ V10.31AM3 hotfix-4: T3 다단계 디펜스 액션 결정.
+
+    Args:
+        worst_roi: 현재 tier(T3) 진입 후 최저 ROI (음수, 블렌디드 EP 기준 lev 3)
+        max_roi: 현재 tier 진입 후 최대 ROI (보통 양수만 기록)
+
+    Returns:
+        (mode, exit_roi) or None
+        - mode='HARD_SL': 즉시 전량 컷 (worst <= -4.5%)
+        - mode='SL': max_roi >= exit_roi 도달 시 전량 컷
+        - mode='TRIM': max_roi >= exit_roi 도달 시 T3 사이즈만 부분 청산
+        - None: 사다리 미진입 또는 임계 미도달
+
+    NOTE: max_roi가 양수만 기록되므로 음수 임계(-0.5/-1.5/-2.2/-3.0)는
+          현재 ROI 기준으로 역추적 필요 — 호출부에서 current_roi 체크 병행.
+    """
+    # 가장 깊은 단계 찾기
+    matched = None
+    for w_enter, exit_r, mode in T3_DEFENSE_LADDER:
+        if worst_roi <= w_enter:
+            matched = (w_enter, exit_r, mode)
+        else:
+            break
+    if matched is None:
+        return None
+    w_enter, exit_r, mode = matched
+    if mode == "HARD_SL":
+        return ("HARD_SL", None)  # 즉시 컷, max_roi/current_roi 무관
+    return (mode, exit_r)  # 호출부에서 current_roi >= exit_r 체크 후 발동
 
 # ★ V10.29b: Trim — 블렌디드 EP 기준 실제 ROI로 통일
 # 계단식 익절: T1 TP(+1.5%) → T2 trim(+1.0%) → T3 trim(+0.5%) — 압축 깊을수록 빠른 회수
