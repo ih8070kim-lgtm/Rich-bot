@@ -1253,6 +1253,45 @@ async def _manage_pending_limits(ex, st, snapshot):
                             "sell" if info["side"] == "buy" else "buy", LEVERAGE)
                     else:
                         _trim_roi = _trim_pnl = 0.0
+                    # ★ V10.31AM3 hotfix-8: PTP limit 체결 시 trades.csv 기록 추가
+                    #   사용자 보고 [04-27]: "시간대별 PnL에 PTP한 거 반영 안됐다"
+                    #   추적 [실측]: 04-27 05:15:53 ETH/APT/XLM PTP limit 3건 모두 거래소 체결됐으나
+                    #     trades.csv 0건 기록 → 시간대별/일별 PnL 모두 누락 → 잔고 표시 vs 실 거래 괴리
+                    #   원인: V10.31AM3에서 텔레그램 알림 분기만 추가, log_trade() 호출 누락
+                    #   수정: TP1 부분체결 패턴(L1903) 참고하여 동일하게 호출
+                    try:
+                        from v9.logging.logger_csv import log_trade as _lt_ptp
+                        _ptp_pos_side2 = "sell" if info["side"] == "buy" else "buy"
+                        _ptp_p2 = get_p(st.get(sym, {}), _ptp_pos_side2) if st else None
+                        _ptp_dca_lv = int(_ptp_p2.get("dca_level", 1) if isinstance(_ptp_p2, dict) else 1)
+                        _ptp_role = str(_ptp_p2.get("role", "") if isinstance(_ptp_p2, dict) else "")
+                        _ptp_entry_type = str(_ptp_p2.get("entry_type", "MR") if isinstance(_ptp_p2, dict) else "MR")
+                        _ptp_max_roi = float(_ptp_p2.get("max_roi_seen", 0) if isinstance(_ptp_p2, dict) else 0)
+                        _ptp_worst = float(_ptp_p2.get("worst_roi", 0) if isinstance(_ptp_p2, dict) else 0)
+                        _ptp_t1_pre = float(_ptp_p2.get("max_roi_by_tier", {}).get("1", 0.0) if isinstance(_ptp_p2, dict) else 0.0)
+                        _ptp_open_ts = float(_ptp_p2.get("time", now) if isinstance(_ptp_p2, dict) else now) or now
+                        _ptp_hold = max(0.0, now - _ptp_open_ts)
+                        _ptp_fee = float(info.get("_commission", 0) or 0)
+                        _lt_ptp(
+                            trace_id=info.get("trace_id", oid),
+                            symbol=sym, side=_ptp_pos_side2,
+                            ep=_ptp_ep, exit_price=avg_price, amt=filled_qty,
+                            pnl_usdt=_trim_pnl, roi_pct=_trim_roi,
+                            dca_level=_ptp_dca_lv,
+                            hold_sec=_ptp_hold,
+                            reason="PTP_LIMIT",  # 시간대별/일별 분류용 — strat_pnl은 role로 분류되므로 reason은 식별용
+                            hedge_mode=False, was_hedge=False,
+                            max_roi_seen=_ptp_max_roi,
+                            entry_type=_ptp_entry_type,
+                            role=_ptp_role,
+                            source_sym="",
+                            fee_usdt=_ptp_fee,
+                            t1_max_roi_pre_dca=_ptp_t1_pre,
+                            worst_roi_seen=_ptp_worst,
+                        )
+                        print(f"[PTP_LIMIT] {sym} log_trade 기록 pnl=${_trim_pnl:+.2f} roi={_trim_roi:+.1f}%")
+                    except Exception as _ptp_lt_err:
+                        print(f"[PTP_LIMIT] log_trade 실패(무시): {_ptp_lt_err}")
                 elif info.get("is_trim"):
                     _pl_type = "TRIM_FILL"
                     if _rpnl != 0.0:

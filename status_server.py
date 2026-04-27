@@ -149,7 +149,7 @@ function render(){
     </div>`;
   } else {
     ptpBadge = `<div style="margin:6px 0;padding:6px 12px;background:#1e293b;border-radius:4px;font-size:11px;color:var(--m)">
-      ⚪ PTP idle · peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}% (1% 도달 시 arm)
+      ⚪ PTP ${ptp.state||'idle'} · peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}% (arm ${ptp.arm_trig_pct!==undefined?ptp.arm_trig_pct.toFixed(1):'?'}%, drop ${ptp.drop_thresh_pct?ptp.drop_thresh_pct.toFixed(1):'?'}%p)
     </div>`;
   }
   const kpisEl = $('kpis');
