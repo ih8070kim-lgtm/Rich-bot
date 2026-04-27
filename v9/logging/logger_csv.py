@@ -18,6 +18,7 @@ from v9.logging.schemas import (
     TRADES_COLUMNS,
     UNIVERSE_COLUMNS,
     DCA_SIM_COLUMNS,
+    SKEW_COLUMNS,
 )
 
 
@@ -298,9 +299,42 @@ def log_funding(
     _append_csv(_log_path("log_funding.csv"), FUNDING_COLUMNS, row)
 
 
-# ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)
-# 기존 log_skew 함수는 969KB 누적 중이던 죽은 로깅이라 삭제.
-# 외부에서 import 하는 코드는 없어야 함. (grep으로 검증 완료)
+# ── log_skew (★ V10.31AM3 hotfix-6: 부활 — 스큐+PTP 결합 검증 인프라)
+def log_skew(
+    trace_id: str,
+    skew: float,
+    long_m: float,
+    short_m: float,
+    skew_signed: float,
+    long_count: int,
+    short_count: int,
+    balance: float,
+    peak_balance: float,
+    drop_pct: float,
+    ptp_armed: bool,
+    urgency: float,
+):
+    """스큐 + 잔고 drop 시계열 로그.
+
+    사용자 가설 검증용: "균형 깨짐 + drop 발생 = 추세 시그널 = PTP 정확 타이밍"
+    4주 데이터 누적 후 스큐+PTP 결합 효과 분석 가능.
+    """
+    row = {
+        "time": _now_str(),
+        "trace_id": trace_id,
+        "skew": round(skew, 4),
+        "long_m": round(long_m, 4),
+        "short_m": round(short_m, 4),
+        "skew_signed": round(skew_signed, 4),
+        "long_count": int(long_count),
+        "short_count": int(short_count),
+        "balance": round(balance, 2),
+        "peak_balance": round(peak_balance, 2),
+        "drop_pct": round(drop_pct, 4),
+        "ptp_armed": bool(ptp_armed),
+        "urgency": round(urgency, 2),
+    }
+    _append_csv(_log_path("log_skew.csv"), SKEW_COLUMNS, row)
 
 
 # ── log_universe ────────────────────────────────────────────────

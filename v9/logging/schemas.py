@@ -87,8 +87,26 @@ FUNDING_COLUMNS = [
     "position_amt",    # 정산 시점 포지션 수량 (부호=방향)
 ]
 
-# ── log_skew (★ V10.31c: 제거됨 — 스큐 로직 V10.30에서 전면 삭제)
-# SKEW_COLUMNS는 더 이상 사용되지 않음.
+# ── log_skew (★ V10.31AM3 hotfix-6: 부활 — 스큐 vs PTP 결합 검증용)
+#   사용자 가설 [04-27]: "균형 맞다가 한쪽으로 쏠리면 한쪽은 익절 후 진입 안되고
+#   스큐 차이 나고 바로 PTP 발동하면 최상의 시나리오"
+#   → 스큐 변화 = 시장 추세 시그널 (portfolio drop보다 빠른 신호)
+#   → 4주 데이터 누적 후 스큐 + drop 결합 PTP 효과 검증 가능
+SKEW_COLUMNS = [
+    "time",
+    "trace_id",
+    "skew",            # abs(long_m - short_m), 절대값
+    "long_m",          # long margin ratio (CORE_MR + BALANCE만, 헷지 제외)
+    "short_m",         # short margin ratio
+    "skew_signed",     # long_m - short_m (방향 보존: + = long heavy)
+    "long_count",      # 활성 long 슬롯 수
+    "short_count",     # 활성 short 슬롯 수
+    "balance",         # 현재 real_balance
+    "peak_balance",    # PTP peak (system_state["_ptp_peak_balance"])
+    "drop_pct",        # peak 대비 drop %p (음수)
+    "ptp_armed",       # PTP arming 상태 (peak >= PEAK_TRIG_PCT)
+    "urgency",         # urgency score (skew + heavy_pain)
+]
 
 # ── log_universe ────────────────────────────────────────────────
 UNIVERSE_COLUMNS = [

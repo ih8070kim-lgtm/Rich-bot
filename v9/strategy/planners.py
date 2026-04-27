@@ -2972,6 +2972,43 @@ def generate_all_intents(
                   f"heavy={_urg_log['heavy_side']}")
             generate_all_intents._last_urg = _urg_log["urgency"]
 
+    # ★ V10.31AM3 hotfix-6: 스큐+잔고 시계열 로깅 (60s throttle, 사용자 가설 검증 인프라)
+    #   사용자 [04-27]: "균형 맞다가 한쪽으로 쏠리면 한쪽 익절 후 진입 안되고 스큐 차이"
+    #   → 4주 누적 후 스큐 변화와 잔고 drop 시간 상관 분석 → 스큐+PTP 결합 검토
+    try:
+        _skew_last_log = getattr(generate_all_intents, "_skew_last_log_ts", 0)
+        if _snap_ts - _skew_last_log >= 60:  # 60초 throttle
+            from v9.logging.logger_csv import log_skew as _log_skew
+            from v9.engines.hedge_core import calc_skew as _calc_skew
+            _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+            if _bal > 0:
+                _skew_abs, _long_m, _short_m = _calc_skew(st, _bal)
+                _skew_signed = _long_m - _short_m
+                _long_cnt, _short_cnt = _count_active_by_side(st)
+                # peak/drop은 system_state에서 (PTP가 관리)
+                _peak = float((system_state or {}).get("_ptp_peak_balance", _bal) or _bal)
+                if _peak <= 0: _peak = _bal
+                _drop_pct = (_bal - _peak) / _peak * 100 if _peak > 0 else 0.0
+                _ptp_armed = float((system_state or {}).get("_ptp_peak_balance", 0) or 0) > 0
+                _log_skew(
+                    trace_id=str(int(_snap_ts)),
+                    skew=_skew_abs,
+                    long_m=_long_m,
+                    short_m=_short_m,
+                    skew_signed=_skew_signed,
+                    long_count=_long_cnt,
+                    short_count=_short_cnt,
+                    balance=_bal,
+                    peak_balance=_peak,
+                    drop_pct=_drop_pct,
+                    ptp_armed=_ptp_armed,
+                    urgency=_urg_log.get("urgency", 0.0),
+                )
+                generate_all_intents._skew_last_log_ts = _snap_ts
+    except Exception as _e:
+        # 로깅 실패는 트레이딩에 영향 없게 — 조용히 skip
+        pass
+
     # ★ V10.31j: 미장 전 포지션 정리 비활성화 (사용자 결정, 주석처리 — 함수 정의는 유지)
     # _pmc_intents = plan_pre_market_clear(snapshot, st, system_state)
     # if _pmc_intents:
