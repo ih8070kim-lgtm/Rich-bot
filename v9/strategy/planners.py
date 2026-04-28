@@ -3165,9 +3165,18 @@ def generate_all_intents(
     # PTP는 portfolio drop 감지 — 단일 포지션 물림은 놓칠 수 있음
     # 04-23 OP 7.2h -$14 케이스: 다른 MR +$16 상쇄로 PTP 미발동 → T3_8H가 방어
     # 주의: 함수명은 plan_t3_8h_cut 유지(호환성) but 내부 임계는 6h~7h (T_STEP0~3)
-    _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
-    intents += _t3_8h_intents
-    _t3_8h_syms = {i.symbol for i in _t3_8h_intents}
+    # ★ V10.31AM3 hotfix-16: T3 8H 시간컷 폐지 (사용자 결정 [04-28])
+    #   배경: T3 도달 후 worst 깊어지면 hf-4 T3 사다리(-2~-4.5%)가 손절 담당.
+    #     8H 타임아웃은 사다리 미발동 + worst 얕은 채 장기 보유 케이스에서 작동.
+    #     실측 [04-28 ETH] worst -1.45%, ROI -1.04% 10.5h 보유 후 8H 청산 -$4.24.
+    #   사용자: "8시간 타임컷도 없애. 디펜스 모드 있으니 불필요"
+    #     → T3 사다리(hf-4) + HARD_SL_BY_TIER(T3 -10%)로 단일 보호 충분.
+    #     → 시간 기반 cap 제거, ROI/worst 기반만 유지 (컨셉 정합).
+    #   부수 효과: T3 무한 보유 가능 (HARD_SL -10%까지). 슬롯 자본 묶임 vs 회복 기회 trade-off.
+    # _t3_8h_intents = plan_t3_8h_cut(snapshot, st, system_state)
+    # intents += _t3_8h_intents
+    _t3_8h_intents = []  # 비활성
+    _t3_8h_syms = set()
 
     # ★ V10.31y/AA: T3_3H 비활성 유지 — TREND 전용이었으나 TREND 자체 비활성
     # TREND_NOSLOT_ENABLED=False 상태라 T3_3H 대상 포지션 발생 안 함

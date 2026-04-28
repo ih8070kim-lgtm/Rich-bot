@@ -3078,14 +3078,11 @@ async def _main_loop(ex_init, dry_run: bool):
                                 from v9.config import (T2_DEF_WORST_ENTER,
                                                        T3_DEF_M5_WORST_ENTER)
                                 from v9.logging.logger_csv import log_system
-                                if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
-                                        and not _mr_p.get("_t2_def_logged")):
-                                    _mr_p["_t2_def_logged"] = True
-                                    log_system("T2_DEF_ENTER",
-                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
-                                               f"worst={_mr_roi:.2f}%")
-                                    print(f"[T2_DEF_ENTER] {_mr_sym} {_mr_entry_type} "
-                                          f"{_mr_side} worst={_mr_roi:.2f}%")
+                                # ★ V10.31AM3 hotfix-16: T2_DEF_ENTER 로깅 비활성 (T2 디펜스 모드 폐지)
+                                # if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
+                                #         and not _mr_p.get("_t2_def_logged")):
+                                #     _mr_p["_t2_def_logged"] = True
+                                #     log_system("T2_DEF_ENTER", ...)
                                 if (_mr_tier == 3 and _mr_roi <= T3_DEF_M5_WORST_ENTER
                                         and not _mr_p.get("_t3_def_m5_logged")):
                                     _mr_p["_t3_def_m5_logged"] = True

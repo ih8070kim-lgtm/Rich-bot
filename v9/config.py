@@ -184,14 +184,23 @@ T3_DEF_M5_TRIM_THRESH  = -0.5
 def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
     """★ V10.31j: worst_roi 기반 동적 TRIM 임계.
     
-    tier=2 + worst ≤ -2.0 → 0.5 (약반등 TRIM 허용)
+    tier=2 + worst ≤ -2.0 → 0.5 (약반등 TRIM 허용)  [V10.31AM3 hf-16: 폐지]
     tier=3 + worst ≤ -5.0 → -0.5 (약손실 TRIM 허용)
     그 외 → 기본 TRIM_BLENDED_ROI_BY_TIER 값
     
     DCA 체결 시 worst_roi=0 리셋되므로 tier별 독립 평가.
+    
+    ★ V10.31AM3 hotfix-16: T2 디펜스 모드 폐지 (사용자 결정 [04-28])
+      배경: T2 worst -2.0% 도달 시점 = T3 DCA 트리거 (-1.5%) 직후.
+        실측 [04-28 04:47 APT] T2_DEF_ENTER 발동 시각 04:47:47, T3 DCA 체결 04:47:53 = 동시.
+        T2 디펜스가 작동할 시점에 이미 T3 진입 = 디펜스 모드 의미 없음.
+      사용자: "T2 디펜스 모드 필요 없어. 그 시기에 DCA를 T3로 하니까"
+        → T3 사다리(hf-4)와 redundancy. T2 분기 비활성.
+      유지: T3 디펜스 (worst≤-5.0 → -0.5)는 그대로 — T3 도달 후 회복 시기 trim용.
     """
-    if tier == 2 and worst_roi <= T2_DEF_WORST_ENTER:
-        return T2_DEF_TRIM_THRESH
+    # T2 디펜스 분기 비활성 (hf-16)
+    # if tier == 2 and worst_roi <= T2_DEF_WORST_ENTER:
+    #     return T2_DEF_TRIM_THRESH
     if tier == 3 and worst_roi <= T3_DEF_M5_WORST_ENTER:
         return T3_DEF_M5_TRIM_THRESH
     return TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
