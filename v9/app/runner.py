@@ -859,32 +859,12 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
                 # ★ V10.31b: 선주문 없으면 즉시 배치 (HIGH→LOW 전환 직후 등)
                 # target_price가 현재가 아래이므로 거래소에서 즉시 체결됨
 
-            # 수량 계산 — ★ V10.29d: 노셔널 기반
-            from v9.config import calc_tier_notional, notional_to_qty
+            # 수량 계산 — ★ V10.31AM3 hotfix-15: TP1 = 무조건 전량 청산 (사용자 결정 [04-28])
+            #   배경: 잔량 방어 4단 누적해도 OP/ETH dust 계속 발생.
+            #   사용자: "T1 매도만 전량 하면 되잖아" — TP1 컨셉 단순화.
+            #   결정: TP1_PRE 발사 시 거래소 보유분 100% 청산. 잔량 발생 자체 차단.
             total_qty = float(p.get("amt", 0) or 0)
-            _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
-            _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
-            if _t1_notional > 0 and target_price > 0:
-                _t1_qty = notional_to_qty(_t1_notional, target_price)
-                close_qty = _t1_qty * TP1_PARTIAL_RATIO
-            else:
-                close_qty = total_qty * TP1_PARTIAL_RATIO  # fallback
-            # ★ V10.29d FIX: 노셔널 기반 qty가 실제 보유 초과 방지
-            close_qty = min(close_qty, total_qty)
-            _min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
-            if close_qty < _min_qty:
-                close_qty = total_qty
-            # ★ V10.27e: 잔량이 min_qty 미만이면 전량 청산 (RESIDUAL 0.1 무한루프 방지)
-            remaining = total_qty - close_qty
-            if 0 < remaining < _min_qty:
-                close_qty = total_qty
-            # ★ V10.31AM3 HOTFIX: preorder 경로에도 잔량 MIN_NOTIONAL 방어 추가
-            # 실측 [04-26 04:48 UNI]: preorder 경로 사용 시 잔량 1.0 ($3.24) 발생.
-            # plan_tp1에만 AM3 적용했고 _manage_tp1_preorders 누락 → AM3 무력화.
-            # 해결: 동일 로직 — 잔량 노셔널 $5 미달이면 전량 매도
-            _remaining_notional = (total_qty - close_qty) * target_price
-            if 0 < _remaining_notional < 5.0:
-                close_qty = total_qty
+            close_qty = total_qty
             if close_qty <= 0:
                 continue
 
@@ -1738,6 +1718,17 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark)
             if _trim_qty <= 0:
                 _trim_qty = filled_qty  # fallback: DCA 수량 그대로
+            # ★ V10.31AM3 hotfix-15: trim_preorder 경로 잔량 정밀도 방어
+            from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT
+            _t_min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
+            _t_total = float(p["amt"])
+            # 잔량이 min_qty * 1.5 이내면 전량 청산
+            if 0 < (_t_total - _trim_qty) < _t_min_qty * 1.5:
+                _trim_qty = _t_total
+            # 잔량 notional < $5면 전량 청산
+            _t_remaining_notional = (_t_total - _trim_qty) * _mark
+            if 0 < _t_remaining_notional < 5.0:
+                _trim_qty = _t_total
             # ★ V10.31b: trim qty 디버그
             print(f"[TRIM_DBG_PF] {sym} T{tier} calc_trim_qty: "
                   f"amt={p['amt']:.1f} ep={p['ep']:.4f} "

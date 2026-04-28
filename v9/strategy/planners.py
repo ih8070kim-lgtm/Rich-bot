@@ -1528,33 +1528,13 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
         p["trim_trail_active"] = False
         p["trim_trail_max"] = 0.0
 
+        # ★ V10.31AM3 hotfix-15: TP1 = 무조건 전량 청산 (사용자 결정 [04-28])
+        #   배경: hf-14까지 잔량 방어 4단 누적했으나 OP/ETH dust 계속 발생 → 코드 복잡도 ↑
+        #   사용자: "T1 매도만 전량 하면 되잖아" — TP1 컨셉 명확화
+        #   결정: TP1 발동 시 거래소 보유분 100% 청산. 잔량 발생 자체 차단.
+        #   부수 효과: DCA 진행 시 T2/T3 추가분도 같이 청산됨 — TRIM은 별도 (T2/T3 trim 그대로)
         total_qty = float(p.get("amt", 0.0))
-        _tp_bal = float(getattr(snapshot, 'real_balance_usdt', 0) or 0)
-        _t1_notional = calc_tier_notional(1, _tp_bal) if _tp_bal > 0 else 0
-        if _t1_notional > 0 and curr_p > 0:
-            _t1_qty = notional_to_qty(_t1_notional, curr_p)
-            close_qty = _t1_qty * TP1_PARTIAL_RATIO
-        else:
-            close_qty = total_qty * TP1_PARTIAL_RATIO
-        _sym_min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
-        if close_qty < _sym_min_qty:
-            close_qty = total_qty
-        _remaining = total_qty - close_qty
-        if 0 < _remaining < _sym_min_qty:
-            close_qty = total_qty
-        # ★ V10.31AM3: 잔량 MIN_NOTIONAL 방어 — 잔량 노셔널 $5 미달이면 전량 매도
-        # 근거: 실측 [04-25] APT/ATOM 트림/TP1 후 lot 정상이지만 노셔널 미달 잔량 발생
-        # 해결: TP1 qty 결정 시 잔량 노셔널이 $5 미만 예상이면 전량
-        _remaining_notional = (total_qty - close_qty) * curr_p
-        if 0 < _remaining_notional < 5.0:
-            close_qty = total_qty
-        # ★ V10.31AM3 hotfix-14: TP1 잔량 정밀도 방어 (사용자 결정 [04-28])
-        #   배경: 04-27 ETH 0.001 ($2.27) 좀비 잔여 → SYNC_RECOVERED_BLOCKED 30초마다 24회 반복
-        #   원인: float 정밀도로 amount_to_precision(close_qty)이 step 단위 floor 후 1 step 잔여 가능
-        #   해결: 잔량이 min_qty 1.5배 이내면 전량 청산 (float 정밀도 잔여 차단)
-        if 0 < (total_qty - close_qty) < _sym_min_qty * 1.5:
-            close_qty = total_qty
-        close_qty = min(close_qty, total_qty)
+        close_qty = total_qty
         if close_qty <= 0:
             continue
         intents.append(Intent(
