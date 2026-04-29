@@ -20,12 +20,15 @@ from v9.config import LEVERAGE
 # 수정 후: _BASE_DIR = 프로젝트 루트 → v9_status.json (일치)
 _BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 _STATUS_PATH = os.path.join(_BASE_DIR, "v9_status.json")
+_CHART_PATH = os.path.join(_BASE_DIR, "v9_chart.json")  # ★ V10.31AM3 hotfix-18: 차트 데이터 별도 파일
 _LOG_DIR = os.path.join(_BASE_DIR, "v9_logs")
 _BAL_HISTORY = os.path.join(_LOG_DIR, "log_balance.csv")
 _LAST_WRITE = 0.0
 _LAST_BAL_WRITE = 0.0
+_LAST_CHART_WRITE = 0.0    # ★ hotfix-18: 차트 데이터 갱신 throttle
 _WRITE_INTERVAL = 3.0     # status JSON 갱신 주기
 _BAL_INTERVAL = 60.0       # 잔고 기록 주기 (1분)
+_CHART_INTERVAL = 60.0     # ★ hotfix-18: 차트 데이터 갱신 주기 (60s — 봇 영향 최소)
 
 
 def _tail_lines(filepath: str, n: int = 30) -> list:
@@ -260,6 +263,184 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
             result["state"] = "armed"
     
     return result
+
+
+# ─────────────────────────────────────────────────────────────────
+# ★ V10.31AM3 hotfix-18: 차트 데이터 export
+# 봇 영향 0 — snapshot.ohlcv_pool 메모리 read만 (추가 거래소 API 호출 0)
+# 60초 throttle, 약 80~120KB JSON, atomic write
+# ─────────────────────────────────────────────────────────────────
+def _parse_time_to_ms(time_str: str) -> int:
+    """'2026-04-29 11:23:45' (UTC 가정 — V10.31AK) → epoch ms"""
+    try:
+        from datetime import timezone as _tz
+        dt = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+        return int(dt.replace(tzinfo=_tz.utc).timestamp() * 1000)
+    except Exception:
+        return 0
+
+
+def _classify_marker_reason(reason: str) -> str:
+    """log_trades.csv reason → 마커 타입.
+    
+    분류:
+      exit_tp:    TP1_LIMIT_FULL 등 익절
+      exit_trim:  TRIM_T2/TRIM_T3 부분 청산
+      exit_sl:    HARD_SL/FORCE_CLOSE 손절
+      exit_trail: TRAIL_ON 트레일링
+      exit_close: 그 외 일반 청산 (T3_3H_CUT, CLOSE 등)
+    """
+    if not reason:
+        return "exit_close"
+    r = reason.upper()
+    if "TRIM" in r:
+        return "exit_trim"
+    if "TP1" in r:
+        return "exit_tp"
+    if "HARD_SL" in r or "FORCE" in r:
+        return "exit_sl"
+    if "TRAIL" in r:
+        return "exit_trail"
+    return "exit_close"
+
+
+def _extract_markers(sym_short: str, days: int = 7) -> list:
+    """log_fills + log_trades에서 심볼별 마커 추출.
+    
+    Returns:
+        list of {t (epoch ms), type, side, price, qty, pnl, reason, tier}
+        type ∈ {entry, dca, exit_tp, exit_trim, exit_sl, exit_trail, exit_close}
+    
+    ★ GHOST_CLEANUP은 PnL 미캡처라 제외 (기존 _parse_trade_line과 동일 정책)
+    """
+    sym_full = f"{sym_short}/USDT"
+    cutoff_sec = time.time() - days * 86400
+    markers = []
+
+    # ── OPEN/DCA from log_fills.csv ──
+    fills_file = os.path.join(_LOG_DIR, "log_fills.csv")
+    if os.path.exists(fills_file):
+        for line in _tail_lines(fills_file, 10000):
+            cols = line.strip().split(",")
+            if len(cols) < 8 or not cols[0].startswith("2026"):
+                continue
+            if cols[2] != sym_full:
+                continue
+            try:
+                t_ms = _parse_time_to_ms(cols[0])
+                if t_ms == 0 or t_ms / 1000 < cutoff_sec:
+                    continue
+                tag = cols[7]
+                price = float(cols[4] or 0)
+                if price <= 0:
+                    continue
+                side = cols[3]
+                qty = float(cols[5] or 0)
+
+                if tag.startswith("V9_OPEN_"):
+                    markers.append({
+                        "t": t_ms, "type": "entry", "side": side,
+                        "price": price, "qty": qty, "reason": "OPEN", "tier": 1,
+                    })
+                elif tag.startswith("V9_DCA_PRE_"):
+                    # tier infer from trace_id (dca_pre_T2_*, dca_pre_T3_*)
+                    trace = cols[1]
+                    tier = 3 if "T3" in trace else 2
+                    markers.append({
+                        "t": t_ms, "type": "dca", "side": side,
+                        "price": price, "qty": qty, "reason": f"DCA_T{tier}", "tier": tier,
+                    })
+            except (ValueError, IndexError):
+                continue
+
+    # ── 청산 from log_trades.csv ──
+    trades_file = os.path.join(_LOG_DIR, "log_trades.csv")
+    if os.path.exists(trades_file):
+        for line in _tail_lines(trades_file, 3000):
+            cols = line.strip().split(",")
+            if len(cols) < 12 or not cols[0].startswith("2026"):
+                continue
+            if cols[2] != sym_full:
+                continue
+            try:
+                t_ms = _parse_time_to_ms(cols[0])
+                if t_ms == 0 or t_ms / 1000 < cutoff_sec:
+                    continue
+                reason = cols[11]
+                if reason in ("", "GHOST_CLEANUP"):
+                    continue
+                exit_price = float(cols[5] or 0)
+                if exit_price <= 0:
+                    continue
+                pnl = float(cols[7] or 0)
+                tier = int(cols[9] or 1)
+
+                mtype = _classify_marker_reason(reason)
+                # 청산 side는 OPEN의 반대 (trades.csv side = OPEN side)
+                close_side = "sell" if cols[3] == "buy" else "buy"
+                markers.append({
+                    "t": t_ms, "type": mtype, "side": close_side,
+                    "price": exit_price, "pnl": round(pnl, 2),
+                    "reason": reason, "tier": tier,
+                })
+            except (ValueError, IndexError):
+                continue
+
+    markers.sort(key=lambda x: x["t"])
+    return markers
+
+
+def _write_chart_data(snapshot, positions: list):
+    """활성 심볼 + BTC OHLCV 와 최근 마커를 별도 파일로 export.
+    
+    봇 영향 0:
+    - snapshot.ohlcv_pool은 이미 메모리에 있음 (추가 API 호출 0)
+    - 60초 throttle (3초 status_writer 메인보다 훨씬 드물게)
+    - 예외 silent skip (write_status 패턴 준수)
+    """
+    global _LAST_CHART_WRITE
+    now = time.time()
+    if now - _LAST_CHART_WRITE < _CHART_INTERVAL:
+        return
+    _LAST_CHART_WRITE = now
+
+    try:
+        chart_data = {"ts": now, "ohlcv": {}, "markers": {}}
+
+        # 활성 심볼 set + BTC
+        active_syms = {p["sym"] + "/USDT" for p in positions if p.get("sym")}
+        active_syms.add("BTC/USDT")
+
+        ohlcv_pool = getattr(snapshot, "ohlcv_pool", {}) or {}
+
+        # OHLCV: 5m/15m/1h만 (1m은 노이즈 + 데이터 양 절감)
+        for sym in active_syms:
+            sym_data = ohlcv_pool.get(sym, {}) or {}
+            if not sym_data:
+                continue
+            sym_short = sym.replace("/USDT", "")
+            # ohlcv 형식: [[ts_ms, o, h, l, c, v], ...]
+            chart_data["ohlcv"][sym_short] = {
+                "5m":  sym_data.get("5m", []),
+                "15m": sym_data.get("15m", []),
+                "1h":  sym_data.get("1h", []),
+            }
+
+        # 마커: 활성 심볼만 (BTC 제외 — BTC 자체는 거래 안 함)
+        for sym in active_syms:
+            if sym == "BTC/USDT":
+                continue
+            sym_short = sym.replace("/USDT", "")
+            chart_data["markers"][sym_short] = _extract_markers(sym_short, days=2)
+
+        # atomic write
+        tmp = _CHART_PATH + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(chart_data, f, ensure_ascii=False, allow_nan=False)
+        os.replace(tmp, _CHART_PATH)
+    except Exception as e:
+        # 실패해도 봇 영향 없음 (별도 파일 — status JSON과 독립)
+        print(f"[status_writer] chart 데이터 write 실패: {e}")
 
 
 def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
@@ -707,6 +888,10 @@ def write_status(st: dict, snapshot, system_state: dict, cooldowns: dict):
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(status, f, ensure_ascii=False, allow_nan=False, default=str)
         os.replace(tmp, _STATUS_PATH)
+
+        # ★ V10.31AM3 hotfix-18: 차트 데이터 별도 파일 export (60s throttle 내부)
+        # 봇 영향 0 — snapshot.ohlcv_pool 메모리 read만, 추가 API 호출 0
+        _write_chart_data(snapshot, positions)
 
     except Exception as e:
         # ★ V10.31d 핫픽스: 대시보드 먹통 진단용 — 에러를 silent로 삼키지 않음
