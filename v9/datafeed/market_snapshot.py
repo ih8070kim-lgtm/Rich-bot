@@ -209,6 +209,13 @@ async def fetch_market_snapshot(
         baseline_balance=prev_snapshot.baseline_balance if prev_snapshot else real_balance,
         global_targets_long=prev_snapshot.global_targets_long if prev_snapshot else [],
         global_targets_short=prev_snapshot.global_targets_short if prev_snapshot else [],
+        # ★ V10.31AM3 hotfix-21b: prev_snapshot에서 beta_by_sym/correlations_3h 보존
+        #   배경: V10.31q에서 beta_by_sym 필드 추가됐으나 build_snapshot 인자에서 누락 → 매 루프 빈 dict 초기화
+        #         hf-21에서 universe_beta 로깅 시도했으나 진입 시점엔 빈 dict라 100% 0.0 기록
+        #   해결: global_targets_long/short와 동일 패턴으로 prev_snapshot에서 보존
+        #   correlations_3h도 V10.31AM에서 동일 누락 — 함께 fix
+        beta_by_sym=getattr(prev_snapshot, 'beta_by_sym', {}) if prev_snapshot else {},
+        correlations_3h=getattr(prev_snapshot, 'correlations_3h', {}) if prev_snapshot else {},
         timestamp=ts,
         valid=(btc_price > 0 and real_balance > 0),
     )
