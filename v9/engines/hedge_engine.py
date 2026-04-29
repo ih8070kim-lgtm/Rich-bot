@@ -335,6 +335,22 @@ def plan_force_close(
                 # ── 기존 HARD_SL ──
                 _t4_skip = (_dca_lv_sl >= 3 and p.get("t4_defense", False) and not force)
                 if not force and not _t4_skip:
+                    # ★ V10.31AM3 hotfix-17: 잔량 기반 dca_level로 HARD_SL 임계 결정 (사용자 통찰)
+                    #   배경: 04-28 TIA — dca_level=T2 (시스템) but 잔량=T3 사이즈 (실제)
+                    #     → HARD_SL_T2 -5.6%가 큰 사이즈에 적용 → -$23.67
+                    #   해결: HARD_SL 평가 시 잔량 기반 tier 사용 (시스템 카운터와 모순 시)
+                    try:
+                        from v9.config import calc_tier_from_amt
+                        _bal_sl = float(snapshot.real_balance_usdt or 0) if hasattr(snapshot, 'real_balance_usdt') else 0
+                        _amt_tier_sl = calc_tier_from_amt(float(p.get("amt", 0) or 0), curr_p, _bal_sl)
+                        if _amt_tier_sl > _dca_lv_sl:
+                            # 잔량이 더 큰 tier — 잔량 기반 임계 사용 (관대한 임계)
+                            print(f"[HARD_SL_TIER_RECALC] {sym} 잔량 기반 tier 보정: "
+                                  f"시스템 T{_dca_lv_sl} → 잔량 T{_amt_tier_sl} "
+                                  f"(amt={p.get('amt'):.4f} notional=${p.get('amt')*curr_p:.2f})")
+                            _dca_lv_sl = _amt_tier_sl
+                    except Exception:
+                        pass
                     _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
                     _sl_ep = get_sl_entry(p, _dca_lv_sl)
 

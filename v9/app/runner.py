@@ -1623,6 +1623,32 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["amt"] = old_amt + filled_qty
         p["ep"] = total_cost / p["amt"] if p["amt"] > 0 else avg_price
         p["dca_level"] = tier
+        # ★ V10.31AM3 hotfix-17: 잔량 기반 dca_level 검증 (사용자 통찰 [04-29])
+        #   배경: 04-28 TIA 자해 — DCA fill 후 잔량은 T3 사이즈인데 dca_level=T2 상태
+        #     → HARD_SL_T2 -5.6%가 큰 사이즈에 적용 → -$23.67
+        #   사용자: "트림 잔량이 남아있으면 그 티어 유지하면 깔끔한 거 아닌가"
+        #   해결: DCA fill 후 잔량 기반으로 tier 재산정. 모순 시 잔량 기반 우선.
+        try:
+            from v9.config import calc_tier_from_amt
+            _curr_p_dca = avg_price if avg_price > 0 else float((snapshot.all_prices or {}).get(sym, 0) or 0)
+            _bal_dca = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+            _amt_tier = calc_tier_from_amt(p["amt"], _curr_p_dca, _bal_dca)
+            if _amt_tier > tier:
+                # 잔량이 더 큰 tier에 해당 — 잔량 기반 우선 (좀비 사이즈 보정)
+                print(f"[DCA_TIER_RECALC] {sym} {pos_side} 잔량 기반 tier 보정: "
+                      f"intent T{tier} → 잔량기반 T{_amt_tier} "
+                      f"(amt={p['amt']:.4f} notional=${p['amt']*_curr_p_dca:.2f})")
+                try:
+                    from v9.logging.logger_csv import log_system as _ls_dca_recalc
+                    _ls_dca_recalc("DCA_TIER_RECALC",
+                                   f"{sym} {pos_side} amt={p['amt']:.4f} "
+                                   f"notional=${p['amt']*_curr_p_dca:.2f} "
+                                   f"intentT{tier}→잔량기반T{_amt_tier}")
+                except Exception:
+                    pass
+                p["dca_level"] = _amt_tier
+        except Exception:
+            pass
         p["last_dca_time"] = now
         # ★ V10.31t: p["time"] OPEN 시각 유지 — DCA 체결 시 덮어쓰지 않음
         # 이전 버그: DCA 체결마다 time 갱신되어 T3 시간컷(3h/8h) 무력화됨
@@ -1778,6 +1804,33 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         if info.get("is_trim"):
             _target_tier = info.get("target_tier", max(1, int(p.get("dca_level", 2)) - 1))
             _old_tier = int(p.get("dca_level", 1))
+            # ★ V10.31AM3 hotfix-17: 잔량 기반 dca_level 역산 (사용자 통찰 [04-29])
+            #   배경: 04-28 TIA 자해 — TRIM 후 사이즈 거의 그대로인데 dca_level 강등
+            #     → HARD_SL_T2 -5.6%가 큰 사이즈에 적용 → -$23.67
+            #   사용자: "트림 잔량이 남아있으면 그 티어 유지하면 깔끔한 거 아닌가"
+            #   해결: 임의 임계 X. 잔량 notional로 어느 tier 사이즈에 해당하는지 역산.
+            #     계산: calc_tier_from_amt(amt, price, bal) — 잔량이 T3 누적 80% 이상 → T3 유지
+            try:
+                from v9.config import calc_tier_from_amt
+                _curr_p_trim = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
+                _bal_trim = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                _actual_tier = calc_tier_from_amt(p["amt"], _curr_p_trim, _bal_trim)
+                if _actual_tier != _target_tier:
+                    print(f"[TRIM_TIER_RECALC] {sym} {pos_side} 잔량 기반 tier 재산정: "
+                          f"의도 T{_target_tier} → 실제 T{_actual_tier} "
+                          f"(amt={p['amt']:.4f} notional=${p['amt']*_curr_p_trim:.2f})")
+                    try:
+                        from v9.logging.logger_csv import log_system as _ls_recalc
+                        _ls_recalc("TRIM_TIER_RECALC",
+                                   f"{sym} {pos_side} amt={p['amt']:.4f} "
+                                   f"notional=${p['amt']*_curr_p_trim:.2f} "
+                                   f"의도T{_target_tier}→실제T{_actual_tier}")
+                    except Exception:
+                        pass
+                    _target_tier = _actual_tier  # 잔량 기반 tier 사용
+            except Exception as _re:
+                print(f"[TRIM_TIER_RECALC] {sym} 역산 실패 (의도 tier 사용): {_re}")
+            
             p["dca_level"] = _target_tier
             p["worst_roi"] = 0.0
             p["max_roi_seen"] = 0.0
@@ -1812,6 +1865,20 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 print(f"[PENDING_FILL] {sym} dca_targets 재생성 실패: {_te}")
             print(f"[PENDING_FILL] {sym} {pos_side} DCA_TRIM T{_old_tier}→T{_target_tier} "
                   f"sold={filled_qty:.4f} remain={p['amt']:.4f} ep={p.get('ep',0):.4f}")
+            # ★ V10.31AM3 hotfix-17: TRIM 후 dca_level/step/dca_targets 상태 진단 로깅
+            #   목적: 사다리 TRIM 후 T3 DCA 재발사 작동 여부 추적
+            #   배경: 04-28 TIA 케이스 — TRIM 후 T2 강등됐는데 T3 DCA 재발사 안 된 의심
+            try:
+                from v9.logging.logger_csv import log_system as _ls_trim
+                _dt_targets = p.get("dca_targets", [])
+                _dt_t3 = [t for t in _dt_targets if t.get("tier") == 3]
+                _ls_trim("TRIM_AFTER_STATE",
+                         f"{sym} {pos_side} dca_level={p.get('dca_level')} "
+                         f"step={p.get('step')} pending_dca={p.get('pending_dca')} "
+                         f"dca_targets_T3={len(_dt_t3)} amt={p.get('amt'):.4f} "
+                         f"worst_roi={p.get('worst_roi'):.2f}")
+            except Exception:
+                pass
             if old_ep > 0:
                 # ★ V10.31b FIX: LEVERAGE 제거 — qty가 이미 레버리지 반영 수량
                 # 바이낸스 realizedPnl 우선, 없으면 내부 계산

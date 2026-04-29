@@ -1840,7 +1840,7 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     metadata={
                         "force_market": True,  # 시장가 (반등 시점 즉시 캡쳐)
                         "is_trim": True,
-                        "target_tier": 2,  # T3 → T2 복귀
+                        "target_tier": 2,  # T3 → T2 복귀 (정상 시나리오)
                         "t3_defense_v2": True,
                         "t3_def_mode": mode,
                         "t3_def_step_worst": _curr_step_worst,
