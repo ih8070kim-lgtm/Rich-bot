@@ -222,7 +222,7 @@ PTP_COOLDOWN_SEC          = 3600  # ★ V10.31AE: 발동 후 1시간 쿨다운 (
 #         시간 기반 cooldown은 환경 무관 = 평상시 자해 + 변동성 시기만 가치
 #   결정: hf-9 비활성 (값 0). MR 시그널 진입 알파 보존, 손절은 T3 사다리(hf-4) + PTP(hf-5)에 위임
 #   1주 후 재검토: hf-10 BTC context 데이터로 정밀 cooldown 조건 결정 (예: 1h ≤ -1.5% 시만)
-PTP_ENTRY_COOLDOWN_SEC    = 0     # ★ V10.31AM3 hotfix-11: hf-9 비활성 (MR 진입 알파 보존)
+PTP_ENTRY_COOLDOWN_SEC    = 7200  # ★ V10.31AM3 hotfix-20: hf-9 부활 (2h) — 04-29 시뮬 데이터 PTP3 차단 효과
 # ★ V10.31AM: drop 0.5 → 0.6 상향 — 실측 4일 분석: 0.5%p는 평상시 자주 찍힘 + 방어 미작동
 #   (발동 2건 중 1건 false positive, 1건 하락 지속 중 limit 미체결 → taker 시장가 컷)
 # 근거: 4일 일내 max drop 1.53/2.13/2.94/0.23% — 0.5%는 noise 영역, 0.6부터 의미 있는 drop

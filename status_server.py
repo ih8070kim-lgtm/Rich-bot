@@ -446,7 +446,7 @@ function render(){
 // ─── 포지션 탭 ──────────────────────────────────────────────────────
 function renderPos(){
   let html='';
-  html+='<div class="card"><h3>BTC <span class="sub">15m × 50</span></h3><div id="btc-mini" class="chart-mini"></div></div>';
+  html+='<div class="card"><h3>BTC <span class="sub">5m × 60</span></h3><div id="btc-mini" class="chart-mini"></div></div>';
   html+='<div class="card"><h3>활성 포지션 <span class="sub">'+(data.positions||[]).length+'개 · 클릭→차트</span></h3>';
   if(!data.positions || !data.positions.length){
     html+='<div style="color:var(--m);font-size:12px;padding:8px">활성 포지션 없음</div>';
@@ -503,8 +503,8 @@ async function drawBtcMini(){
     const r=await fetch('/api/chart?sym=BTC&t='+Date.now());
     if(!r.ok) return;
     const cd=await r.json();
-    const series15m=(cd.ohlcv && cd.ohlcv['15m']) || [];
-    if(!series15m.length){ el.innerHTML='<div style="padding:30px;text-align:center;color:var(--m);font-size:11px">BTC 데이터 로딩 대기...</div>'; return; }
+    const series5m=(cd.ohlcv && cd.ohlcv['5m']) || [];
+    if(!series5m.length){ el.innerHTML='<div style="padding:30px;text-align:center;color:var(--m);font-size:11px">BTC 데이터 로딩 대기...</div>'; return; }
     btcChart=LightweightCharts.createChart(el,{
       width:el.clientWidth, height:160,
       layout:{background:{color:'#0a0e17'},textColor:'#64748b'},
@@ -517,7 +517,7 @@ async function drawBtcMini(){
       upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,
       wickUpColor:'#22c55e',wickDownColor:'#ef4444',
     });
-    const cdata=series15m.map(c=>({time:Math.floor(c[0]/1000),open:c[1],high:c[2],low:c[3],close:c[4]}));
+    const cdata=series5m.map(c=>({time:Math.floor(c[0]/1000),open:c[1],high:c[2],low:c[3],close:c[4]}));
     btcSeries.setData(cdata);
     btcChart.timeScale().fitContent();
   }catch(e){ console.error('btc mini',e); }

@@ -2808,90 +2808,18 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
     if not _ptp_update_state(system_state, current_balance, st, now_ts):
         return []
     
-    # ★ V10.31AM3 hotfix-12: PTP 청산 차단, 시뮬 로깅만 (사용자 결정 [04-27])
-    #   배경: 04-27 PTP 3차 발동 분석 [실측]:
-    #     1차 (05:15) -$20, 2차 (06:32) -$15, 3차 (15:22) -$20.82
-    #     3차 직후 같은 심볼(XRP) 재진입 → +$2.00 익절
-    #     즉 PTP가 회복 가능한 포지션을 강제 청산 = 회복 기회 차단
-    #   사용자 컨셉 회귀: "PTP도 시뮬만 돌리고 꺼버려"
-    #     단일 포지션 손절은 hf-4 T3 사다리 + HARD_SL_BY_TIER에 위임
-    #     PTP는 portfolio level 시그널만 기록, 청산 X
-    #   효과 [추정 04-27]: PTP 3건 모두 시뮬 시 +$18 회복 기회 보존
-    #   위험: 04-22~24 같은 변동성 시기 portfolio 보호 약화
-    #         단 T3 사다리(-2%~-4.5%) + HARD_SL(T1 -3.8%, T2 -5.6%, T3 -10%)이 단일 보호
-    try:
-        # PTP 발동 시그널은 그대로 기록 (검증용)
-        _avg_tier_log = float(system_state.get("_ptp_avg_tier_at_trigger", 0) or 0)
-        _peak_log = float(system_state.get("_ptp_peak_balance", 0) or 0)
-        _drop_log = ((_peak_log - current_balance) / _peak_log * 100) if _peak_log > 0 else 0
-        from v9.logging.logger_csv import log_system as _ls
-        _ls("PTP_SIM_ONLY",
-            f"sim_only=True bal=${current_balance:.2f} drop={_drop_log:.2f}%p "
-            f"peak=${_peak_log:.2f} avg_tier={_avg_tier_log:.2f} (실청산 X — T3 사다리/HARD_SL 위임)")
-        print(f"[PTP_SIM] 발동 조건 충족 but 청산 차단 (hotfix-12) — drop={_drop_log:.2f}%p")
-
-        # ★ V10.31AM3 hotfix-13: PTP 발동 시점 BTC 컨텍스트 기록 (사용자 결정 [04-27])
-        #   목적: PTP_SIM_ONLY 발동 시기 BTC 환경 [실측] 누적
-        #   1주 후 분석: PTP 자주 발동한 환경 (1h/6h/devma/ema_gap/regime) 패턴
-        #   결과로 환경 조건부 PTP 재도입 결정 (예: 1h ≤ -1.5% 시만 청산)
-        try:
-            from v9.logging.logger_csv import log_btc_context as _lbc_ptp
-            _btc_p   = float(getattr(snapshot, "btc_price", 0) or 0)
-            _btc_1h  = float(getattr(snapshot, "btc_1h_change", 0) or 0)
-            _btc_6h  = float(getattr(snapshot, "btc_6h_change", 0) or 0)
-            _btc_dev = float(getattr(snapshot, "dev_ma", 0) or 0)
-            # ema_gap 계산 (BTC 5m vs 15m EMA 직접 — _btc_vol_regime에서 가능하나 비싸서 0 fallback)
-            _ema_gap = 0.0
-            try:
-                from v9.utils.utils_math import calc_ema as _calc_ema
-                _btc_pool = (snapshot.ohlcv_pool or {}).get("BTC/USDT", {})
-                _o5 = _btc_pool.get("5m", []) or []
-                _o15 = _btc_pool.get("15m", []) or []
-                if len(_o5) >= 20 and len(_o15) >= 20:
-                    _e5 = _calc_ema([c[4] for c in _o5], 20)
-                    _e15 = _calc_ema([c[4] for c in _o15], 20)
-                    if _e5 > 0 and _e15 > 0:
-                        _ema_gap = (_e5 - _e15) / _e15
-            except Exception:
-                pass
-            _trend = "UP" if _ema_gap > 0.002 else ("DOWN" if _ema_gap < -0.002 else "FLAT")
-            _regime = _btc_vol_regime(snapshot)
-            _strict = (_btc_1h <= -0.015 or _btc_6h <= -0.04 or _btc_dev <= -3.0 or
-                       _btc_1h >=  0.015 or _btc_6h >=  0.04 or _btc_dev >=  3.0)
-            _loose  = (_btc_1h <= -0.007 or _btc_6h <= -0.02 or _btc_dev <= -1.5 or
-                       _btc_1h >=  0.007 or _btc_6h >=  0.02 or _btc_dev >=  1.5)
-            _lbc_ptp(
-                trace_id=f"PTP_SIM_{int(now_ts)}",
-                symbol="PTP_TRIGGER",   # 진입 아닌 PTP 발동 시점 마커
-                side="-",
-                entry_type="PTP",
-                btc_price=_btc_p,
-                btc_1h_change=_btc_1h,
-                btc_6h_change=_btc_6h,
-                btc_dev_ma=_btc_dev,
-                ema_gap_pct=_ema_gap,
-                trend_tag=_trend,
-                regime=_regime,
-                regime_score=float(_regime_ema_pctl) if _regime_ema_pctl is not None else 0.5,
-                strict_block=_strict,
-                loose_block=_loose,
-            )
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # 트리거 상태 정리 — 다음 발동 위해 cooldown 처럼 작동
-    system_state["_ptp_session_start"] = current_balance
-    system_state["_ptp_peak_balance"] = current_balance
-    system_state.pop("_ptp_trigger_ts", None)
-    system_state.pop("_ptp_last_step", None)
-    system_state.pop("_ptp_active_syms", None)  # trim/T3_DEF_V2 정상 작동
-    # ★ hotfix-12: cooldown 유지 (시뮬 로그 스팸 방지)
-    from v9.config import PTP_COOLDOWN_SEC as _PCS
-    system_state["_ptp_cooldown_until"] = now_ts + _PCS
-    return []
+    # ★ V10.31AM3 hotfix-19: hotfix-12 롤백 — PTP 실청산 부활 (사용자 결정 [04-29])
+    #   근거 [실측 시뮬 3건 04-28~29]:
+    #     케이스 1 (04-28 15:35) drop -0.93% → 시뮬 손실 -$24
+    #     케이스 2 (04-29 03:10) drop -0.80% → 시뮬 손실 -$41
+    #     케이스 3 (04-29 04:10) drop -1.02% → 시뮬 회복 +$2
+    #     합계: PTP +$65 우세 (시뮬 -$2 vs PTP +$63 회피)
+    #   hf-12 도입 근거였던 "회복 가능 포지션 자해" (04-27) → 변동성 시기엔 반대로 손실 cap 가치
+    #   PTP 가치는 시기 의존 — 표본 부족하지만 시뮬 데이터가 PTP 우세 명확
+    #   수치 검증: drop 0.8% 임계는 3건 모두 발동 (0.7로 좁히면 자해 ↑, 1.0으로 넓히면 -$65 놓침)
+    #   → drop 임계 0.8% 유지가 데이터상 최적. 다른 수치(cooldown/step/premium) 변경 근거 부족
+    #   하단 V10.31AJ~AM3 정상 청산 로직 복원 (active_syms, step 0/1, log_btc_context)
     
-    # ↓↓↓ 아래는 hotfix-12에서 unreachable. 롤백 시 위 블록 제거.
     # ★ V10.31AJ: trigger 활성 진입 즉시 _ptp_active_syms 세팅 (step gap 방지)
     # 이유: 기존 코드는 step 발사 시점에만 세팅 → 4~5분 step 사이에 공백
     # → 그 동안 trim/tp1/preorder가 재생성되어 ReduceOnly -2022 재발
