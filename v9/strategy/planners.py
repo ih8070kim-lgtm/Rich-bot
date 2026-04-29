@@ -2715,26 +2715,26 @@ def _ptp_get_drop_thresh(peak_pct: float) -> float:
 
 def _ptp_update_state(system_state: Dict, current_balance: float,
                       st: Dict, now_ts: float) -> bool:
-    """PTP 상태 관리 — peak 추적 + 트리거 판정.
-    
+    """PTP 상태 관리 — 모드별 트리거 판정.
+
+    ★ V10.31AN: PTP_TRIGGER_MODE에 따라 분기
+      - "peak_drop": 기존 V10.31k~AM3 로직 (잔고 peak 대비 drop 감지)
+      - "defense_close": 트리거는 strategy_core.apply_order_results의 hook에서 외부 설정
+                         이 함수는 trigger lifecycle만 관리 (cooldown / 활성 상태 체크)
+
+    공통:
+      - _ptp_session_start / _ptp_peak_balance 는 양 모드 모두 추적 (대시보드 표시용)
+      - _ptp_trigger_ts 활성 시 양 모드 모두 True 반환 (step 진행)
+      - _ptp_cooldown_until 양 모드 공통 (1h 재트리거 차단)
+
     Returns:
         True: PTP 활성 (plan_portfolio_tp 실행 필요)
         False: 미활성
     """
-    from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
-    
+    from v9.config import PTP_TRIGGER_MODE
+
     # ★ V10.31AH: 자정 세션 리셋 로직 완전 제거 — 진짜 무한 트레일 활성
-    # Before(V10.31l~AG): KST 09:00마다 session_start/peak를 current_balance로 재설정
-    #                      → 일자별 peak 분리 (전일 peak 오늘 미반영)
-    # After(V10.31AH): 자정 경계 무시. peak는 upward only로 영구 누적.
-    # 리셋은 오직 2가지 트리거:
-    #   (1) 봇 최초 기동 (system_state에 peak 키 없음) → current_balance로 초기화
-    #   (2) PTP step 3 완료 (아래 L~블록) → current_balance로 리셋 + 쿨다운 1h
-    # 재시작 영향 없음 — `system_state` 전체가 save_position_book으로 이미 persist.
-    # 재시작 시 load_position_book()으로 peak/session_start/cooldown 그대로 복원.
-    # 근거: 사용자 논리 "계속 트레일하다 0.5 떨어지면 청산" = 세션 경계 없는 단일 peak trail
-    # 영구 청산 루프 방지책: step 3 완료 시 peak 리셋(기존 L2762~ 그대로)
-    #
+    # peak/start는 양 모드 공통으로 추적 (peak_drop 모드 트리거 판정용 + 대시보드 표시용)
     # 최초 기동 시 1회 초기화 (peak/start 키가 아예 없을 때만)
     if "_ptp_session_start" not in system_state or "_ptp_peak_balance" not in system_state:
         system_state["_ptp_session_start"] = current_balance
@@ -2743,45 +2743,52 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
             from v9.logging.logger_csv import log_system
             log_system("PTP_INIT",
                        f"start=${current_balance:.2f} peak=${current_balance:.2f} "
-                       f"(V10.31AH 무한 트레일 초기화)")
+                       f"mode={PTP_TRIGGER_MODE} (V10.31AN)")
         except Exception:
             pass
-    
+
     session_start = float(system_state.get("_ptp_session_start", current_balance) or current_balance)
     if session_start <= 0:
         return False
-    
+
     peak = float(system_state.get("_ptp_peak_balance", current_balance) or current_balance)
-    
-    # 2) Peak 갱신
+
+    # 2) Peak 갱신 (양 모드 공통 — 표시용)
     if current_balance > peak:
         system_state["_ptp_peak_balance"] = current_balance
         peak = current_balance
-    
-    # 3) 이미 트리거 중이면 True 반환 (step 진행)
+
+    # 3) 이미 트리거 중이면 True 반환 (step 진행) — 양 모드 공통
     if system_state.get("_ptp_trigger_ts"):
         return True
-    
-    # ★ V10.31AE: 쿨다운 체크 — 발동 후 1시간 내 재arming 차단
-    # arm=0.0 + drop=0.5%p 초민감 설정의 noise trigger 방지 안전장치
-    # 자정 세션 리셋에도 보존 — 물리 시간 1시간 유효 (예: 23:30 발동 → 00:30까지)
+
+    # 4) 쿨다운 체크 — 양 모드 공통
     from v9.config import PTP_COOLDOWN_SEC
     _cooldown_until = float(system_state.get("_ptp_cooldown_until", 0.0) or 0.0)
     if _cooldown_until > 0 and now_ts < _cooldown_until:
         return False
-    
-    # 4) Peak arm (J 조건): peak_gain ≥ 1%
+
+    # ── 모드별 분기 ──────────────────────────────────────────────
+    if PTP_TRIGGER_MODE == "defense_close":
+        # ★ V10.31AN defense_close: 트리거는 strategy_core hook에서 외부 설정
+        # 이 함수는 cooldown/이미 활성 체크만 담당 → 미활성 + 쿨다운 만료 시 False 반환
+        return False
+
+    # ── peak_drop 모드 (V10.31k~AM3 기존 로직) ───────────────────
+    from v9.config import PTP_PEAK_TRIG_PCT, PTP_AVG_TIER_GATE
+
+    # 5) Peak arm: peak_gain ≥ PTP_PEAK_TRIG_PCT
     peak_gain_pct = (peak - session_start) / session_start * 100.0
     if peak_gain_pct < PTP_PEAK_TRIG_PCT:
         return False
-    
-    # 5) Drop 조건 (J: tiered)
+
+    # 6) Drop 조건 (J: tiered)
     drop_pct = (peak - current_balance) / session_start * 100.0
     drop_thresh = _ptp_get_drop_thresh(peak_gain_pct)
-    if drop_pct < drop_thresh:
+    if drop_thresh is None or drop_pct < drop_thresh:
         return False
-    
-    # 6) Tier gate (K): avg_dca_level ≥ 1.5
+
+    # 7) Tier gate (K): avg_dca_level ≥ PTP_AVG_TIER_GATE
     tiers = []
     for _sym_p, _sym_pp in _pos_items(st):
         if _sym_pp.get("role") in ("BC", "CB", "HEDGE", "SOFT_HEDGE",
@@ -2789,27 +2796,25 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
             continue
         tier = int(_sym_pp.get("dca_level", 1) or 1)
         tiers.append(tier)
-    
+
     if not tiers:
         return False  # 포지션 없으면 발동 불필요
-    
+
     avg_tier = sum(tiers) / len(tiers)
     if avg_tier < PTP_AVG_TIER_GATE:
-        # 안정 구간 (T1 대부분) — tier 리셋 불필요
         return False
-    
-    # 7) 트리거 확정
+
+    # 8) 트리거 확정 (peak_drop 모드)
     system_state["_ptp_trigger_ts"] = now_ts
     system_state["_ptp_last_step"] = -1
-    # ★ V10.31AE: 쿨다운 타임스탬프 — 발동 시각 기준 1시간 후까지 재arming 차단
     system_state["_ptp_cooldown_until"] = now_ts + PTP_COOLDOWN_SEC
     try:
         from v9.logging.logger_csv import log_system
         log_system("PTP_TRIGGER",
-                   f"peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
+                   f"mode=peak_drop peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
                    f"avg_tier={avg_tier:.2f} bal=${current_balance:.2f} "
                    f"pos={len(tiers)}")
-        print(f"[PTP_TRIGGER] peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
+        print(f"[PTP_TRIGGER] mode=peak_drop peak={peak_gain_pct:.2f}% drop={drop_pct:.2f}%p "
               f"avg_tier={avg_tier:.2f} positions={len(tiers)}")
     except Exception:
         pass

@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AM3"  # ★ V10.31AM3: 잔량 MIN_NOTIONAL 차단 (TP1/TRIM/preorder) + PTP limit 알림 + PTP 후 OPEN 1h 쿨다운
+VERSION = "10.31AN"  # ★ V10.31AN: PTP trigger mode 도입 (peak_drop | defense_close) — config flag로 운영 중 전환
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -260,6 +260,49 @@ PTP_PREMIUMS_BY_STEP      = {
     # step 1: 시장가 (premium 없음, taker 확실 컷)
 }
 # ★ V10.31AL: PTP_SESSION_TZ_OFFSET_SEC 제거 — V10.31AH에서 자정 세션 리셋 제거되며 이 상수도 dead
+
+# ═══════════════════════════════════════════════════════════════════
+# ★ V10.31AN: PTP 트리거 모드 [04-30]
+# ═══════════════════════════════════════════════════════════════════
+# 사용자 결정 [04-30]: 운영 중 config flag로 전환 가능하게
+#   "peak_drop" : V10.31k~AM3 기존 — 잔고 peak 대비 drop ≥ PTP_DROP_BY_PEAK
+#   "defense_close" : 신규 — T3 사다리/T4 디펜스 청산 ROI ≤ PTP_DEFENSE_ROI_THRESH 시 트리거
+#                     트리거는 strategy_core.apply_order_results의 hook에서 외부 설정
+#                     _ptp_update_state는 lifecycle만 관리
+#
+# 의미 변화 [필수 인지]:
+#   peak_drop     = portfolio-level 시스템 시그널 (잔고 drop 감지, 선제적)
+#   defense_close = single-position cascade 실패 시그널 (사다리 컷 실패 후 정리, 사후적)
+#   → 두 모드는 다른 시그널을 감지하며 발동 빈도/특성이 근본적으로 다름
+#
+# 발동 빈도 [실측 8일 04-22~29 log_tail]:
+#   peak_drop:     6회+ (drop 0.8%p 빈번)
+#   defense_close: 0회 (사다리 정상 작동 시 -1.4 ~ -2.9% 컷 → -3% 임계 미도달)
+#   → defense_close는 사실상 사다리 완전 실패(HARD_SL worst≤-4.5%) 또는
+#      hedge_engine T4 깊은 컷(예: ARB T3_DEF_TP -7.4%) 케이스에서만 발동
+#
+# 양 모드 공통 (영향 받지 않음):
+#   - _ptp_active_syms : trigger 활성 시 trim/preorder 차단 (V10.31AJ)
+#   - 2-step 청산      : limit 0.05% 60s → 시장가 (V10.31AM)
+#   - PTP_COOLDOWN_SEC = 3600s : 발동 후 1h 재트리거 차단
+#   - PTP_ENTRY_COOLDOWN_SEC = 7200s : PTP_COMPLETE 후 신규 진입 2h 차단 (hf-20)
+#
+# 전환 시 주의:
+#   - "peak_drop" → "defense_close" : peak/drop 추적 데이터(_ptp_session_start, _ptp_peak_balance)
+#                                     는 보존되지만 트리거 판정에 사용 안 됨 (대시보드 표시용)
+#   - "defense_close" → "peak_drop" : 즉시 peak/drop 판정 활성화. peak 갱신 따라 자연 arming
+PTP_TRIGGER_MODE = "defense_close"  # "peak_drop" | "defense_close"
+
+# defense_close 모드 전용 파라미터
+PTP_DEFENSE_ROI_THRESH = -3.0  # blended EP 기준 ROI (lev 3 적용). 청산 시 ROI ≤ 이 값이면 트리거
+PTP_DEFENSE_TRIGGER_REASONS = ("T3_DEF_SL", "T3_DEF_HARD_SL", "T3_DEF_TP")  # prefix match
+# 매칭 로직: intent.reason.startswith(prefix) — "T3_DEF_SL(worst=...)" 형태와 매칭
+# 포함:   T3_DEF_SL    (planners.py plan_t3_defense_v2 + hedge_engine.py T4)
+#         T3_DEF_HARD_SL (planners.py worst≤-4.5% 즉시 컷)
+#         T3_DEF_TP    (hedge_engine.py T4 — 깊은 worst에서 TP 임계 도달 시 cut)
+# 제외:   HARD_SL_T1/T2/T3 (T3 사다리 도달 전 컷 — 사용자 결정 [04-30])
+#         T3_DEF_TRAIL    (T4 정상 trail-out — 사다리 청산 아님)
+#         T3_DEF_TRIM     (부분 청산 — 사다리 진행 중)
 
 # ★ V10.26: 쿨다운 대폭 단축 — 빠른 평단 압축으로 SL 방지
 DCA_COOLDOWN_BY_TIER = {2: 0, 3: 0, 4: 0}  # ★ V10.29b: 쿨다운 전면 제거

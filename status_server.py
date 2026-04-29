@@ -411,22 +411,39 @@ function render(){
 
   const ptp = data.ptp || {};
   let ptpBadge = '';
+  // ★ V10.31AN: 모드 표시 + monitoring 상태 (defense_close)
+  const ptpMode = ptp.mode || 'peak_drop';
+  const modeLabel = ptpMode === 'defense_close' ? 'DEF-CLOSE' : 'PEAK-DROP';
   if(ptp.state === 'active'){
-    const stepLabel = ptp.last_step >= 0 ? `STEP ${ptp.last_step + 1}/4` : 'STARTED';
+    const stepLabel = ptp.last_step >= 0 ? `STEP ${ptp.last_step + 1}/2` : 'STARTED';
+    const peakStr = ptp.peak_gain_pct !== undefined ? `peak +${ptp.peak_gain_pct.toFixed(2)}% · drop ${ptp.current_drop_pct.toFixed(2)}%p` : '';
     ptpBadge = `<div style="margin:6px 0;padding:8px 12px;background:#3b1e1e;border-left:3px solid var(--r);border-radius:4px;font-size:12px">
-      <span style="color:var(--r);font-weight:700">🔴 PTP ACTIVE — ${stepLabel}</span>
-      <span style="color:var(--m);margin-left:8px">peak +${ptp.peak_gain_pct.toFixed(2)}% · drop ${ptp.current_drop_pct.toFixed(2)}%p</span>
+      <span style="color:var(--r);font-weight:700">🔴 PTP ACTIVE [${modeLabel}] — ${stepLabel}</span>
+      <span style="color:var(--m);margin-left:8px">${peakStr}</span>
     </div>`;
   } else if(ptp.state === 'armed'){
     const dropBar = ptp.drop_thresh_pct > 0 ? Math.min(ptp.current_drop_pct / ptp.drop_thresh_pct * 100, 100) : 0;
     ptpBadge = `<div style="margin:6px 0;padding:8px 12px;background:#1e2e3b;border-left:3px solid var(--a);border-radius:4px;font-size:12px">
-      <span style="color:var(--a);font-weight:700">🟡 PTP ARMED</span>
+      <span style="color:var(--a);font-weight:700">🟡 PTP ARMED [${modeLabel}]</span>
       <span style="color:var(--m);margin-left:8px">peak +${ptp.peak_gain_pct.toFixed(2)}% · drop ${ptp.current_drop_pct.toFixed(2)}%p / ${ptp.drop_thresh_pct.toFixed(2)}%p</span>
       <div style="margin-top:4px;background:#0f172a;border-radius:3px;height:4px;overflow:hidden"><div style="width:${dropBar}%;height:100%;background:var(--a);opacity:.7"></div></div>
     </div>`;
-  } else {
+  } else if(ptp.state === 'monitoring'){
+    // ★ V10.31AN: defense_close 모드 — T3 청산 ROI 감시 중
+    const reasons = (ptp.defense_trigger_reasons || []).join(', ') || 'T3_DEF_*';
+    const roiThresh = ptp.defense_roi_thresh !== undefined ? ptp.defense_roi_thresh.toFixed(1) : '?';
     ptpBadge = `<div style="margin:6px 0;padding:6px 12px;background:#1e293b;border-radius:4px;font-size:11px;color:var(--m)">
-      ⚪ PTP ${ptp.state||'idle'} · peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}% (arm ${ptp.arm_trig_pct!==undefined?ptp.arm_trig_pct.toFixed(1):'?'}%, drop ${ptp.drop_thresh_pct?ptp.drop_thresh_pct.toFixed(1):'?'}%p)
+      🟢 PTP MONITORING [${modeLabel}] · ROI ≤ ${roiThresh}% on ${reasons} (peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}%)
+    </div>`;
+  } else if(ptp.state === 'cooldown'){
+    const cdMin = ptp.cooldown_remaining_sec ? Math.ceil(ptp.cooldown_remaining_sec / 60) : 0;
+    ptpBadge = `<div style="margin:6px 0;padding:6px 12px;background:#1e293b;border-radius:4px;font-size:11px;color:var(--m)">
+      ⏳ PTP COOLDOWN [${modeLabel}] · ${cdMin}분 남음
+    </div>`;
+  } else {
+    // idle (peak_drop 모드 미arming)
+    ptpBadge = `<div style="margin:6px 0;padding:6px 12px;background:#1e293b;border-radius:4px;font-size:11px;color:var(--m)">
+      ⚪ PTP ${ptp.state||'idle'} [${modeLabel}] · peak +${ptp.peak_gain_pct?ptp.peak_gain_pct.toFixed(2):'0.00'}% (arm ${ptp.arm_trig_pct!==undefined?ptp.arm_trig_pct.toFixed(1):'?'}%, drop ${ptp.drop_thresh_pct?ptp.drop_thresh_pct.toFixed(1):'?'}%p)
     </div>`;
   }
   const oldBadge = document.getElementById('ptp-badge');

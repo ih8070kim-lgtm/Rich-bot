@@ -185,16 +185,21 @@ def _record_balance(bal: float):
 
 
 def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
-    """★ V10.31AI: PTP 상태 요약 — 대시보드 표시용.
-    
-    ★ V10.31AE 이후 arm 임계 = PTP_PEAK_TRIG_PCT (동적). AH에서 자정 리셋 제거.
-    상태 구분:
-      - idle:    peak_gain < PTP_PEAK_TRIG_PCT (arming 미달)
-      - armed:   peak_gain ≥ PTP_PEAK_TRIG_PCT + drop 미달 (대기 중)
-      - active:  trigger 중 (단계 진행 중)
-      - cooldown: 발동 후 쿨다운 내 (재arming 차단)
+    """★ V10.31AN: 모드별 PTP 상태 표시.
+
+    PTP_TRIGGER_MODE에 따라 분기:
+      - "peak_drop": V10.31AI 기존 — peak/drop arming 표시
+      - "defense_close": 신규 — T3 사다리/T4 디펜스 청산 ROI 모니터링 표시
+
+    상태 분류 (양 모드 공통):
+      - active:    trigger 중 (단계 진행 중, _ptp_trigger_ts 세팅됨)
+      - cooldown:  발동 후 쿨다운 내 (재트리거 차단)
+      - 모드별 idle 상태:
+        * peak_drop: idle (peak_gain < arm) / armed (peak_gain ≥ arm)
+        * defense_close: monitoring (T3 청산 ROI 감시 중)
     """
     result = {
+        "mode": "peak_drop",  # ★ V10.31AN: 현재 모드 표시
         "state": "idle",
         "session_start": 0.0,
         "peak": 0.0,
@@ -204,33 +209,44 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
         "arm_trig_pct": 0.0,
         "last_step": -1,
         "cooldown_remaining_sec": 0,
+        # ★ V10.31AN: defense_close 모드용 신규 필드
+        "defense_roi_thresh": 0.0,
+        "defense_trigger_reasons": [],
     }
     if not system_state or current_balance <= 0:
         return result
-    
+
+    # ★ V10.31AN: 현재 모드 조회
+    try:
+        from v9.config import PTP_TRIGGER_MODE
+        result["mode"] = str(PTP_TRIGGER_MODE)
+    except Exception:
+        pass
+
     session_start = float(system_state.get("_ptp_session_start", 0) or 0)
     peak = float(system_state.get("_ptp_peak_balance", 0) or 0)
     if session_start <= 0 or peak <= 0:
+        # 양 모드 모두 미초기화 — idle/monitoring으로 분류 결정만 진행
+        if result["mode"] == "defense_close":
+            result["state"] = "monitoring"
         return result
-    
+
     peak_gain_pct = (peak - session_start) / session_start * 100.0
     current_drop_pct = (peak - current_balance) / session_start * 100.0
-    
+
     result["session_start"] = round(session_start, 2)
     result["peak"] = round(peak, 2)
     result["peak_gain_pct"] = round(peak_gain_pct, 3)
     result["current_drop_pct"] = round(current_drop_pct, 3)
-    
-    # ★ V10.31AI: arm 임계를 config에서 동적 조회 (AH arm=0.0 반영)
+
+    # peak_drop 모드 임계 조회
     try:
         from v9.config import PTP_PEAK_TRIG_PCT
         result["arm_trig_pct"] = round(float(PTP_PEAK_TRIG_PCT), 3)
     except Exception:
         pass
-    
-    # ★ V10.31AI: tiered drop 임계 계산 — 올바른 import 경로로 수정
-    # 이전 버그: from v9.config import _ptp_get_drop_thresh (config에도 있지만)
-    # planners.py 버전이 실제 사용되는 것 — 일관성을 위해 config 버전 사용(둘 다 동일 로직)
+
+    # tiered drop 임계 계산 (peak_drop 모드 표시용)
     try:
         from v9.config import _ptp_get_drop_thresh
         _dt = _ptp_get_drop_thresh(peak_gain_pct)
@@ -238,8 +254,16 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
             result["drop_thresh_pct"] = round(_dt, 3)
     except Exception:
         pass
-    
-    # ★ V10.31AI: 쿨다운 남은 시간 (AE에서 도입된 _ptp_cooldown_until)
+
+    # ★ V10.31AN: defense_close 모드 임계 조회
+    try:
+        from v9.config import PTP_DEFENSE_ROI_THRESH, PTP_DEFENSE_TRIGGER_REASONS
+        result["defense_roi_thresh"] = round(float(PTP_DEFENSE_ROI_THRESH), 2)
+        result["defense_trigger_reasons"] = list(PTP_DEFENSE_TRIGGER_REASONS)
+    except Exception:
+        pass
+
+    # 쿨다운 남은 시간 (양 모드 공통)
     try:
         import time as _t
         _cd_until = float(system_state.get("_ptp_cooldown_until", 0) or 0)
@@ -249,19 +273,22 @@ def _build_ptp_status(system_state: dict, current_balance: float) -> dict:
                 result["cooldown_remaining_sec"] = _remain
     except Exception:
         pass
-    
-    # 상태 분류
+
+    # 상태 분류 (양 모드 공통 active/cooldown 우선, 그 다음 모드별 idle 분류)
     if system_state.get("_ptp_trigger_ts"):
         result["state"] = "active"
         result["last_step"] = int(system_state.get("_ptp_last_step", -1))
     elif result["cooldown_remaining_sec"] > 0:
         result["state"] = "cooldown"
+    elif result["mode"] == "defense_close":
+        # ★ V10.31AN: defense_close는 항상 monitoring (T3 청산 발생 대기 중)
+        result["state"] = "monitoring"
     else:
-        # ★ V10.31AI: 하드코드 "1.0" → 동적 임계 (AH arm=0에선 peak_gain ≥ 0.0 = 항상 armed)
+        # peak_drop 모드: arm 임계 도달 여부로 idle/armed 분류
         _arm_trig = result["arm_trig_pct"]
         if peak_gain_pct >= _arm_trig:
             result["state"] = "armed"
-    
+
     return result
 
 
