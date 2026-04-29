@@ -339,6 +339,7 @@ def log_skew(
 
 
 # ── log_btc_context (★ V10.31AM3 hotfix-10: BTC 컨텍스트 검증 인프라)
+# ★ V10.31AM3 hotfix-21: universe_beta/universe_corr/vol_ratio_5m 파라미터 추가
 def log_btc_context(
     trace_id: str,
     symbol: str,
@@ -354,11 +355,18 @@ def log_btc_context(
     regime_score: float,
     strict_block: bool,
     loose_block: bool,
+    universe_beta: float = 0.0,    # ★ hf-21: universe selection β (hf-21 이후 3h)
+    universe_corr: float = 0.0,    # ★ hf-21: universe selection 24h corr
+    vol_ratio_5m: float = 0.0,     # ★ hf-21: 5분 alt std / btc std (로그 전용)
 ):
     """OPEN intent 발사 시점 BTC 컨텍스트 기록.
 
     사용자 결정 [04-27, hf-10]: "둘 다 (STRICT/LOOSE) 섀도우 누적"
     1주 데이터 후 임계 정확도 [실측] 비교 — STRICT vs LOOSE vs ema_gap vs 조합.
+    
+    ★ hf-21 [04-29]: universe β/corr/vol_ratio 추가 기록.
+    universe_beta는 hf-21 이후 3시간 lookback (이전 50h). 시간축 변경.
+    vol_ratio_5m은 로그 전용 — 1주 누적 후 진입 게이트로 도입 결정.
     """
     row = {
         "time": _now_str(),
@@ -376,6 +384,9 @@ def log_btc_context(
         "regime_score": round(regime_score, 4),
         "strict_block": bool(strict_block),
         "loose_block": bool(loose_block),
+        "universe_beta": round(float(universe_beta), 3),
+        "universe_corr": round(float(universe_corr), 3),
+        "vol_ratio_5m": round(float(vol_ratio_5m), 3),
     }
     _append_csv(_log_path("log_btc_context.csv"), BTC_CONTEXT_COLUMNS, row)
 

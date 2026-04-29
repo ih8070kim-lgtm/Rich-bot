@@ -130,6 +130,10 @@ BTC_CONTEXT_COLUMNS = [
     "regime_score",        # 0~1 raw
     "strict_block",        # bool — STRICT 임계 도달 시 진입 차단됐을 케이스
     "loose_block",         # bool — LOOSE 임계 도달 시 진입 차단됐을 케이스
+    # ★ V10.31AM3 hotfix-21: universe selection 결과 + 단기 변동성 비율 (검증용)
+    "universe_beta",       # universe selection 시점 β (hf-21 이후 3h, 이전 50h)
+    "universe_corr",       # universe selection 시점 corr (24h universe 기준)
+    "vol_ratio_5m",        # ★ 로그 전용 — alt 1m std / btc 1m std (5분 윈도우). 1주 누적 후 임계 결정
 ]
 
 # ── log_universe ────────────────────────────────────────────────

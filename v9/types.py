@@ -117,6 +117,9 @@ class MarketSnapshot:
     beta_by_sym: dict = field(default_factory=dict)
     # ★ V10.31AM: 3시간 correlation (진입 필터 전용, 단기 decoupling 감지)
     correlations_3h: dict = field(default_factory=dict)
+    # ★ V10.31AM3 hotfix-21: 5분 변동성 비율 (alt_std / btc_std) — 로그 전용, 진입 결정 X
+    #   "위아래로 튀는 알트 차단" 가설 검증용. 1주 누적 후 임계 결정
+    vol_ratio_5m_by_sym: dict = field(default_factory=dict)
 
 
 # ── Intent ──────────────────────────────────────────────────────

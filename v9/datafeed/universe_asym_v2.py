@@ -211,6 +211,8 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
                     new_correlations[sym_name] = corr_24h
 
                     # ★ V10.31AM: 3시간 corr 병행 계산 (진입 필터용)
+                    # ★ V10.31AM3 hotfix-21: 3시간 β도 같이 계산 (corr와 동일 시간축)
+                    _beta_3h = None
                     if btc_lr_3h is not None:
                         try:
                             alt_5m = await asyncio.to_thread(ex.fetch_ohlcv, sym_name, "5m", limit=36)
@@ -222,8 +224,13 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
                                 if _n >= 20:
                                     corr_3h = safe_corr(btc_lr_3h[-_n:], alt_lr_3h[-_n:])
                                     new_correlations_3h[sym_name] = corr_3h
+                                    # ★ hotfix-21: 3h β 계산
+                                    _alt_std_3h = float(np.std(alt_lr_3h[-_n:]))
+                                    _btc_std_3h = float(np.std(btc_lr_3h[-_n:]))
+                                    if _btc_std_3h > 0:
+                                        _beta_3h = corr_3h * (_alt_std_3h / _btc_std_3h)
                         except Exception:
-                            # 개별 심볼 5m fetch 실패 — corr_3h 저장 생략 (fallback)
+                            # 개별 심볼 5m fetch 실패 — corr_3h/β_3h 저장 생략 (fallback)
                             pass
 
                     if corr_24h < min_corr:
@@ -232,8 +239,17 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
                     if corr_24h > UNIVERSE_MAX_CORR and sym_name not in UNIVERSE_CORR_WHITELIST:
                         continue
 
-                    _alt_std = float(np.std(alt_lr)) if len(alt_lr) > 1 else 0.0
-                    _beta = corr_24h * (_alt_std / _btc_std) if _btc_std > 0 else 1.0
+                    # ★ V10.31AM3 hotfix-21: β 시간축 50h → 3h (사용자 결정 [04-29])
+                    #   "베타값은 상관성과 동일한 시간으로 보고" — corr_3h와 시간축 정합
+                    #   배경: 50h β는 진입 신호(5m RSI)와 시간축 17배 차이 → 알파 시간축 미스매치
+                    #   04-29 손실 분석: 50h β=1.4 SHORT가 BTC 단기 회복 시점에 1.4배 손실 폭증
+                    #   fallback: 3h β 계산 실패 시 50h β 사용 (안전 default)
+                    if _beta_3h is not None:
+                        _beta = _beta_3h
+                    else:
+                        # fallback: 50h β
+                        _alt_std = float(np.std(alt_lr)) if len(alt_lr) > 1 else 0.0
+                        _beta = corr_24h * (_alt_std / _btc_std) if _btc_std > 0 else 1.0
                     if _beta < beta_min or _beta > beta_max:
                         _excluded_log.append(f"{sym_name}(b={_beta:.2f},{pool_name})")
                         continue

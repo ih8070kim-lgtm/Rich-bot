@@ -1,5 +1,84 @@
 # UNIVERSE — 유니버스 & 데이터
 
+## ★ V10.31AM3 hotfix-21: β 시간축 50h → 3h + vol_ratio_5m 로그 [04-29]
+
+### 변경
+```
+universe_asym_v2.py:236  _beta = corr_24h * (alt_std/btc_std)        # 50h (이전)
+                       → _beta = corr_3h * (alt_std_3h/btc_std_3h)   # 3h
+```
+fallback: 5m 데이터 부족 시 50h β 사용 (안전 default).
+
+### 사용자 통찰
+"MR 진입은 5분 RSI인데 그 이전 50시간 베타값이 무슨 의미가 있나"  
+"위아래로 튀는 건 안 들어가려고 베타 설정하는 건데 최대한 최근 껄 봐야지"
+
+### 진짜 베타의 목적 재정의
+이전 50h β = "이 알트가 평소 BTC와 얼마나 동조하나" (장기 통계)  
+hf-21 3h β = "지금 이 알트가 BTC와 동조해서 튀고 있나" (단기 동조성)
+
+이게 사용자 통찰의 정확한 답. universe selection 시점에 "지금 튀는 알트 차단" 목적 충족.
+
+### 시간축 정합성
+| 데이터 | 단위 | 봉 수 | 시간 |
+|---|---|---|---|
+| 진입 신호 (5m RSI) | 5분 | 1~3 | 5~15분 |
+| 진입 corr 필터 (corr_3h) | 5m | 36 | 3시간 |
+| **universe β (hf-21)** | **5m** | **36** | **3시간** ← corr와 정합 |
+| universe corr (24h) | 1h | 50 | 50시간 (그대로) |
+
+corr 24h는 그대로 둠 — **universe 안정성 보존** (β만 바꿈). corr까지 3h 변경하면 universe drift 너무 커짐.
+
+### 베타 정의의 한계 (양방향 대칭)
+β = corr × (alt_std / btc_std) — Pearson corr × 변동성 비율. **상승/하락 부호 무관**. 즉:
+- β=1.4 의미: BTC +1% → 알트 평균 +1.4%, BTC -1% → 알트 평균 -1.4% (대칭 가정)
+- 못 잡는 패턴: downside skew (하락에 더 민감). 알트 시장 흔한 비대칭
+- 향후 hf-22+ 후보: down_β / up_β 분리 계산
+
+### 04-29 손실 핵심 메커니즘 [실측]
+```
+TIA SHORT 04-29 01:55  β_50h=1.40  → BTC 1h=-0.06% 6h=+0.09%  → -$19
+FIL SHORT 04-29 03:20  β_50h=1.37  → BTC dev_ma=+0.66 (회복)   → -$34 (활성)
+OP  SHORT 04-29 03:22  β_50h=1.43  → BTC dev_ma=+0.63 (회복)   → -$22 (활성)
+```
+
+50h β 1.4 SHORT가 BTC 단기 회복 시점에 1.4배 손실 폭증 — β 양방향 대칭 + 진입 방향 BTC 추세 충돌.
+
+3h β로 변경 시 — BTC 단기 회복 시점에 알트 동조 정도가 직접 반영 → "지금 튀는 알트" 차단 가능성 ↑.
+
+### vol_ratio_5m (로그 전용)
+1m × 5봉 alt_std / btc_std. 진입 시점 "5분간 알트가 BTC 대비 N배 튀고 있는지" 측정.
+
+표본 5개로 베타 정의는 부족 (Pearson corr 신뢰구간 ±0.8) but **단순 std 비율은 표본 5개도 의미** — "튐 감지" 이진 판단 목적엔 충분.
+
+**1주 누적 후 임계 결정**:
+- vol_ratio_5m × close PnL 분포로 임계 결정
+- 예상 임계 후보: 1.5 / 2.0 / 2.5 / 3.0
+- 결정 후 hf-22로 진입 게이트 도입
+
+### 위험 [필수 인지]
+1. **임계 미조정 위험**: LONG_BETA_MIN=0.80, LONG_BETA_MAX=2.00, SHORT_BETA_MIN=0.50, SHORT_BETA_MAX=2.00 모두 50h β 분포 fit. 3h β 분포는 self-noise ↑ → universe 사이즈 변동 가능
+2. **universe drift ↑**: β 매 1시간 selection마다 변동 ↑ → 같은 sym 들어왔다 나갔다 가능
+3. **활성 포지션 영향 0** [실측 코드 검증]: universe targets는 plan_open만 사용, DCA/TRIM/SL 별도 로직
+4. **봇 자해 위험 0**: universe 비어도 진입 0 (정지 아님)
+
+### 모니터링 (1~2일 후 결정)
+- (i) `[Universe V10.15] LONG/SHORT beta:` 로그에서 β 값 분포 확인
+- (ii) universe 사이즈 (LONG 4~5, SHORT 4~6) 정상 범위 유지
+- (iii) log_btc_context.csv `universe_beta` 컬럼 분포 분석
+- (iv) β_3h × close PnL 매칭 — 50h β 분석 결과보다 익절 예측력 높은지
+
+### 향후 후보 (1주 데이터 누적 후)
+- **임계 조정**: 3h β 분포 따라 LONG_BETA_MAX/SHORT_BETA_MIN 재조정
+- **down_β / up_β 분리**: 비대칭 베타 도입 (BTC 상승 구간 / 하락 구간 분리 계산)
+- **vol_ratio_5m 진입 게이트**: 임계 결정 후 hf-22 도입
+- **β 시간축 + vol_ratio 결합**: β로 universe selection + vol_ratio로 진입 직전 게이트 = 다중 시간축 알파
+
+### 롤백
+universe_asym_v2.py에서 `if _beta_3h is not None: _beta = _beta_3h else: <fallback>` 블록 제거 → 50h β 단일 사용 복원.
+
+---
+
 ## ★ V10.31h: MAJOR_UNIVERSE 재구성 (29개)
 
 ```

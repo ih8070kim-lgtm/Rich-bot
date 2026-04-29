@@ -1118,6 +1118,41 @@ def plan_open(
                                        (trigger_side == "sell" and (_fs_1h >=  0.015 or _fs_6h >=  0.04 or _fs_dev >=  3.0)))
                 _loose_block_eval = ((trigger_side == "buy"  and (_fs_1h <= -0.007 or _fs_6h <= -0.02 or _fs_dev <= -1.5)) or
                                       (trigger_side == "sell" and (_fs_1h >=  0.007 or _fs_6h >=  0.02 or _fs_dev >=  1.5)))
+
+                # ★ V10.31AM3 hotfix-21: universe β/corr + 5분 vol_ratio 기록
+                #   universe_beta는 hf-21에서 시간축 50h → 3h 변경 (snapshot.beta_by_sym에 저장됨)
+                #   universe_corr는 24h universe selection 기준 (snapshot.correlations)
+                #   vol_ratio_5m는 로그 전용 — "위아래로 튀는 알트 차단" 가설 검증용
+                _univ_beta = float(getattr(snapshot, "beta_by_sym", {}).get(symbol, 0.0) or 0.0)
+                _univ_corr = float(getattr(snapshot, "correlations", {}).get(symbol, 0.0) or 0.0)
+                _vol_ratio_5m = 0.0
+                try:
+                    # 1m × 5봉 vol_ratio (snapshot.ohlcv_pool — 추가 fetch 0)
+                    _ohlcv_pool = getattr(snapshot, "ohlcv_pool", {}) or {}
+                    _btc_1m = (_ohlcv_pool.get("BTC/USDT", {}) or {}).get("1m", []) or []
+                    _alt_1m = (_ohlcv_pool.get(symbol, {}) or {}).get("1m", []) or []
+                    if len(_btc_1m) >= 5 and len(_alt_1m) >= 5:
+                        # 마지막 5봉 close로 1m return std
+                        _btc_closes = [float(c[4]) for c in _btc_1m[-6:] if c[4]]  # 6 close → 5 return
+                        _alt_closes = [float(c[4]) for c in _alt_1m[-6:] if c[4]]
+                        if len(_btc_closes) >= 6 and len(_alt_closes) >= 6:
+                            import math
+                            _btc_lr = [math.log(_btc_closes[i] / _btc_closes[i-1])
+                                       for i in range(1, len(_btc_closes)) if _btc_closes[i-1] > 0]
+                            _alt_lr = [math.log(_alt_closes[i] / _alt_closes[i-1])
+                                       for i in range(1, len(_alt_closes)) if _alt_closes[i-1] > 0]
+                            if _btc_lr and _alt_lr:
+                                _btc_mean = sum(_btc_lr) / len(_btc_lr)
+                                _alt_mean = sum(_alt_lr) / len(_alt_lr)
+                                _btc_var = sum((x - _btc_mean)**2 for x in _btc_lr) / len(_btc_lr)
+                                _alt_var = sum((x - _alt_mean)**2 for x in _alt_lr) / len(_alt_lr)
+                                _btc_std = math.sqrt(_btc_var) if _btc_var > 0 else 0
+                                _alt_std = math.sqrt(_alt_var) if _alt_var > 0 else 0
+                                if _btc_std > 1e-9:
+                                    _vol_ratio_5m = _alt_std / _btc_std
+                except Exception:
+                    pass  # vol_ratio 계산 실패 — 0 fallback
+
                 from v9.logging.logger_csv import log_btc_context as _lbc
                 _lbc(
                     trace_id=str(int(now_ts)),
@@ -1134,6 +1169,9 @@ def plan_open(
                     regime_score=float(_regime_ema_pctl) if _regime_ema_pctl is not None else 0.5,
                     strict_block=_strict_block_eval,
                     loose_block=_loose_block_eval,
+                    universe_beta=_univ_beta,    # ★ hf-21
+                    universe_corr=_univ_corr,    # ★ hf-21
+                    vol_ratio_5m=_vol_ratio_5m,  # ★ hf-21 (로그 전용)
                 )
             except Exception as _lbc_e:
                 pass  # 로깅 실패 silent
