@@ -84,6 +84,32 @@ def plan_force_close(
             force  = False
             reason = ""
 
+            # ★ V10.31AO HOTFIX [04-30]: oversized 강제 청산 (최우선)
+            #   배경: 04-30 AVAX 사이즈 5배 폭증 — TRIM 후 좀비 limit fill 누적
+            #         사용자 수동 청산했으나, 자동 감지/청산 안 됨 = 안전망 부재
+            #   _oversized_flag는 _sync_positions_with_exchange에서 set
+            #     (잔량 기반 dca_level이 MAX_DCA 초과 시)
+            #   조치: 즉시 시장가 전량 청산 — ROI 무관, 사이즈 비대면 우선 정리
+            #   재발 방지: 비대 사이즈 더 커지기 전 즉시 처리
+            if p.get("_oversized_flag", False):
+                _oversized_age = now - float(p.get("_oversized_ts", now) or now)
+                _amt_log = float(p.get("amt", 0) or 0)
+                _notional_log = _amt_log * curr_p
+                print(f"[OVERSIZED_FORCE_CLOSE] ★★ {symbol} {pos_side} 비대 사이즈 자동 청산: "
+                      f"amt={_amt_log:.4f} notional=${_notional_log:.2f} "
+                      f"flag_age={_oversized_age:.0f}s")
+                force = True
+                reason = f"OVERSIZED_FORCE_CLOSE(notional=${_notional_log:.0f})"
+                # 한 번 발동 후 flag 제거 (중복 방지)
+                p.pop("_oversized_flag", None)
+                p.pop("_oversized_ts", None)
+                try:
+                    from v9.logging.logger_csv import log_system as _ls_oversized_fc
+                    _ls_oversized_fc("OVERSIZED_FORCE_CLOSE",
+                                     f"{symbol} {pos_side} amt={_amt_log:.4f} "
+                                     f"notional=${_notional_log:.2f}")
+                except Exception:
+                    pass
             # ★ V10.31s: BTC 대비 이탈률 관측 (로그 전용, 청산 미실행)
             # 목적: 알트 독자 급등(숏 불리)/독자 하락(롱 불리) 패턴 데이터 수집
             # 쌓은 데이터로 실제 손실 케이스와 상관 분석 → 임계 근거 확보

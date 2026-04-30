@@ -28,6 +28,13 @@ from v9.utils.utils_math import calc_roi_pct
 _TRIM_CANCEL_QUEUE = []
 # ★ V10.30: FC 시 거래소 전체 주문 취소 큐 (DCA_PRE 좀비 방지)
 _FC_EXCHANGE_CANCEL = []
+# ★ V10.31AO HOTFIX [04-30]: idempotency 가드 — 같은 fill 두 번 처리 방지
+#   배경: 04-30 AVAX 사이즈 5배 폭증 — TRIM_T2 fill 중복 처리로 amt=0 → clear_position
+#         → is_active=False → OPEN intent 다시 발동 → fill 누적
+#   증상: 봇 dca_level=1, 거래소 잔량 215 (T3 사이즈) [HARD_SL_TIER_RECALC] 매 5초
+#   원인: strategy_core.py L412 TP1/TRIM 처리에 가드 없음 (runner.py L1490은 OPEN/DCA만 가드)
+#   수정: trace_id/order_id 기준 1시간 추적, 중복 fill skip
+_APPLIED_FILL_TRACE_IDS = {}  # {trace_id: ts}
 
 def get_trim_cancel_queue():
     """runner.py에서 호출 — 취소 대상 반환 후 클리어."""
@@ -161,6 +168,30 @@ def apply_order_results(
         if not intent:
             continue
 
+        # ★ V10.31AO HOTFIX [04-30]: idempotency 가드
+        #   같은 trace_id의 fill이 두 번 들어와도 한 번만 처리
+        #   원인 케이스: 04-30 AVAX TRIM_T2 fill 중복 처리 → amt 0 → clear → OPEN 재발동 → 사이즈 5배
+        global _APPLIED_FILL_TRACE_IDS
+        _now_apply = now
+        # cleanup: 1시간 경과 기록 제거
+        _cutoff = _now_apply - 3600
+        _APPLIED_FILL_TRACE_IDS = {k: v for k, v in _APPLIED_FILL_TRACE_IDS.items() if v > _cutoff}
+        # 같은 trace_id 두 번째 호출 → skip
+        _trace_key = str(result.trace_id) + ":" + str(getattr(result, 'order_id', '') or '')
+        if _trace_key in _APPLIED_FILL_TRACE_IDS:
+            print(f"[APPLY_DUP] {result.symbol} {intent.intent_type.value} trace={result.trace_id} "
+                  f"이미 처리됨 ({_now_apply - _APPLIED_FILL_TRACE_IDS[_trace_key]:.1f}s 전) → skip "
+                  f"(중복 fill 차단, qty={result.filled_qty})")
+            try:
+                from v9.logging.logger_csv import log_system as _ls_dup
+                _ls_dup("APPLY_DUP",
+                        f"{result.symbol} {intent.intent_type.value} "
+                        f"trace={result.trace_id} qty={result.filled_qty} skipped")
+            except Exception:
+                pass
+            continue
+        _APPLIED_FILL_TRACE_IDS[_trace_key] = _now_apply
+
         sym    = result.symbol
         itype  = intent.intent_type
         avg_px = result.avg_price
@@ -193,6 +224,43 @@ def apply_order_results(
                 if _old_role and _new_role != _old_role:
                     print(f"[GUARD] {sym} {intent.side} 기존 {_old_role} 보호 — "
                           f"신규 {_new_role} OPEN 무시 (소스 오염 방지)")
+                    continue
+
+                # ★ V10.31AO HOTFIX [04-30]: 기존 amt>0이면 OPEN을 DCA로 재해석
+                #   배경: AVAX 사이즈 5배 폭증 (runner.py _apply_pending_fill 동일 가드 미러링)
+                _existing_amt = float(existing.get("amt", 0) or 0)
+                if _existing_amt > 0 and filled > 0:
+                    _old_amt = _existing_amt
+                    _old_ep = float(existing.get("ep", 0) or 0)
+                    _new_amt = _old_amt + filled
+                    _total_cost = (_old_amt * _old_ep) + (filled * avg_px)
+                    _new_ep = _total_cost / _new_amt if _new_amt > 0 else avg_px
+                    existing["amt"] = _new_amt
+                    existing["ep"] = _new_ep
+                    existing["last_dca_time"] = now
+                    _old_dca = int(existing.get("dca_level", 1) or 1)
+                    from v9.config import DCA_WEIGHTS as _DW_SC_GUARD
+                    _new_dca = min(_old_dca + 1, len(_DW_SC_GUARD))
+                    existing["dca_level"] = _new_dca
+                    try:
+                        existing.setdefault("max_roi_by_tier", {})[str(_old_dca)] = float(existing.get("max_roi_seen", 0.0) or 0.0)
+                    except Exception:
+                        pass
+                    existing["max_roi_seen"] = 0.0
+                    existing["worst_roi"] = 0.0
+                    existing["step"] = 0
+                    existing["tp1_done"] = False
+                    print(f"[OPEN_DCA_GUARD_SC] ★ {sym} {intent.side} OPEN을 DCA로 재해석: "
+                          f"amt {_old_amt:.4f}→{_new_amt:.4f} ep {_old_ep:.4f}→{_new_ep:.4f} "
+                          f"dca T{_old_dca}→T{_new_dca}")
+                    try:
+                        from v9.logging.logger_csv import log_system as _ls_sc_guard
+                        _ls_sc_guard("OPEN_DCA_GUARD_SC",
+                                     f"{sym} {intent.side} amt={_old_amt:.4f}→{_new_amt:.4f} "
+                                     f"ep={_old_ep:.4f}→{_new_ep:.4f} dca={_old_dca}→{_new_dca}")
+                    except Exception:
+                        pass
+                    _log_pos(result.trace_id, sym, get_p(sym_st, intent.side), snapshot)
                     continue
 
             set_p(sym_st, intent.side, {

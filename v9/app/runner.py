@@ -147,6 +147,51 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                     if ex_qty > book_qty * 1.05:
                         print(f"[SYNC] {sym} {side} qty 증가 감지 "
                               f"({book_qty:.1f}→{ex_qty:.1f}) — dca_level 유지 T{int(book_p.get('dca_level', 1))}")
+                        # ★ V10.31AO HOTFIX [04-30]: 잔량 기반 dca_level 재산정 (좀비 fill 보정)
+                        #   배경: 04-30 AVAX 사이즈 5배 — TRIM 후 cancel 실패한 좀비 limit fill로
+                        #         거래소 amt가 정상 사이즈의 5배(notional $1957)까지 누적
+                        #         그러나 V10.28b FIX는 dca_level을 유지 → HARD_SL_T1 -3.8%가 비대 사이즈에 적용
+                        #         → 정상 사이즈 손실 -$11이 → 비대 시 -$58 (5배)
+                        #   수정: SYNC qty 증가 감지 시 잔량 기반 dca_level 재산정
+                        #         + 비대 감지 시 _oversized_flag 마킹 → planners에서 강제 cut 또는 신규 진입 차단
+                        try:
+                            from v9.config import calc_tier_from_amt, DCA_WEIGHTS as _SYNC_DW
+                            _curr_p_sync = float(ex_ep if ex_ep > 0 else book_ep)
+                            _bal_sync = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
+                            if _bal_sync > 0 and _curr_p_sync > 0:
+                                _amt_tier_sync = calc_tier_from_amt(ex_qty, _curr_p_sync, _bal_sync)
+                                _curr_dca_sync = int(book_p.get('dca_level', 1) or 1)
+                                if _amt_tier_sync > _curr_dca_sync:
+                                    # 잔량이 더 큰 tier에 해당 — 잔량 기반 우선
+                                    print(f"[SYNC_TIER_RECALC] ★ {sym} {side} 잔량 기반 tier 보정: "
+                                          f"T{_curr_dca_sync} → T{_amt_tier_sync} "
+                                          f"(amt={ex_qty:.4f} notional=${ex_qty*_curr_p_sync:.2f})")
+                                    book_p['dca_level'] = _amt_tier_sync
+                                    try:
+                                        from v9.logging.logger_csv import log_system as _ls_sync_recalc
+                                        _ls_sync_recalc("SYNC_TIER_RECALC",
+                                                        f"{sym} {side} amt={ex_qty:.4f} "
+                                                        f"notional=${ex_qty*_curr_p_sync:.2f} "
+                                                        f"T{_curr_dca_sync}→T{_amt_tier_sync}")
+                                    except Exception:
+                                        pass
+                                # ★ 비대 사이즈 감지 (dca_level 상한 초과)
+                                _MAX_DCA = len(_SYNC_DW)
+                                if _amt_tier_sync > _MAX_DCA:
+                                    book_p['_oversized_flag'] = True
+                                    book_p['_oversized_ts'] = now
+                                    print(f"[SYNC_OVERSIZED] ★★ {sym} {side} 비대 사이즈 감지: "
+                                          f"T{_amt_tier_sync} > MAX_T{_MAX_DCA} "
+                                          f"notional=${ex_qty*_curr_p_sync:.2f} → _oversized_flag SET")
+                                    try:
+                                        from v9.logging.logger_csv import log_system as _ls_oversized
+                                        _ls_oversized("SYNC_OVERSIZED",
+                                                      f"{sym} {side} T{_amt_tier_sync}>MAX{_MAX_DCA} "
+                                                      f"notional=${ex_qty*_curr_p_sync:.2f}")
+                                    except Exception:
+                                        pass
+                        except Exception as _sync_recalc_e:
+                            print(f"[SYNC_TIER_RECALC] {sym} 보정 실패(무시): {_sync_recalc_e}")
                 if ep_diff and ex_ep > 0:
                     book_p['ep'] = ex_ep
                 _what = []
@@ -1517,6 +1562,53 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             # ★ v10.14b: early return에서도 pending_entry 반드시 해제
             from v9.execution.position_book import set_pending_entry as _spe_er
             _spe_er(sym_st, side, None)
+            return
+
+        # ★ V10.31AO HOTFIX [04-30]: 기존 amt>0 포지션 있으면 OPEN fill을 DCA로 재해석
+        #   배경: 04-30 AVAX 사이즈 5배 폭증 — TRIM 후 어떤 경로로 같은 심볼/같은 방향에
+        #         OPEN intent가 또 발동 + V9_OPEN limit이 fill됨 → set_p로 통째 덮어쓰기
+        #         → 기존 amt 사라지고 SYNC가 거래소 ex_qty(누적)로 amt만 갱신 → dca_level=1 유지
+        #         → HARD_SL_TIER_RECALC 매 5초 보정만 발생하나 사이즈 자체는 비대 그대로
+        #   증상: AVAX amt=215, dca_level=1, notional $1957 (정상 T1 $385의 5배)
+        #   수정: 기존 amt>0이면 OPEN fill을 DCA fill로 처리 (amt 누적, ep 평균, dca_level 자연 증가)
+        #         + 거래소 amt 검증으로 안전망
+        _existing_amt = float(existing.get("amt", 0) or 0) if isinstance(existing, dict) else 0
+        if _existing_amt > 0 and isinstance(existing, dict):
+            # 기존 포지션 amt>0인데 OPEN fill이 들어옴 → DCA로 재해석
+            _old_amt = _existing_amt
+            _old_ep = float(existing.get("ep", 0) or 0)
+            _new_amt = _old_amt + filled_qty
+            _total_cost = (_old_amt * _old_ep) + (filled_qty * avg_price)
+            _new_ep = _total_cost / _new_amt if _new_amt > 0 else avg_price
+            existing["amt"] = _new_amt
+            existing["ep"] = _new_ep
+            existing["last_dca_time"] = now
+            # dca_level 자연 증가 (강제 +1 — DCA fill 흐름 미러링)
+            _old_dca = int(existing.get("dca_level", 1) or 1)
+            from v9.config import DCA_WEIGHTS as _DW_GUARD
+            _new_dca = min(_old_dca + 1, len(_DW_GUARD))
+            existing["dca_level"] = _new_dca
+            # max_roi/worst_roi tier 전환 시 리셋 (DCA fill 흐름 미러링)
+            try:
+                existing.setdefault("max_roi_by_tier", {})[str(_old_dca)] = float(existing.get("max_roi_seen", 0.0) or 0.0)
+            except Exception:
+                pass
+            existing["max_roi_seen"] = 0.0
+            existing["worst_roi"] = 0.0
+            existing["step"] = 0
+            existing["tp1_done"] = False
+            print(f"[PENDING_FILL_DCA_GUARD] ★ {sym} {side} OPEN fill을 DCA로 재해석: "
+                  f"amt {_old_amt:.4f}→{_new_amt:.4f} ep {_old_ep:.4f}→{_new_ep:.4f} "
+                  f"dca_level T{_old_dca}→T{_new_dca} (qty={filled_qty}@{avg_price})")
+            try:
+                from v9.logging.logger_csv import log_system as _ls_dca_guard
+                _ls_dca_guard("PENDING_FILL_DCA_GUARD",
+                              f"{sym} {side} OPEN→DCA reinterpret amt={_old_amt:.4f}→{_new_amt:.4f} "
+                              f"ep={_old_ep:.4f}→{_new_ep:.4f} dca={_old_dca}→{_new_dca}")
+            except Exception:
+                pass
+            from v9.execution.position_book import set_pending_entry
+            set_pending_entry(sym_st, side, None)
             return
 
         # ★ v10.14: info에서 dca_targets, locked_regime 등 복원
