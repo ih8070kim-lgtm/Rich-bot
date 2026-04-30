@@ -216,6 +216,8 @@ async def fetch_market_snapshot(
         #   correlations_3h도 V10.31AM에서 동일 누락 — 함께 fix
         beta_by_sym=getattr(prev_snapshot, 'beta_by_sym', {}) if prev_snapshot else {},
         correlations_3h=getattr(prev_snapshot, 'correlations_3h', {}) if prev_snapshot else {},
+        # ★ V10.31AO: correlations_30m도 동일 패턴 보존
+        correlations_30m=getattr(prev_snapshot, 'correlations_30m', {}) if prev_snapshot else {},
         timestamp=ts,
         valid=(btc_price > 0 and real_balance > 0),
     )

@@ -1,6 +1,65 @@
 # TRIM / TP1 — 체크리스트
 
-## ★ V10.31AN-hf1: T2 디펜스 재활성 + T3 사다리 재설계 [04-30]
+## ★ V10.31AO: T2 디펜스 사다리 (T3 제거) [04-30]
+
+### 사용자 결정 [04-30]
+T3 제거 + T2 단계에서 사다리식 보호. 사용자 직관 "맞으면 길게 가져가고 아니면 빠르게 컷" 정합.
+
+### 새 사다리 (config.py:T2_DEFENSE_LADDER)
+```
+worst -1.5% → exit +0.5%  TRIM     (T2 사이즈 부분 청산, T2→T1 복귀)
+worst -2.0% → exit -0.5%  SL       (회복 cut)
+worst -2.5% → exit -1.5%  SL       (회복 cut)
+worst -3.0%               HARD_SL  (즉시 전량, 무한 보유 차단)
+```
+
+### 변경 의도 (사용자)
+- **TRIM 단계** (-1.5): 작은 회복 잡기 — 일반 +1.0% TRIM 임계보다 더 빠름 (방어적)
+- **SL 단계** (-2.0, -2.5): 손실 지속 시 회복 시점 cut (max_roi 도달 시)
+- **HARD_SL** (-3.0): 회복 못 하면 무한 보유 차단 — 안전망
+
+### 일반 TRIM 임계 (변경 없음)
+```python
+TRIM_BLENDED_ROI_BY_TIER = {2: 1.0}  # T2 +1.0% 그대로 (사용자 결정 — 데이터 +1.5/+1.0 유지)
+```
+
+### TP1 임계 (변경 없음)
+TP1 = +1.5% (현재) 그대로. [실측 검증]: TP1 +1.0 변경 시 -$190 손실 [추정].
+
+### 코드 위치
+- `v9/strategy/planners.py:1734~` `plan_t2_defense_v2` 함수
+- `v9/config.py` `T2_DEFENSE_LADDER`, `calc_t2_defense_action`
+- `plan_t3_defense_v2`는 stub (빈 리스트 반환) — 호환성 유지
+- `T3_DEFENSE_LADDER = []` (빈 리스트, deprecated)
+
+### PTP 차단 정책 (변경 없음)
+`_ptp_active_syms` 활성 시 본 사다리 차단 — PTP 우선.
+
+### 시뮬 [실측 19일]
+사다리 단계별 발동 시뮬:
+- worst -1.5% TRIM 발동: 회복 시 부분 익절 (+0.5%) → 안정적 수입
+- worst -2.0% SL 발동: 회복 못 하면 다음 -2.5% SL로 진행
+- worst -3.0% HARD_SL: 무한 보유 차단
+
+[추정] 절감 효과: 109건 손실 케이스 중 -2.0% 도달 비율 68% → 사다리 cut 발동.
+
+### 체크리스트
+- [ ] T2_DEFENSE_LADDER config 일치 (config.py:129~136)
+- [ ] calc_t2_defense_action 함수 정상 (사다리 단계 매칭)
+- [ ] plan_t2_defense_v2 호출 (planners.py:3183)
+- [ ] T3 관련 plan/sl 분기 비활성 (T3_DEFENSE_LADDER 빈 리스트)
+- [ ] HARD_SL_T2 -3.0% (사다리 마지막과 일관)
+
+### 롤백
+config.py:
+- `T2_DEFENSE_LADDER = []` (사다리 비활성)
+- `T3_DEFENSE_LADDER` V10.31AN-hf1 값 복원
+- `DCA_WEIGHTS = [33, 33, 34]` (T3 부활)
+- planners.py: plan_t2_defense_v2 호출 제거, plan_t3_defense_v2 본 로직 복원
+
+---
+
+## ★ V10.31AN-hf1: T2 디펜스 재활성 + T3 사다리 재설계 [04-30] (V10.31AO에서 폐기)
 
 ### 사용자 결정 [04-30]
 "DCA 간격 너무 좁혀서 T3 급행열차다. 다시 뒤로 좀 밀고 T2 디펜스도 재적용, T3 디펜스도 재설계".

@@ -3158,26 +3158,20 @@ async def _main_loop(ex_init, dry_run: bool):
                             _mr_tier = int(_mr_p.get("dca_level", 1) or 1)
                             _mr_entry_type = str(_mr_p.get("entry_type", "MR"))
                             try:
-                                from v9.config import (T2_DEF_WORST_ENTER,
-                                                       T3_DEF_M5_WORST_ENTER)
+                                from v9.config import T2_DEFENSE_LADDER
                                 from v9.logging.logger_csv import log_system
-                                # ★ V10.31AN-hf1 [04-30]: T2_DEF_ENTER 로깅 재활성 (T2 디펜스 모드 부활)
-                                if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
-                                        and not _mr_p.get("_t2_def_logged")):
-                                    _mr_p["_t2_def_logged"] = True
-                                    log_system("T2_DEF_ENTER",
-                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
-                                               f"worst={_mr_roi:.2f}%")
-                                    print(f"[T2_DEF_ENTER] {_mr_sym} {_mr_entry_type} "
-                                          f"{_mr_side} worst={_mr_roi:.2f}%")
-                                if (_mr_tier == 3 and _mr_roi <= T3_DEF_M5_WORST_ENTER
-                                        and not _mr_p.get("_t3_def_m5_logged")):
-                                    _mr_p["_t3_def_m5_logged"] = True
-                                    log_system("T3_DEF_M5_ENTER",
-                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
-                                               f"worst={_mr_roi:.2f}%")
-                                    print(f"[T3_DEF_M5_ENTER] {_mr_sym} {_mr_entry_type} "
-                                          f"{_mr_side} worst={_mr_roi:.2f}%")
+                                # ★ V10.31AO [04-30]: 사다리 첫 단계 (-1.5%) 도달 시 로깅
+                                if T2_DEFENSE_LADDER:
+                                    _t2_first_step = T2_DEFENSE_LADDER[0][0]  # -1.5
+                                    if (_mr_tier == 2 and _mr_roi <= _t2_first_step
+                                            and not _mr_p.get("_t2_def_logged")):
+                                        _mr_p["_t2_def_logged"] = True
+                                        log_system("T2_DEF_ENTER",
+                                                   f"{_mr_sym} {_mr_entry_type} {_mr_side} "
+                                                   f"worst={_mr_roi:.2f}% (사다리 첫 단계)")
+                                        print(f"[T2_DEF_ENTER] {_mr_sym} {_mr_entry_type} "
+                                              f"{_mr_side} worst={_mr_roi:.2f}%")
+                                # ★ V10.31AO: T3 제거 — T3_DEF_M5_ENTER 로깅 비활성
                             except Exception:
                                 pass
                         # ★ v10.15: minroi JSON도 갱신

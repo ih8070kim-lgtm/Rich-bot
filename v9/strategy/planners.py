@@ -298,6 +298,7 @@ from v9.config import (
     calc_trim_qty, calc_tp1_thresh, get_sl_entry,
     # ★ V10.31AM3 hotfix-4: T3 다단계 디펜스
     calc_t3_defense_action, T3_DEFENSE_LADDER,
+    calc_t2_defense_action, T2_DEFENSE_LADDER,
 )
 from v9.utils.utils_math import (
     calc_rsi, calc_ema, atr_from_ohlcv, safe_float,
@@ -442,21 +443,23 @@ def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
 ) -> list:
-    """★ V10.29b: DCA 3단 타겟 — T2/T3.
-    ★ V10.31AN-hf1: DCA_ENTRY_ROI_BY_TIER 사용 (trim 후 재생성 일관성).
+    """★ V10.29b: DCA 타겟 — T2만 (V10.31AO: T3 제거).
+    ★ V10.31AO: DCA_WEIGHTS=[33,67], T2 단일 DCA. T3 진입 안 함.
     """
-    dca_w   = DCA_WEIGHTS
+    dca_w   = DCA_WEIGHTS  # [33, 67]
     total_w = sum(dca_w)
     targets = []
-    for i, tier in enumerate([2, 3]):
-        # ★ V10.31AN-hf1: DCA_ENTRY_ROI_BY_TIER 사용 (실제 트리거 값과 일관)
-        roi_trig = DCA_ENTRY_ROI_BY_TIER.get(tier, -2.0 if tier == 2 else -3.0)
+    # ★ V10.31AO: T2만 처리 (T3 제거)
+    for tier in DCA_ENTRY_ROI_BY_TIER.keys():  # {2: -1.0} → tier=2만
+        roi_trig = DCA_ENTRY_ROI_BY_TIER[tier]
         dist = abs(roi_trig) / 100 / LEVERAGE
         target_p = entry_p * (1.0 - dist) if side == "buy" else entry_p * (1.0 + dist)
-        w_idx = min(i + 1, len(dca_w) - 1)
-        notional = grid_notional * (dca_w[w_idx] / total_w)
-        targets.append({"tier": tier, "target_p": target_p,
-                        "notional": notional, "roi_trigger": roi_trig})
+        # T2 비중은 dca_w[1] (T1 다음)
+        w_idx = tier - 1  # tier=2 → w_idx=1
+        if w_idx < len(dca_w):
+            notional = grid_notional * (dca_w[w_idx] / total_w)
+            targets.append({"tier": tier, "target_p": target_p,
+                            "notional": notional, "roi_trigger": roi_trig})
     return targets
 
 
@@ -554,6 +557,33 @@ def plan_open(
             print(f"[PTP_ENTRY_LOCK] OPEN 차단 — PTP 후 cooldown {_pec_remain/60:.0f}분 남음")
             plan_open._pec_last_log_ts = time.time()
         return intents
+    # ★ V10.31AO [04-30]: HARD_SL 쿨다운 — 추세장 연쇄 사망 차단
+    #   사용자 결정: 1시간 내 HARD_SL N건 이상이면 30분 신규 진입 차단
+    #   _hard_sl_history는 hedge_engine.py(HARD_SL_T*) + planners.py(T2_DEF_SL/HARD_SL)에서 기록
+    try:
+        from v9.config import (HARDSL_COOLDOWN_SEC, HARDSL_COOLDOWN_WINDOW_SEC,
+                                HARDSL_COOLDOWN_MIN_COUNT)
+        _now_hsl = time.time()
+        _hsl_history = system_state.get("_hard_sl_history", []) or []
+        # 윈도우 내 HARD_SL 건수
+        _recent_hsl = [h for h in _hsl_history
+                       if (_now_hsl - float(h.get("ts", 0) or 0)) < HARDSL_COOLDOWN_WINDOW_SEC]
+        # 최근 HARD_SL 시각 (가장 최근)
+        _last_hsl_ts = max((float(h.get("ts", 0) or 0) for h in _recent_hsl), default=0.0)
+        _hsl_age = _now_hsl - _last_hsl_ts if _last_hsl_ts > 0 else 99999
+        # 차단 조건: 윈도우 내 N건 이상 + 마지막 HARD_SL 후 쿨다운 시간 미경과
+        if (len(_recent_hsl) >= HARDSL_COOLDOWN_MIN_COUNT 
+                and _hsl_age < HARDSL_COOLDOWN_SEC):
+            _hsl_last_log = getattr(plan_open, "_hsl_last_log_ts", 0)
+            if _now_hsl - _hsl_last_log >= 60:  # 1분 1회 로그
+                print(f"[HARDSL_COOLDOWN] OPEN 차단 — 최근 {HARDSL_COOLDOWN_WINDOW_SEC//60}분 내 "
+                      f"HARD_SL {len(_recent_hsl)}건, 마지막 후 {_hsl_age/60:.1f}분 경과 "
+                      f"(쿨다운 {HARDSL_COOLDOWN_SEC//60}분)")
+                plan_open._hsl_last_log_ts = _now_hsl
+            return intents
+    except Exception as _hsl_e:
+        # 안전: 쿨다운 체크 실패 시 정상 진행
+        pass
     # ★ V10.31j: 미장전 진입 차단 비활성 (사용자 결정, 주석처리)
     # ★ V10.31b: 미장전 신규 진입 차단
     # if system_state.get("_pmc_block_entry"):
@@ -1727,38 +1757,30 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
 
 
 # ═════════════════════════════════════════════════════════════════
-# ★ V10.31AM3 hotfix-4: T3 다단계 디펜스 (사용자 결정 [04-27])
+# ★ V10.31AO [04-30]: T2 다단계 디펜스 (T3 제거된 스켈핑 패러다임)
 # ═════════════════════════════════════════════════════════════════
-def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
+def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                         system_state: Dict = None,
                         exclude_syms: set = None) -> List[Intent]:
-    """T3 다단계 디펜스 — 사다리 임계 기반 TRIM/SL/HARD_SL.
+    """T2 다단계 디펜스 — 사다리 임계 기반 TRIM/SL/HARD_SL.
 
-    사용자 컨셉: T3 진입 후 worst 깊이 비례 빠른 탈출.
-    "모든 구간에서 조금 반등해도 탈출 가능한 시나리오"
+    사용자 컨셉 [V10.31AO 04-30]: T3 제거 + T2 단계에서 사다리식 보호.
+    "맞으면 길게 가져가고 아니면 빠르게 컷" 직관 정합.
 
-    사다리 (config.T3_DEFENSE_LADDER):
-        worst -2.0% → ROI ≥ 0%   TRIM (T3 사이즈만 부분 청산)
-        worst -2.5% → ROI ≥ -0.5% TRIM
-        worst -3.0% → ROI ≥ -1.5% SL (전량)
-        worst -3.5% → ROI ≥ -2.2% SL
-        worst -4.0% → ROI ≥ -3.0% SL
-        worst -4.5%               HARD_SL (즉시 전량)
+    사다리 (config.T2_DEFENSE_LADDER):
+        worst -1.5% → ROI ≥ +0.5% TRIM (T2 사이즈 부분 청산, T2→T1 복귀)
+        worst -2.0% → ROI ≥ -0.5% SL (회복 cut)
+        worst -2.5% → ROI ≥ -1.5% SL (회복 cut)
+        worst -3.0%               HARD_SL (즉시 전량, 무한 보유 차단)
 
-    PTP 차단 정책 (사용자 결정 1.B):
-        _ptp_active_syms 활성 심볼 → 본 함수 차단
-        → PTP 정상 작동 시 portfolio 일괄 청산 우선
-        → T3 다단계는 PTP 미발동 시기에만 작동
+    PTP 차단 정책: _ptp_active_syms 활성 심볼 → 본 함수 차단
 
-    중복 발동 방지:
-        포지션별 _t3_def_v2_last_step (worst_enter 값) 추적
-        같은 단계 한 번만 발동 후 다음 단계까지 대기
+    중복 발동 방지: 포지션별 _t2_def_v2_last_step (worst_enter 값) 추적
     """
     intents: List[Intent] = []
     if exclude_syms is None:
         exclude_syms = set()
 
-    # PTP 활성 심볼 → 차단
     _ptp_active = set((system_state or {}).get("_ptp_active_syms", set()) or set())
 
     for symbol, sym_st in st.items():
@@ -1769,8 +1791,8 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
         for _iter_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
                 continue
-            # T3 도달 + CORE_MR/CORE_MR_HEDGE만
-            if int(p.get("dca_level", 1) or 1) != 3:
+            # ★ V10.31AO: T2 도달 (dca_level=2) + CORE_MR/CORE_MR_HEDGE만
+            if int(p.get("dca_level", 1) or 1) != 2:
                 continue
             _role = p.get("role", "")
             if _role not in ("CORE_MR", "CORE_MR_HEDGE"):
@@ -1791,26 +1813,22 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
             max_r = float(p.get("max_roi_seen", 0) or 0)
 
             # 사다리 액션 결정
-            action = calc_t3_defense_action(worst, max_r)
+            action = calc_t2_defense_action(worst, max_r)
             if action is None:
                 continue
             mode, exit_roi = action
 
             # 중복 발동 방지: 같은 단계는 한 번만
-            _last_step = float(p.get("_t3_def_v2_last_step", 0) or 0)
-            # action 결정 시 사용된 worst_enter 값 (matched 사다리)
+            _last_step = float(p.get("_t2_def_v2_last_step", 0) or 0)
             _curr_step_worst = None
-            for w_enter, _ex, _md in T3_DEFENSE_LADDER:
+            for w_enter, _ex, _md in T2_DEFENSE_LADDER:
                 if worst <= w_enter:
                     _curr_step_worst = w_enter
                 else:
                     break
             if _curr_step_worst is None:
                 continue
-            # 같은 단계 이미 처리됨 → skip
             if _last_step <= _curr_step_worst:
-                # _last_step이 이미 더 깊은 단계 (더 음수) — 같거나 깊은 단계 처리됨
-                # 단 HARD_SL은 무조건 처리 (즉시 청산)
                 if mode != "HARD_SL":
                     continue
 
@@ -1819,32 +1837,38 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
             _reason = ""
             if mode == "HARD_SL":
                 _fire = True
-                _reason = f"T3_DEF_HARD_SL(worst={worst:.2f}%)"
+                _reason = f"T2_DEF_HARD_SL(worst={worst:.2f}%)"
             elif mode == "SL":
-                # current_roi >= exit_roi (음수에서 회복) 도달 시 컷
                 if roi >= exit_roi:
                     _fire = True
-                    _reason = f"T3_DEF_SL(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
+                    _reason = f"T2_DEF_SL(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
             elif mode == "TRIM":
-                # current_roi >= exit_roi 도달 시 부분 청산
                 if roi >= exit_roi:
                     _fire = True
-                    _reason = f"T3_DEF_TRIM(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
+                    _reason = f"T2_DEF_TRIM(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
 
             if not _fire:
                 continue
 
-            # 발동 단계 기록 (다음 더 깊은 단계까지 대기)
-            p["_t3_def_v2_last_step"] = _curr_step_worst
+            p["_t2_def_v2_last_step"] = _curr_step_worst
 
             _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
             _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
 
             if mode in ("SL", "HARD_SL"):
-                # 전량 컷 (force_close)
+                # 전량 컷
                 _qty = _amt
                 if _qty < _min_qty:
                     continue
+                # ★ V10.31AO: HARD_SL 쿨다운용 history 기록 (system_state)
+                if system_state is not None:
+                    _hsl_hist = system_state.setdefault("_hard_sl_history", [])
+                    _hsl_hist.append({
+                        "ts": time.time(),
+                        "side": side,
+                        "sym": symbol,
+                        "reason": _reason,
+                    })
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.CLOSE,
@@ -1854,25 +1878,24 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     price=curr_p,
                     reason=_reason,
                     metadata={
-                        "force_market": True,  # 시장가 즉시 컷
+                        "force_market": True,
                         "is_force_close": True,
-                        "t3_defense_v2": True,
-                        "t3_def_mode": mode,
-                        "t3_def_step_worst": _curr_step_worst,
+                        "t2_defense_v2": True,
+                        "t2_def_mode": mode,
+                        "t2_def_step_worst": _curr_step_worst,
                         "snap_ts": getattr(snapshot, "ts", 0),
                     },
                 ))
-                print(f"[T3_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
+                print(f"[T2_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
             else:  # TRIM
-                # T3 사이즈만 부분 청산 (calc_trim_qty 활용 — tier=3 → T3 weight)
-                _trim_qty = calc_trim_qty(_amt, 3, ep=ep, bal=_bal, mark_price=curr_p)
+                # ★ V10.31AO: T2 사이즈만 부분 청산 (T2→T1 복귀)
+                _trim_qty = calc_trim_qty(_amt, 2, ep=ep, bal=_bal, mark_price=curr_p)
                 if _trim_qty < _min_qty:
                     continue
-                # ★ V10.31AM3 hotfix-14: T3_DEF_V2 TRIM 잔량 정밀도 방어
                 if 0 < (_amt - _trim_qty) < _min_qty * 1.5:
                     _trim_qty = _amt
-                _remaining_notional_t3 = (_amt - _trim_qty) * curr_p
-                if 0 < _remaining_notional_t3 < 5.0:
+                _remaining_notional_t2 = (_amt - _trim_qty) * curr_p
+                if 0 < _remaining_notional_t2 < 5.0:
                     _trim_qty = _amt
                 intents.append(Intent(
                     trace_id=_tid(),
@@ -1883,19 +1906,27 @@ def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     price=curr_p,
                     reason=_reason,
                     metadata={
-                        "force_market": True,  # 시장가 (반등 시점 즉시 캡쳐)
+                        "force_market": True,
                         "is_trim": True,
-                        "target_tier": 2,  # T3 → T2 복귀 (정상 시나리오)
-                        "t3_defense_v2": True,
-                        "t3_def_mode": mode,
-                        "t3_def_step_worst": _curr_step_worst,
+                        "target_tier": 1,  # ★ V10.31AO: T2 → T1 복귀
+                        "t2_defense_v2": True,
+                        "t2_def_mode": mode,
+                        "t2_def_step_worst": _curr_step_worst,
                         "roi_gross": roi,
                         "snap_ts": getattr(snapshot, "ts", 0),
                     },
                 ))
-                print(f"[T3_DEF_V2] ✂ {symbol} {side} TRIM qty={_trim_qty} roi={roi:+.2f}% worst={worst:+.2f}% (T3→T2)")
+                print(f"[T2_DEF_V2] ✂ {symbol} {side} TRIM qty={_trim_qty} roi={roi:+.2f}% worst={worst:+.2f}% (T2→T1)")
 
     return intents
+
+
+# ★ V10.31AO: plan_t3_defense_v2 호환성 stub (T3 제거로 빈 리스트 반환)
+def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
+                        system_state: Dict = None,
+                        exclude_syms: set = None) -> List[Intent]:
+    """★ V10.31AO: T3 제거됨 — 빈 리스트 반환 (호환성 stub)."""
+    return []
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -3176,8 +3207,11 @@ def generate_all_intents(
 
     intents += plan_tp1(snapshot, st, exclude_syms=_exclude)
     intents += plan_trim_trail(snapshot, st, exclude_syms=_exclude)
-    # ★ V10.31AM3 hotfix-4: T3 다단계 디펜스 (사다리 기반 TRIM/SL/HARD_SL)
-    #   PTP 활성 시 차단 (사용자 결정 1.B) — 함수 내부에서 _ptp_active_syms 체크
+    # ★ V10.31AO [04-30]: T2 다단계 디펜스 (T3 제거된 스켈핑 패러다임)
+    #   사다리 -1.5/-2.0/-2.5/-3.0 단계별 TRIM/SL/HARD_SL
+    #   PTP 활성 시 차단 (함수 내부에서 _ptp_active_syms 체크)
+    intents += plan_t2_defense_v2(snapshot, st, system_state=system_state, exclude_syms=_exclude)
+    # ★ V10.31AO: plan_t3_defense_v2는 stub (T3 제거) — 호출 유지하나 빈 리스트 반환
     intents += plan_t3_defense_v2(snapshot, st, system_state=system_state, exclude_syms=_exclude)
     intents += plan_trail_on(snapshot, st)
     # ★ V10.31c: plan_dca 호출 제거 완료 (함수 자체도 삭제됨)

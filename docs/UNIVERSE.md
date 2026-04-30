@@ -1,5 +1,71 @@
 # UNIVERSE — 유니버스 & 데이터
 
+## ★ V10.31AO: 30분 BTC corr 진입 필터 [04-30]
+
+### 사용자 결정 [04-30]
+3시간 corr_3h가 길음 — 진입 직전 30분 BTC 상관성으로 **혼자 튀는 놈** 사전 식별.
+
+### 데이터 발견 [실측 19일]
+1초 윈도우 (같은 사이클) 동시 진입 vs 단독 진입:
+- 단독 (1초 X): SL 18.2%, 평균 -$1.07
+- 동시 (같은 ts): SL **3.0%**, 평균 +$1.73
+
+→ **동시 진입(BTC 상관성 ↑) = 시그널 신뢰도 매우 높음**. 단독은 6배 SL 위험.
+
+### 변경 내용
+```python
+# config.py
+OPEN_CORR_MIN_30M = 0.50   # ★ V10.31AO: 30분 corr 임계 (진입 필터)
+
+# types.py
+correlations_30m: dict = field(default_factory=dict)
+
+# universe_asym_v2.py
+btc_lr_30m = log_returns(btc_1m_closes)  # BTC 1m × 30
+alt_lr_30m = log_returns(alt_1m_closes)  # alt 1m × 30
+corr_30m = safe_corr(btc_lr_30m, alt_lr_30m)
+new_correlations_30m[sym_name] = corr_30m
+
+# risk_manager.py — OPEN 우선순위
+# 1순위: corr_30m  (30분, V10.31AO)
+# 2순위: corr_3h   (3시간, V10.31AM)
+# 3순위: corr_24h  (24시간, fallback)
+```
+
+### 데이터 소스
+- BTC 1m × 30 = 30분 OHLCV
+- alt 1m × 30 = 심볼별 30분 OHLCV
+- 30개 1m 데이터 포인트 = 통계적 신뢰도 적정 (15분=15포인트는 노이즈 큼)
+- log_returns 계산 후 Pearson corr
+
+### 우선순위 매핑
+- **OPEN (CORE_MR/CORE_MR_HEDGE)**:
+  - corr_30m 있으면 사용 (`OPEN_CORR_MIN_30M = 0.50`)
+  - corr_30m 없으면 corr_3h fallback (`OPEN_CORR_MIN = 0.50`)
+  - 둘 다 없으면 corr_24h fallback
+- **DCA/HEDGE**: corr_24h 그대로 (이미 진입된 포지션 장기 연결성)
+
+### 한계 [필수 고지]
+1. **데이터 없는 케이스**: alt 1m fetch 실패 시 corr_30m 저장 X → corr_3h fallback
+2. **30분 = 30포인트 통계 한계**: corr 노이즈로 정상 진입까지 차단 가능
+3. **임계 0.50**: 보수적 시작점. 운영 1주 후 단독 진입의 corr_30m 분포 보고 조정
+4. **fetch 부담**: 모든 universe 심볼마다 1m × 30 추가 fetch — API 호출 ↑
+5. **OHLCV 백테스트 없음**: 효과는 [추정]. 1주 운영 후 실측 검증 필요
+
+### 체크리스트
+- [ ] OPEN_CORR_MIN_30M = 0.50 (config.py)
+- [ ] correlations_30m 필드 (types.py:121)
+- [ ] correlations_30m prev_snapshot 보존 (market_snapshot.py:220)
+- [ ] btc_lr_30m + corr_30m 계산 (universe_asym_v2.py:182~)
+- [ ] snapshot replace에 correlations_30m 포함 (universe_asym_v2.py:441)
+- [ ] risk_manager OPEN 우선순위 30m → 3h → 24h
+
+### 롤백
+config.py 임계 강화로 비활성: `OPEN_CORR_MIN_30M = -1.0` (사실상 무필터)
+또는 risk_manager.py에서 corr_30m 분기 제거 → corr_3h만 사용 (V10.31AM 상태 회귀)
+
+---
+
 ## ★ V10.31AM3 hotfix-21: β 시간축 50h → 3h + vol_ratio_5m 로그 [04-29]
 
 ### 변경

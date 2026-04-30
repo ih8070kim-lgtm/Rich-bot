@@ -178,9 +178,23 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
             print(f"[Universe V10.15 AM] BTC 5m OHLCV error: {e}")
             # btc_lr_3h가 None이면 correlations_3h 계산 스킵 (fallback: 2d corr 사용)
 
+        # ★ V10.31AO [04-30]: BTC 30분 (1m × 30) — 더 짧은 디커플링 감지
+        #   사용자 결정: corr_3h(3시간)는 길음 — 진입 직전 30분 BTC 상관성으로 "혼자 튀는 놈" 식별
+        #   30개 1m 데이터 포인트 = 통계적 신뢰도 적정 (15분은 노이즈 큼)
+        btc_lr_30m = None
+        try:
+            btc_1m = await asyncio.to_thread(ex.fetch_ohlcv, "BTC/USDT", "1m", limit=30)
+            if len(btc_1m) >= 25:
+                btc_1m_closes = np.array([float(x[4]) for x in btc_1m])
+                btc_lr_30m = log_returns(btc_1m_closes)
+        except Exception as e:
+            print(f"[Universe V10.31AO] BTC 1m OHLCV error: {e}")
+            # btc_lr_30m가 None이면 correlations_30m 계산 스킵 (fallback: corr_3h 사용)
+
         _btc_std = float(np.std(btc_lr)) if len(btc_lr) > 1 else 1.0
         new_correlations = dict(snapshot.correlations)
         new_correlations_3h = dict(snapshot.correlations_3h) if hasattr(snapshot, 'correlations_3h') else {}
+        new_correlations_30m = dict(snapshot.correlations_30m) if hasattr(snapshot, 'correlations_30m') else {}
         _excluded_log = []
 
         # ══ Step 4: 분리 파이프라인 함수 ══
@@ -231,6 +245,21 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
                                         _beta_3h = corr_3h * (_alt_std_3h / _btc_std_3h)
                         except Exception:
                             # 개별 심볼 5m fetch 실패 — corr_3h/β_3h 저장 생략 (fallback)
+                            pass
+
+                    # ★ V10.31AO [04-30]: 30분 corr 병행 계산 (진입 필터 — 혼자 튀는 놈 사전 식별)
+                    if btc_lr_30m is not None:
+                        try:
+                            alt_1m = await asyncio.to_thread(ex.fetch_ohlcv, sym_name, "1m", limit=30)
+                            if len(alt_1m) >= 25:
+                                alt_1m_closes = np.array([float(x[4]) for x in alt_1m])
+                                alt_lr_30m = log_returns(alt_1m_closes)
+                                _n_30m = min(len(btc_lr_30m), len(alt_lr_30m))
+                                if _n_30m >= 20:
+                                    corr_30m = safe_corr(btc_lr_30m[-_n_30m:], alt_lr_30m[-_n_30m:])
+                                    new_correlations_30m[sym_name] = corr_30m
+                        except Exception:
+                            # alt 1m fetch 실패 — corr_30m 저장 생략 (fallback to corr_3h)
                             pass
 
                     if corr_24h < min_corr:
@@ -405,10 +434,12 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
         from dataclasses import replace
         # ★ V10.31q: beta_by_sym도 snapshot에 저장 (TREND_NOSLOT 로그용)
         # ★ V10.31AM: correlations_3h도 주입 (진입 필터용)
+        # ★ V10.31AO: correlations_30m도 주입 (혼자 튀는 놈 진입 필터)
         return replace(
             snapshot,
             correlations=new_correlations,
             correlations_3h=new_correlations_3h,
+            correlations_30m=new_correlations_30m,
             global_targets_long=final_long,
             global_targets_short=final_short,
             beta_by_sym=_combined_betas,

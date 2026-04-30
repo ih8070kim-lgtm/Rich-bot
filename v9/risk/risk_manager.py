@@ -237,20 +237,37 @@ def evaluate_intent(
 
         corr     = (snapshot.correlations or {}).get(sym, 1.0)
         # ★ V10.31AM: OPEN 체크는 3시간 corr 사용 (단기 decoupling 감지)
-        # DCA/HEDGE는 기존 2일 corr 유지 (이미 진입된 포지션의 장기 연결성)
-        # 3시간 corr 없으면 (fetch 실패) 2일 corr fallback
+        # ★ V10.31AO: OPEN 체크 30분 corr 우선 사용 (혼자 튀는 놈 사전 식별)
+        # 우선순위: 30m corr > 3h corr > 24h corr (각각 fallback)
+        # DCA/HEDGE는 기존 24h corr 유지 (이미 진입된 포지션의 장기 연결성)
         corr_3h = (getattr(snapshot, 'correlations_3h', None) or {}).get(sym, None)
+        corr_30m = (getattr(snapshot, 'correlations_30m', None) or {}).get(sym, None)
         # ★ V10.27d: OPEN은 OPEN_CORR_MIN(0.50), HEDGE만 0.6, DCA는 DCA_MIN_CORR
         if itype == IntentType.OPEN:
             _is_hedge_open = meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH")
             min_corr = HEDGE_OPEN_CORR_MIN if _is_hedge_open else OPEN_CORR_MIN
-            # ★ V10.31AM: OPEN만 3시간 corr 우선 사용
-            if not _is_hedge_open and corr_3h is not None:
-                corr = corr_3h
+            # ★ V10.31AO: OPEN만 corr 우선순위 적용 (30m → 3h → 24h)
+            if not _is_hedge_open:
+                if corr_30m is not None:
+                    corr = corr_30m
+                    # ★ V10.31AO: 30m 임계 별도 (보통 동일 0.50이나 추후 분리 가능)
+                    from v9.config import OPEN_CORR_MIN_30M
+                    min_corr = OPEN_CORR_MIN_30M
+                elif corr_3h is not None:
+                    corr = corr_3h
         else:
             min_corr = DCA_MIN_CORR
         if corr < min_corr:
-            _corr_src = "3h" if (itype == IntentType.OPEN and corr_3h is not None and not meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH")) else "2d"
+            # ★ V10.31AO: corr 출처 로깅 우선순위 (30m > 3h > 24h)
+            if itype == IntentType.OPEN and not meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
+                if corr_30m is not None:
+                    _corr_src = "30m"
+                elif corr_3h is not None:
+                    _corr_src = "3h"
+                else:
+                    _corr_src = "24h"
+            else:
+                _corr_src = "24h"
             return _reject(RejectCode.REJECT_CORR_LOW, f"corr_{_corr_src}={corr:.3f}<{min_corr}")
 
     # ── Money Caps — v10.7: 단일주문캡/심볼노출캡 제거 (SOFT_HEDGE 등 오거절 방지)
