@@ -2206,61 +2206,9 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                   f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                   f"→ trailing(잔량={p['amt']:.1f})")
             
-            # ★ V10.31AO-hf2 [04-30]: 부분 체결 후 잔량 dust 시장가 mop-up
-            #   배경: 사용자 "T1 TP할 때 100% 사이즈로 매도" — 잔량 자체 차단 의도
-            #         부분 체결 시 잔량을 trailing으로 추적은 의미 없음 (dust는 trail 무관)
-            #   조건: 잔량 notional < $20 또는 잔량 < 원래 사이즈의 5%
-            #   효과: 잔량 즉시 시장가 청산 → trailing 우회 → 실제 100% 청산 달성
-            try:
-                from v9.config import SYM_MIN_QTY as _SMQ_MOP, SYM_MIN_QTY_DEFAULT as _SMQD_MOP
-                _residual_amt = float(p.get("amt", 0) or 0)
-                _curr_p_mop = float((snapshot.all_prices or {}).get(sym, avg_price) or avg_price) if snapshot else avg_price
-                _residual_notional = _residual_amt * _curr_p_mop
-                # 원래 사이즈 추정 (filled + residual)
-                _original_amt = filled_qty + _residual_amt
-                _residual_pct = _residual_amt / _original_amt if _original_amt > 0 else 0
-                _is_dust = (_residual_notional < 20.0) or (_residual_pct < 0.05)
-                _min_qty_mop = _SMQ_MOP.get(sym, _SMQD_MOP)
-                if _is_dust and _residual_amt > 0 and _residual_amt >= _min_qty_mop * 0.9999:
-                    # 시장가 mop-up
-                    _mop_close_side = "sell" if pos_side == "buy" else "buy"
-                    _mop_params = {}
-                    from v9.config import HEDGE_MODE as _HM_MOP
-                    if _HM_MOP:
-                        _mop_params["positionSide"] = "LONG" if pos_side == "buy" else "SHORT"
-                    _mop_safe_qty = float(ex.amount_to_precision(sym, _residual_amt))
-                    if _mop_safe_qty > 0:
-                        print(f"[TP1_MOP_UP] {sym} {pos_side} 부분 체결 잔량 시장가 청산: "
-                              f"qty={_mop_safe_qty} notional=${_residual_notional:.2f} "
-                              f"({_residual_pct*100:.1f}% of original)")
-                        try:
-                            _mop_order = await asyncio.to_thread(
-                                ex.create_order, sym, 'market', _mop_close_side,
-                                _mop_safe_qty, None, _mop_params)
-                            print(f"[TP1_MOP_UP] {sym} ✓ 청산 성공 oid={_mop_order.get('id')}")
-                            # 봇 amt 정리
-                            p["amt"] = 0.0
-                            from v9.execution.position_book import clear_position as _cp_mop
-                            _cp_mop(st, sym, pos_side)
-                            try:
-                                from v9.logging.logger_csv import log_system as _ls_mop
-                                _ls_mop("TP1_MOP_UP_OK",
-                                        f"{sym} {pos_side} qty={_mop_safe_qty} "
-                                        f"notional=${_residual_notional:.2f}")
-                            except Exception:
-                                pass
-                        except Exception as _mop_err:
-                            print(f"[TP1_MOP_UP] {sym} 거래소 거절 (trailing 유지): "
-                                  f"{str(_mop_err)[:80]}")
-                            try:
-                                from v9.logging.logger_csv import log_system as _ls_mop_fail
-                                _ls_mop_fail("TP1_MOP_UP_FAIL",
-                                             f"{sym} {pos_side} qty={_residual_amt:.8f} "
-                                             f"err={str(_mop_err)[:60]}")
-                            except Exception:
-                                pass
-            except Exception as _outer_mop_err:
-                print(f"[TP1_MOP_UP] {sym} mop-up 시도 실패(무시): {_outer_mop_err}")
+            # ★ V10.31AO-hf3 [04-30]: 부분 체결 잔량은 SYNC dust mop-up이 처리 (30초 내)
+            #   _apply_pending_fill은 sync 함수 — await 사용 불가
+            #   대안: SYNC dust mop-up (L237, async 함수 안)이 30초 안에 자동 정리
 
 
 
