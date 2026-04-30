@@ -1,5 +1,66 @@
 # TRIM / TP1 — 체크리스트
 
+## ★ V10.31AN-hf1: T2 디펜스 재활성 + T3 사다리 재설계 [04-30]
+
+### 사용자 결정 [04-30]
+"DCA 간격 너무 좁혀서 T3 급행열차다. 다시 뒤로 좀 밀고 T2 디펜스도 재적용, T3 디펜스도 재설계".
+
+### T2 디펜스 재활성
+hf-16에서 비활성된 `calc_dynamic_trim_thresh` T2 분기 부활.
+- 트리거: T2 worst ≤ -2.0% (T2_DEF_WORST_ENTER 기존 값 그대로)
+- 효과: TRIM 임계 기본 +1.0% → +0.5% (약반등 trim 허용)
+- 의미: T2 단계도 보호 부활 — T3 도달 전 약반등에서 빠른 탈출
+
+### T3 사다리 재설계 (사용자 명시)
+```
+worst -3.5% → exit  0.0% TRIM  (T3 사이즈만 부분 청산)
+worst -4.0% → exit -0.5% TRIM
+worst -4.5% → exit -2.0% TRIM
+worst -5.0% → exit -3.0% SL    (전량 컷)
+worst -5.5% → exit -4.5% SL
+worst -6.0%             HARD_SL (즉시 컷)
+```
+
+### 변경 의도
+- T3 DCA 거리 -2.0 → -3.0% (DCA.md 참조) → T3 진입 자체가 늦어짐
+- 따라서 디펜스 시작점도 -2.0 → -3.5% 후퇴
+- 첫 3단계 TRIM (회복 기대 영역) → 마지막 3단계 SL/HARD_SL (손실 cap)
+- 마지막 -6.0 HARD_SL → HARD_SL_T3(-10) 사이 4%p 공백 의도 (HARD_SL이 안전망)
+
+### 회복 폭 ↑ 인지 [필수 고지]
+새 사다리는 **기존보다 회복 폭이 큼**:
+| worst | exit | 회복 필요 |
+|---|---|---|
+| 기존 -2.0 | 0% | 2.0%p |
+| 신규 -3.5 | 0% | 3.5%p |
+| 기존 -2.5 | -0.5% | 2.0%p |
+| 신규 -4.0 | -0.5% | 3.5%p |
+
+→ TRIM 발동 어려움 ↑. 변동성 약한 시기엔 SL/HARD_SL 단계로 진행 가능성 ↑.
+
+### bal=0 fallback 가드 (OP 04-29 22:00 케이스)
+DCA.md 참조. TRIM 경로 (`runner.py:1817`)와 DCA fill 경로 (`runner.py:1635`)에 `_bal_trim/_bal_dca <= 0`일 때 보정 skip + `[TRIM_TIER_SKIP]/[DCA_TIER_SKIP]` 로깅.
+
+### PTP 차단 정책 (변경 없음)
+`_ptp_active_syms` 활성 시 본 사다리 차단 — PTP 우선 (V10.31AJ).
+
+### 시뮬 [실측 OP 케이스]
+**OP 04-29 22:00 trim 시점 snapshot.real_balance_usdt=0 가정**:
+- 가드 적용 전: dca_level=2 → 1로 강등 stuck → 다음 28h 동안 1로 stuck → 종국에 hf-17 (D)가 catch
+- 가드 적용 후: dca_level=2 유지 → T3 디펜스 사다리 정상 평가 가능 → 새 사다리 -3.5 시작이라 OP 케이스(close ROI -3.09%)에선 사다리 미발동 → HARD_SL_T2(-3.0%)로 cut (변경 없음)
+
+### 체크리스트
+- [ ] 새 T3 사다리 worst 임계 코드 일치 (config.py:129~137)
+- [ ] T2 디펜스 calc_dynamic_trim_thresh 활성 (config.py:204)
+- [ ] T2_DEF_ENTER 로깅 활성 (runner.py:3148)
+- [ ] bal=0 가드 양 경로 적용 (runner.py:1635, 1817)
+- [ ] HARD_SL_T3=-10.0% 그대로 — 사다리 -6.0 HARD_SL 후 안전망
+
+### 롤백
+config.py:129~137 T3_DEFENSE_LADDER 기존 값 복원 + L204 calc_dynamic_trim_thresh T2 분기 다시 주석 처리
+
+---
+
 ## ★ V10.31AM3 hotfix-4: T3 다단계 디펜스/SL 사다리 [04-27]
 
 ### 컨셉

@@ -1,5 +1,48 @@
 # DCA — 체크리스트
 
+## ★ V10.31AN-hf1: DCA 거리 후퇴 + DCA_ROI_TRIGGERS 정합 [04-30]
+
+### 변경
+```
+DCA_ENTRY_ROI_BY_TIER = {2: -2.0, 3: -3.0}   # 기존 hf-4 {2: -1.5, 3: -2.0}
+```
+
+### 사용자 결정 [04-30]
+"T3 급행열차다. 다시 뒤로 좀 밀고 T2/T3 디펜스 재설계". hf-4의 평단 압축 정책이 변동성 시기에 T3 풀로딩 빨라지는 부작용 확인 → DCA 간격 늘려 T3 도달 늦춤.
+
+### 부수 수정 — DCA_ROI_TRIGGERS 정합
+**잠재 버그 발견 [04-30]**: `planners.py:431` `DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}`이 stale 값. `_build_dca_targets` (TRIM 후 dca_targets 재생성용)가 이 dict 사용 → V10.31AM3 hf-4 배포 후에도 trim 후 재생성 시 stale -1.8/-3.6 적용 → 새 DCA 거리 미반영.
+
+**수정**: `_build_dca_targets`가 `DCA_ENTRY_ROI_BY_TIER` 직접 참조. `DCA_ROI_TRIGGERS`는 deprecated 표기 (호환성 유지).
+
+### bal=0 fallback 가드 (OP 04-29 22:00 케이스)
+**[실측] 근본 원인**: `runner.py:1817` TRIM 처리 hf-17 (B) 잔량 기반 보정에서 `_bal_trim=0`이면 `calc_tier_from_amt(amt, price, 0) → return 1`. → `_actual_tier=1, _target_tier(=2)와 불일치 → dca_level=1로 잘못 강등`.
+
+**OP 케이스**: 04-29 22:00 trim_T3 시점 snapshot.real_balance_usdt=0 (일시적 fetch 미완료 추정) → dca_level=1로 stuck → 04-30 00:46까지 유지 → trades.csv도 dca_level=1 기록. 다행히 hf-17 (D) HARD_SL 평가 시 잔량 기반 임계 보정이 catch (그 시점 bal>0).
+
+**수정 위치**:
+- `runner.py:1817` TRIM 경로: `if _bal_trim <= 0: skip 보정 + [TRIM_TIER_SKIP] 로깅`
+- `runner.py:1635` DCA fill 경로: 동일 가드 + `[DCA_TIER_SKIP]` 로깅
+
+### 시뮬 [실측 OP 케이스]
+**가드 적용 전**:
+- 22:00 trim 시점 _bal_trim=0 → calc_tier_from_amt → 1
+- _target_tier 2→1 강등 → dca_level=1 stuck
+- 04-30 00:46 close trades.csv dca_level=1
+
+**가드 적용 후**:
+- _bal_trim=0 → skip 보정 → _target_tier=2 유지
+- dca_level=2 정상 → 트림 후 단계별 보호 정상 작동
+
+### 한계 [필수 고지]
+- bal=0 자체는 다른 이유 (API 일시 실패, fetch 미완료) — 가드는 dca_level 보호만, bal=0 자체는 해결 안 함
+- snapshot.real_balance_usdt가 stale 값일 가능성도 있음 — 가드는 0만 체크, stale은 미감지
+
+### 롤백
+config.py:108 `DCA_ENTRY_ROI_BY_TIER = {2: -1.5, 3: -2.0}` (hf-4 값) 또는 `{2: -1.8, 3: -3.6}` (V10.29b 원본)
+
+---
+
 ## ★ V10.31AM3 hotfix-4: DCA 트리거 밀착 [04-27]
 
 ### 변경

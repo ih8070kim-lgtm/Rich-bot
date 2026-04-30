@@ -1632,21 +1632,26 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             from v9.config import calc_tier_from_amt
             _curr_p_dca = avg_price if avg_price > 0 else float((snapshot.all_prices or {}).get(sym, 0) or 0)
             _bal_dca = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
-            _amt_tier = calc_tier_from_amt(p["amt"], _curr_p_dca, _bal_dca)
-            if _amt_tier > tier:
-                # 잔량이 더 큰 tier에 해당 — 잔량 기반 우선 (좀비 사이즈 보정)
-                print(f"[DCA_TIER_RECALC] {sym} {pos_side} 잔량 기반 tier 보정: "
-                      f"intent T{tier} → 잔량기반 T{_amt_tier} "
-                      f"(amt={p['amt']:.4f} notional=${p['amt']*_curr_p_dca:.2f})")
-                try:
-                    from v9.logging.logger_csv import log_system as _ls_dca_recalc
-                    _ls_dca_recalc("DCA_TIER_RECALC",
-                                   f"{sym} {pos_side} amt={p['amt']:.4f} "
-                                   f"notional=${p['amt']*_curr_p_dca:.2f} "
-                                   f"intentT{tier}→잔량기반T{_amt_tier}")
-                except Exception:
-                    pass
-                p["dca_level"] = _amt_tier
+            # ★ V10.31AN-hf1 [04-30]: bal=0 가드 — OP 케이스와 동일 로직
+            if _bal_dca <= 0:
+                print(f"[DCA_TIER_SKIP] {sym} {pos_side} bal=0 fallback — "
+                      f"intent T{tier} 유지 (보정 skip)")
+            else:
+                _amt_tier = calc_tier_from_amt(p["amt"], _curr_p_dca, _bal_dca)
+                if _amt_tier > tier:
+                    # 잔량이 더 큰 tier에 해당 — 잔량 기반 우선 (좀비 사이즈 보정)
+                    print(f"[DCA_TIER_RECALC] {sym} {pos_side} 잔량 기반 tier 보정: "
+                          f"intent T{tier} → 잔량기반 T{_amt_tier} "
+                          f"(amt={p['amt']:.4f} notional=${p['amt']*_curr_p_dca:.2f})")
+                    try:
+                        from v9.logging.logger_csv import log_system as _ls_dca_recalc
+                        _ls_dca_recalc("DCA_TIER_RECALC",
+                                       f"{sym} {pos_side} amt={p['amt']:.4f} "
+                                       f"notional=${p['amt']*_curr_p_dca:.2f} "
+                                       f"intentT{tier}→잔량기반T{_amt_tier}")
+                    except Exception:
+                        pass
+                    p["dca_level"] = _amt_tier
         except Exception:
             pass
         p["last_dca_time"] = now
@@ -1814,8 +1819,19 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 from v9.config import calc_tier_from_amt
                 _curr_p_trim = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
                 _bal_trim = float(getattr(snapshot, 'real_balance_usdt', 0) or 0) if snapshot else 0
-                _actual_tier = calc_tier_from_amt(p["amt"], _curr_p_trim, _bal_trim)
-                if _actual_tier != _target_tier:
+                # ★ V10.31AN-hf1 [04-30]: bal=0 fallback 가드 (OP 04-29 22:00 케이스)
+                #   배경: snapshot.real_balance_usdt가 일시적 0이면 calc_tier_from_amt(amt, price, 0) → return 1
+                #         → _actual_tier=1, _target_tier(=2)와 불일치 → dca_level=1로 잘못 강등
+                #   결과: T3 trim 후 dca_level이 1로 stuck → 이후 HARD_SL_T1 임계 잘못 적용 위험
+                #   다행히 hf-17 (D) HARD_SL 평가 시 잔량 기반 임계 보정이 catch (bal>0 시점)
+                #   근본: bal=0이면 보정 skip, target_tier(=intent 의도) 그대로 사용
+                if _bal_trim <= 0:
+                    print(f"[TRIM_TIER_SKIP] {sym} {pos_side} bal=0 fallback — "
+                          f"target T{_target_tier} 유지 (보정 skip)")
+                    _actual_tier = _target_tier  # 보정 안 함
+                else:
+                    _actual_tier = calc_tier_from_amt(p["amt"], _curr_p_trim, _bal_trim)
+                if _bal_trim > 0 and _actual_tier != _target_tier:
                     print(f"[TRIM_TIER_RECALC] {sym} {pos_side} 잔량 기반 tier 재산정: "
                           f"의도 T{_target_tier} → 실제 T{_actual_tier} "
                           f"(amt={p['amt']:.4f} notional=${p['amt']*_curr_p_trim:.2f})")
@@ -3145,11 +3161,15 @@ async def _main_loop(ex_init, dry_run: bool):
                                 from v9.config import (T2_DEF_WORST_ENTER,
                                                        T3_DEF_M5_WORST_ENTER)
                                 from v9.logging.logger_csv import log_system
-                                # ★ V10.31AM3 hotfix-16: T2_DEF_ENTER 로깅 비활성 (T2 디펜스 모드 폐지)
-                                # if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
-                                #         and not _mr_p.get("_t2_def_logged")):
-                                #     _mr_p["_t2_def_logged"] = True
-                                #     log_system("T2_DEF_ENTER", ...)
+                                # ★ V10.31AN-hf1 [04-30]: T2_DEF_ENTER 로깅 재활성 (T2 디펜스 모드 부활)
+                                if (_mr_tier == 2 and _mr_roi <= T2_DEF_WORST_ENTER
+                                        and not _mr_p.get("_t2_def_logged")):
+                                    _mr_p["_t2_def_logged"] = True
+                                    log_system("T2_DEF_ENTER",
+                                               f"{_mr_sym} {_mr_entry_type} {_mr_side} "
+                                               f"worst={_mr_roi:.2f}%")
+                                    print(f"[T2_DEF_ENTER] {_mr_sym} {_mr_entry_type} "
+                                          f"{_mr_side} worst={_mr_roi:.2f}%")
                                 if (_mr_tier == 3 and _mr_roi <= T3_DEF_M5_WORST_ENTER
                                         and not _mr_p.get("_t3_def_m5_logged")):
                                     _mr_p["_t3_def_m5_logged"] = True

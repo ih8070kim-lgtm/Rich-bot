@@ -427,8 +427,12 @@ def _trend_filter_side(symbol: str, snapshot: MarketSnapshot) -> set:
 # ═════════════════════════════════════════════════════════════════
 # DCA ROI 트리거
 # ★ V10.28b: Entry 기준 -1.8% 균일 (config.DCA_ENTRY_ROI 사용)
-# 레거시 호환: _build_dca_targets 사이징용으로만 사용
-DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ V10.29b: 블렌디드 EP 기준 (바이낸스 ROI 그대로)
+# ★ V10.31AN-hf1 [04-30]: DCA_ROI_TRIGGERS deprecated — DCA_ENTRY_ROI_BY_TIER로 통일
+#   배경: V10.31AM3 hf-4 배포 시 DCA_ENTRY_ROI_BY_TIER만 변경, _build_dca_targets는
+#         이 stale dict 사용 → trim 후 dca_targets 재생성에서 stale -1.8/-3.6 사용
+#         → 새 DCA 거리 반영 안 됨 (잠재 일관성 버그)
+#   수정: _build_dca_targets에서 DCA_ENTRY_ROI_BY_TIER 직접 참조
+DCA_ROI_TRIGGERS = {2: -1.8, 3: -3.6}  # ★ DEPRECATED — 호환성 위해 유지, 실제 미사용
 
 def _wider_regime(a: str, b: str) -> str:
     """호환용 stub — DCA 거리 통일로 항상 LOW."""
@@ -438,12 +442,15 @@ def _build_dca_targets(
     entry_p: float, side: str, grid_notional: float,
     regime: str = "LOW",
 ) -> list:
-    """★ V10.29b: DCA 3단 타겟 — T2/T3."""
+    """★ V10.29b: DCA 3단 타겟 — T2/T3.
+    ★ V10.31AN-hf1: DCA_ENTRY_ROI_BY_TIER 사용 (trim 후 재생성 일관성).
+    """
     dca_w   = DCA_WEIGHTS
     total_w = sum(dca_w)
     targets = []
     for i, tier in enumerate([2, 3]):
-        roi_trig = DCA_ROI_TRIGGERS.get(tier, -8.0)
+        # ★ V10.31AN-hf1: DCA_ENTRY_ROI_BY_TIER 사용 (실제 트리거 값과 일관)
+        roi_trig = DCA_ENTRY_ROI_BY_TIER.get(tier, -2.0 if tier == 2 else -3.0)
         dist = abs(roi_trig) / 100 / LEVERAGE
         target_p = entry_p * (1.0 - dist) if side == "buy" else entry_p * (1.0 + dist)
         w_idx = min(i + 1, len(dca_w) - 1)

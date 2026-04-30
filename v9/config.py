@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AN"  # ★ V10.31AN: PTP trigger mode 도입 (peak_drop | defense_close) — config flag로 운영 중 전환
+VERSION = "10.31AN-hf1"  # ★ V10.31AN-hf1: PTP 모드 분기 + DCA 거리 후퇴(T2 -2/T3 -3) + T2 디펜스 재활성 + T3 사다리 재설계(-3.5~-6) + bal=0 가드
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -109,31 +109,42 @@ DCA_ENTRY_ROI     = -1.5   # 레거시 호환 (T2 기본값)
 #   사용자 결정 [04-27]: "DCA 1.5/2.0으로 바꾸고 T3 디펜스 모드 변경"
 #   취지: 모든 구간에서 조금 반등해도 탈출 가능하도록 평단 빨리 압축
 #   리스크: 추세 케이스에서 T3까지 풀로딩 빨라짐 → T3 다단계 디펜스/SL로 보호 (아래 T3_DEFENSE_LADDER)
-DCA_ENTRY_ROI_BY_TIER = {2: -1.5, 3: -2.0}  # ★ V10.31AM3 hotfix-4
+# ★ V10.31AN-hf1 [04-30]: T2 -1.5→-2.0, T3 -2.0→-3.0 (사용자 결정)
+#   배경: hf-4 평단 압축 정책 후 "T3 급행열차" 현상 — DCA 간격 너무 좁아 변동성에서 T3까지 풀로딩 빨라짐
+#   취지: DCA 간격 늘려 T3 도달 늦춤. 동시에 T3 디펜스 사다리도 -3.5부터 시작으로 후퇴 (아래 T3_DEFENSE_LADDER)
+#   주의: T2 ep 기준 -3% = T1 ep 기준 ~-4% (T2 1:1 가정) → T3 진입 시 blended ROI lev 3 ~-12% 가능
+DCA_ENTRY_ROI_BY_TIER = {2: -2.0, 3: -3.0}  # ★ V10.31AN-hf1 [04-30]
 
 # ★ V10.31AM3 hotfix-4: T3 다단계 디펜스/SL 사다리
 #   사용자 결정 [04-27]: "0.5까진 트림, 나머진 SL처리"
 #   컨셉: T3 진입 후 worst 깊이 비례 빠른 탈출 — 깊이 갈수록 회복 기대치 ↓
 #
 #   사다리 (worst_enter, exit_roi, mode):
-#     -2.0% → 0%      TRIM (T3 사이즈만 부분 청산, 평단 회복하면 T2로 복귀)
-#     -2.5% → -0.5%   TRIM (약손실 탈출)
-#     -3.0% → -1.5%   SL (전량 컷)
-#     -3.5% → -2.2%   SL (전량 컷)
-#     -4.0% → -3.0%   SL (전량 컷)
-#     -4.5%           HARD_SL (즉시 전량 컷, max_roi 무관)
+#     ★ V10.31AN-hf1 [04-30]: 사용자 재설계 — 시작점 -3.5로 후퇴 + 단계별 임계 변경
+#     -3.5% → 0%      TRIM (T3 사이즈만 부분 청산, 평단 회복하면 T2로 복귀)
+#     -4.0% → -0.5%   TRIM
+#     -4.5% → -2.0%   TRIM
+#     -5.0% → -3.0%   SL (전량 컷)
+#     -5.5% → -4.5%   SL (전량 컷)
+#     -6.0%           HARD_SL (즉시 전량 컷, max_roi 무관)
+#
+#   변경 의도 (사용자):
+#     - T3 DCA -3.0%로 후퇴 (T2 ep 기준) → T3 진입 자체가 늦어짐
+#     - 따라서 디펜스도 더 깊은 worst부터 시작 (-2.0 → -3.5)
+#     - 첫 3단계 TRIM (회복 기대 영역) → 마지막 3단계 SL/HARD_SL (손실 cap)
+#   회복 어려움 ↑ 인지: -3.5 worst → exit 0% 발동 시 3.5%p 회복 필요 (기존 2.0%p)
 #
 #   PTP 차단 정책 (사용자 결정 1.B): _ptp_active_syms 활성 시 본 로직 차단
 #     → PTP가 portfolio level에서 일괄 청산 우선
 #     → T3 다단계는 PTP 미발동 시기에만 작동
 T3_DEFENSE_LADDER = [
     # (worst_enter, exit_roi, mode)
-    (-2.0, 0.0,  "TRIM"),
-    (-2.5, -0.5, "TRIM"),
-    (-3.0, -1.5, "SL"),
-    (-3.5, -2.2, "SL"),
-    (-4.0, -3.0, "SL"),
-    (-4.5, None, "HARD_SL"),  # 즉시 컷
+    (-3.5, 0.0,  "TRIM"),
+    (-4.0, -0.5, "TRIM"),
+    (-4.5, -2.0, "TRIM"),
+    (-5.0, -3.0, "SL"),
+    (-5.5, -4.5, "SL"),
+    (-6.0, None, "HARD_SL"),  # 즉시 컷
 ]
 
 def calc_t3_defense_action(worst_roi: float, max_roi: float):
@@ -184,15 +195,17 @@ T3_DEF_M5_TRIM_THRESH  = -0.5
 def calc_dynamic_trim_thresh(tier: int, worst_roi: float) -> float:
     """★ V10.31j: worst_roi 기반 동적 TRIM 임계.
     
-    tier=2 + worst ≤ -2.0 → 0.5 (약반등 TRIM 허용)  [V10.31AM3 hf-16: 폐지]
+    tier=2 + worst ≤ -2.0 → 0.5 (약반등 TRIM 허용)
+       hf-16에서 폐지 → V10.31AN-hf1 [04-30] 재활성 (사용자 결정)
+       배경: T2 DCA -2.0%로 후퇴 + T3 사다리 -3.5 시작 → T2 단계도 보호 재필요
     tier=3 + worst ≤ -5.0 → -0.5 (약손실 TRIM 허용)
     그 외 → 기본 TRIM_BLENDED_ROI_BY_TIER 값
     
     DCA 체결 시 worst_roi=0 리셋되므로 tier별 독립 평가.
     """
-    # T2 디펜스 분기 비활성 (hf-16)
-    # if tier == 2 and worst_roi <= T2_DEF_WORST_ENTER:
-    #     return T2_DEF_TRIM_THRESH
+    # ★ V10.31AN-hf1 [04-30]: T2 디펜스 재활성 (사용자 결정)
+    if tier == 2 and worst_roi <= T2_DEF_WORST_ENTER:
+        return T2_DEF_TRIM_THRESH
     if tier == 3 and worst_roi <= T3_DEF_M5_WORST_ENTER:
         return T3_DEF_M5_TRIM_THRESH
     return TRIM_BLENDED_ROI_BY_TIER.get(tier, 1.0)
