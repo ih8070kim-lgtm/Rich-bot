@@ -259,6 +259,7 @@ def evaluate_intent(
             min_corr = DCA_MIN_CORR
         if corr < min_corr:
             # ★ V10.31AO: corr 출처 로깅 우선순위 (30m > 3h > 24h)
+            # ★ V10.31AO-hf2 [04-30]: 둘 다 동시 로깅 (30m vs 3h 차이 비교 데이터 수집)
             if itype == IntentType.OPEN and not meta.get("role") in ("CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH"):
                 if corr_30m is not None:
                     _corr_src = "30m"
@@ -266,9 +267,20 @@ def evaluate_intent(
                     _corr_src = "3h"
                 else:
                     _corr_src = "24h"
+                # 둘 다 로그 — 사용된 corr + 다른 시간축 비교용
+                _detail_parts = [f"corr_{_corr_src}={corr:.3f}<{min_corr}"]
+                if corr_30m is not None and _corr_src != "30m":
+                    _detail_parts.append(f"30m={corr_30m:.3f}")
+                if corr_3h is not None and _corr_src != "3h":
+                    _detail_parts.append(f"3h={corr_3h:.3f}")
+                # 24h corr도 같이 (원본)
+                _corr_24h = (snapshot.correlations or {}).get(sym, None)
+                if _corr_24h is not None and _corr_src != "24h":
+                    _detail_parts.append(f"24h={_corr_24h:.3f}")
+                return _reject(RejectCode.REJECT_CORR_LOW, " ".join(_detail_parts))
             else:
                 _corr_src = "24h"
-            return _reject(RejectCode.REJECT_CORR_LOW, f"corr_{_corr_src}={corr:.3f}<{min_corr}")
+                return _reject(RejectCode.REJECT_CORR_LOW, f"corr_{_corr_src}={corr:.3f}<{min_corr}")
 
     # ── Money Caps — v10.7: 단일주문캡/심볼노출캡 제거 (SOFT_HEDGE 등 오거절 방지)
     qty    = float(getattr(intent, "qty", 0.0) or 0.0)

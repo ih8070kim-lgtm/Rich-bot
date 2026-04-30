@@ -1729,7 +1729,7 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
         p["trim_trail_max"] = 0.0
         _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
         _ep = float(p.get("ep", 0) or 0)
-        trim_qty = calc_trim_qty(amt, dca_level, ep=_ep, bal=_bal, mark_price=curr_p)
+        trim_qty = calc_trim_qty(amt, dca_level, ep=_ep, bal=_bal, mark_price=curr_p, t1_amt=float(p.get("t1_amt", 0) or 0), t2_amt=float(p.get("t2_amt", 0) or 0), t3_amt=float(p.get("t3_amt", 0) or 0))
         _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
         if trim_qty < _min_qty:
             continue
@@ -1889,7 +1889,7 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                 print(f"[T2_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
             else:  # TRIM
                 # ★ V10.31AO: T2 사이즈만 부분 청산 (T2→T1 복귀)
-                _trim_qty = calc_trim_qty(_amt, 2, ep=ep, bal=_bal, mark_price=curr_p)
+                _trim_qty = calc_trim_qty(_amt, 2, ep=ep, bal=_bal, mark_price=curr_p, t1_amt=float(p.get("t1_amt", 0) or 0), t2_amt=float(p.get("t2_amt", 0) or 0), t3_amt=float(p.get("t3_amt", 0) or 0))
                 if _trim_qty < _min_qty:
                     continue
                 if 0 < (_amt - _trim_qty) < _min_qty * 1.5:

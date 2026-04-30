@@ -435,6 +435,36 @@ async def update_universe(ex, snapshot: MarketSnapshot) -> MarketSnapshot:
         # ★ V10.31q: beta_by_sym도 snapshot에 저장 (TREND_NOSLOT 로그용)
         # ★ V10.31AM: correlations_3h도 주입 (진입 필터용)
         # ★ V10.31AO: correlations_30m도 주입 (혼자 튀는 놈 진입 필터)
+        # ★ V10.31AO-hf2 [04-30]: 30m vs 3h corr 비교 데이터 로깅 (분포 분석용)
+        try:
+            from v9.logging.logger_csv import log_system as _ls_corr_diff
+            _all_syms_corr = set(new_correlations_30m.keys()) | set(new_correlations_3h.keys())
+            _corr_parts = []
+            _diff_parts = []  # 차이 큰 순으로
+            for _sym in sorted(_all_syms_corr):
+                _c30 = new_correlations_30m.get(_sym, None)
+                _c3h = new_correlations_3h.get(_sym, None)
+                _short = _sym.replace("/USDT", "")
+                if _c30 is not None and _c3h is not None:
+                    _diff = _c30 - _c3h
+                    _corr_parts.append(f"{_short}:30m{_c30:.2f}/3h{_c3h:.2f}({_diff:+.2f})")
+                    _diff_parts.append((_sym, _c30, _c3h, _diff))
+                elif _c30 is not None:
+                    _corr_parts.append(f"{_short}:30m{_c30:.2f}/3h-")
+                elif _c3h is not None:
+                    _corr_parts.append(f"{_short}:30m-/3h{_c3h:.2f}")
+            if _corr_parts:
+                # log_system.csv 영구 기록
+                _ls_corr_diff("CORR_COMPARE_30M_3H", " ".join(_corr_parts))
+                # stdout — 차이 큰 순 상위 8개만 (스팸 방지)
+                _diff_parts.sort(key=lambda x: -abs(x[3]))
+                _top_diff = " ".join(
+                    f"{s.replace('/USDT','')}:30m{a:.2f}/3h{b:.2f}({d:+.2f})"
+                    for s, a, b, d in _diff_parts[:8]
+                )
+                print(f"[CORR_DIFF] 30m vs 3h Top8 |Δ|: {_top_diff}")
+        except Exception as _ce:
+            print(f"[CORR_DIFF] 로그 실패(무시): {_ce}")
         return replace(
             snapshot,
             correlations=new_correlations,

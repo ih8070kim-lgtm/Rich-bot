@@ -217,7 +217,48 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                                    f"{sym} {side} qty={ex_qty:.8f} notional=${_sync_notional:.4f} 청산 불가")
                     except Exception:
                         pass
-                    continue  # 이 심볼/side skip
+                    # ★ V10.31AO-hf2 [04-30]: dust 잔량 시장가 청산 시도
+                    #   배경: 사용자 "T1 TP할 때 100% 사이즈로 매도" — 잔량 자체 발생 차단 의도
+                    #   현재: $5 미달 dust는 book만 클리어 → 거래소엔 잔량 영구 잔존 → 사용자 수동 청산 부담
+                    #   해결: $5 미달이라도 시장가 청산 시도 (Binance MIN_NOTIONAL 면제 케이스 다수)
+                    #   실패 시 (거래소 거절): 기존대로 SYNC 차단만 (book 정리), 사용자 수동 청산 필요
+                    try:
+                        _ps_dust = "LONG" if side == "buy" else "SHORT"
+                        _close_side_dust = "sell" if side == "buy" else "buy"
+                        _params_dust = {}
+                        from v9.config import HEDGE_MODE as _HM_DUST
+                        if _HM_DUST:
+                            _params_dust["positionSide"] = _ps_dust
+                        _safe_qty_dust = float(ex.amount_to_precision(sym, ex_qty))
+                        if _safe_qty_dust > 0:
+                            print(f"[SYNC_DUST_CLOSE] {sym} {side} 시장가 dust 청산 시도: "
+                                  f"qty={_safe_qty_dust} notional=${_sync_notional:.4f}")
+                            try:
+                                _dust_order = await asyncio.to_thread(
+                                    ex.create_order, sym, 'market', _close_side_dust,
+                                    _safe_qty_dust, None, _params_dust)
+                                print(f"[SYNC_DUST_CLOSE] {sym} {side} ✓ 청산 성공 oid={_dust_order.get('id')}")
+                                try:
+                                    from v9.logging.logger_csv import log_system as _ls_dust_ok
+                                    _ls_dust_ok("SYNC_DUST_CLOSE_OK",
+                                                f"{sym} {side} qty={_safe_qty_dust} "
+                                                f"notional=${_sync_notional:.4f}")
+                                except Exception:
+                                    pass
+                            except Exception as _dust_err:
+                                # 거래소 거절 (MIN_NOTIONAL 등) — book 차단만 유지 (기존 동작)
+                                print(f"[SYNC_DUST_CLOSE] {sym} {side} 거래소 거절 (book만 차단): "
+                                      f"{str(_dust_err)[:80]}")
+                                try:
+                                    from v9.logging.logger_csv import log_system as _ls_dust_fail
+                                    _ls_dust_fail("SYNC_DUST_CLOSE_FAIL",
+                                                  f"{sym} {side} qty={ex_qty:.8f} "
+                                                  f"err={str(_dust_err)[:60]}")
+                                except Exception:
+                                    pass
+                    except Exception as _outer_dust_err:
+                        print(f"[SYNC_DUST_CLOSE] {sym} 시도 실패(무시): {_outer_dust_err}")
+                    continue  # 이 심볼/side skip (book RECOVERED 등록 안 함)
             except Exception:
                 pass
 
@@ -966,7 +1007,34 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
             try:
                 import asyncio as _aio
                 close_side = "sell" if is_long else "buy"
-                safe_qty = float(ex.amount_to_precision(sym, close_qty))
+                # ★ V10.31AO-hf2 [04-30]: 거래소 실제 amt 조회 → 봇 인식 amt 정밀도 손실 우회
+                #   배경: TP1 후 0.001 lot 잔량 발생 — 봇 amt와 거래소 amt 미세 차이로
+                #         amount_to_precision 버림 → 잔량 거래소에 남음
+                #   해결: 거래소 fetch_position 후 contracts(실제 잔량)로 close_qty 재계산
+                #         실패 시 봇 amt fallback (기존 동작)
+                _exchange_qty = None
+                try:
+                    _ex_pos = await _aio.to_thread(ex.fetch_position, sym)
+                    if _ex_pos and isinstance(_ex_pos, dict):
+                        _ex_contracts = float(_ex_pos.get("contracts", 0) or 0)
+                        # 양방향 모드일 경우 positionSide 매칭
+                        if HEDGE_MODE:
+                            _ex_side = (_ex_pos.get("info", {}) or {}).get("positionSide", "")
+                            _expect_ps = "LONG" if is_long else "SHORT"
+                            if _ex_side and _ex_side != _expect_ps:
+                                _ex_contracts = 0  # 다른 방향
+                        if _ex_contracts > 0:
+                            _exchange_qty = _ex_contracts
+                except Exception as _ex_q_err:
+                    print(f"[TP1_PRE] {sym} 거래소 amt 조회 실패(무시, 봇 amt 사용): {_ex_q_err}")
+                
+                # 거래소 잔량 우선, 없으면 봇 amt
+                _final_close_qty = _exchange_qty if (_exchange_qty is not None and _exchange_qty > 0) else close_qty
+                # 봇 amt와 차이 크면 로그 (디버깅)
+                if _exchange_qty is not None and abs(_exchange_qty - close_qty) > close_qty * 0.001:
+                    print(f"[TP1_PRE_QTY] {sym} amt 차이: 봇={close_qty:.8f} 거래소={_exchange_qty:.8f} (거래소 사용)")
+
+                safe_qty = float(ex.amount_to_precision(sym, _final_close_qty))
                 safe_price = float(ex.price_to_precision(sym, target_price))
                 if safe_qty <= 0 or safe_price <= 0:
                     continue
@@ -1715,6 +1783,14 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         p["amt"] = old_amt + filled_qty
         p["ep"] = total_cost / p["amt"] if p["amt"] > 0 else avg_price
         p["dca_level"] = tier
+        # ★ V10.31AO-hf3 [04-30]: tier별 fill qty 저장 — "산만큼 그대로 팔기"
+        #   사용자 통찰: "살때 수량 기억했다가 파는게 어려워?"
+        #   원리: 각 tier fill 시점의 실제 체결 qty를 저장 → TRIM/TP1 시 그대로 사용
+        #   효과: 계산 재실행 X → dust 발생 차단
+        if tier == 2:
+            p["t2_amt"] = filled_qty
+        elif tier == 3:
+            p["t3_amt"] = filled_qty
         # ★ V10.31AM3 hotfix-17: 잔량 기반 dca_level 검증 (사용자 통찰 [04-29])
         #   배경: 04-28 TIA 자해 — DCA fill 후 잔량은 T3 사이즈인데 dca_level=T2 상태
         #     → HARD_SL_T2 -5.6%가 큰 사이즈에 적용 → -$23.67
@@ -1838,7 +1914,7 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 from v9.strategy.planners import _mr_available_balance
                 _bal = _mr_available_balance(snapshot, st)
             _mark = float((snapshot.all_prices or {}).get(sym, 0) or 0) if snapshot else 0
-            _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark)
+            _trim_qty = calc_trim_qty(float(p["amt"]), tier, ep=float(p["ep"]), bal=_bal, mark_price=_mark, t1_amt=float(p.get("t1_amt", 0) or 0), t2_amt=float(p.get("t2_amt", 0) or 0), t3_amt=float(p.get("t3_amt", 0) or 0))
             if _trim_qty <= 0:
                 _trim_qty = filled_qty  # fallback: DCA 수량 그대로
             # ★ V10.31AM3 hotfix-15: trim_preorder 경로 잔량 정밀도 방어
@@ -2129,6 +2205,62 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 T{dca} 체결 "
                   f"{filled_qty}@{avg_price:.4f} pnl=${_pnl:.2f} roi={_roi:.1f}% "
                   f"→ trailing(잔량={p['amt']:.1f})")
+            
+            # ★ V10.31AO-hf2 [04-30]: 부분 체결 후 잔량 dust 시장가 mop-up
+            #   배경: 사용자 "T1 TP할 때 100% 사이즈로 매도" — 잔량 자체 차단 의도
+            #         부분 체결 시 잔량을 trailing으로 추적은 의미 없음 (dust는 trail 무관)
+            #   조건: 잔량 notional < $20 또는 잔량 < 원래 사이즈의 5%
+            #   효과: 잔량 즉시 시장가 청산 → trailing 우회 → 실제 100% 청산 달성
+            try:
+                from v9.config import SYM_MIN_QTY as _SMQ_MOP, SYM_MIN_QTY_DEFAULT as _SMQD_MOP
+                _residual_amt = float(p.get("amt", 0) or 0)
+                _curr_p_mop = float((snapshot.all_prices or {}).get(sym, avg_price) or avg_price) if snapshot else avg_price
+                _residual_notional = _residual_amt * _curr_p_mop
+                # 원래 사이즈 추정 (filled + residual)
+                _original_amt = filled_qty + _residual_amt
+                _residual_pct = _residual_amt / _original_amt if _original_amt > 0 else 0
+                _is_dust = (_residual_notional < 20.0) or (_residual_pct < 0.05)
+                _min_qty_mop = _SMQ_MOP.get(sym, _SMQD_MOP)
+                if _is_dust and _residual_amt > 0 and _residual_amt >= _min_qty_mop * 0.9999:
+                    # 시장가 mop-up
+                    _mop_close_side = "sell" if pos_side == "buy" else "buy"
+                    _mop_params = {}
+                    from v9.config import HEDGE_MODE as _HM_MOP
+                    if _HM_MOP:
+                        _mop_params["positionSide"] = "LONG" if pos_side == "buy" else "SHORT"
+                    _mop_safe_qty = float(ex.amount_to_precision(sym, _residual_amt))
+                    if _mop_safe_qty > 0:
+                        print(f"[TP1_MOP_UP] {sym} {pos_side} 부분 체결 잔량 시장가 청산: "
+                              f"qty={_mop_safe_qty} notional=${_residual_notional:.2f} "
+                              f"({_residual_pct*100:.1f}% of original)")
+                        try:
+                            _mop_order = await asyncio.to_thread(
+                                ex.create_order, sym, 'market', _mop_close_side,
+                                _mop_safe_qty, None, _mop_params)
+                            print(f"[TP1_MOP_UP] {sym} ✓ 청산 성공 oid={_mop_order.get('id')}")
+                            # 봇 amt 정리
+                            p["amt"] = 0.0
+                            from v9.execution.position_book import clear_position as _cp_mop
+                            _cp_mop(st, sym, pos_side)
+                            try:
+                                from v9.logging.logger_csv import log_system as _ls_mop
+                                _ls_mop("TP1_MOP_UP_OK",
+                                        f"{sym} {pos_side} qty={_mop_safe_qty} "
+                                        f"notional=${_residual_notional:.2f}")
+                            except Exception:
+                                pass
+                        except Exception as _mop_err:
+                            print(f"[TP1_MOP_UP] {sym} 거래소 거절 (trailing 유지): "
+                                  f"{str(_mop_err)[:80]}")
+                            try:
+                                from v9.logging.logger_csv import log_system as _ls_mop_fail
+                                _ls_mop_fail("TP1_MOP_UP_FAIL",
+                                             f"{sym} {pos_side} qty={_residual_amt:.8f} "
+                                             f"err={str(_mop_err)[:60]}")
+                            except Exception:
+                                pass
+            except Exception as _outer_mop_err:
+                print(f"[TP1_MOP_UP] {sym} mop-up 시도 실패(무시): {_outer_mop_err}")
 
 
 
@@ -2247,6 +2379,29 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
                       f"(보유${_current_notional:.0f} ≥ 목표${_target_notional:.0f}) → skip")
                 continue
             dca_qty = dca_notional / limit_price
+            # ★ V10.31AO-hf3 [04-30]: t1_amt 비율 sync — TRIM/TP1 잔량 차단
+            #   사용자 통찰: "DCA할때 수량이랑 trim 수량을 sync"
+            #   원리: t1_amt = OPEN 시점 amount_to_precision 적용 후 저장된 정확한 step 단위
+            #         T2 비율 = dca_w[1] / dca_w[0] = 67/33 ≈ 2.03 (정확한 비율)
+            #         dca_qty = t1_amt × (dca_w[1] / dca_w[0]) → 정수배 → step 정확
+            #   효과: TRIM_T2 시 calc_trim_qty가 amt - t1_amt = T2 사이즈 그대로 청산 가능
+            #         dust 발생 차단
+            try:
+                from v9.config import DCA_WEIGHTS as _DW_SYNC
+                _t1_amt = float(p.get("t1_amt", 0) or 0)
+                if _t1_amt > 0 and len(_DW_SYNC) >= 2 and _DW_SYNC[0] > 0:
+                    # t2_qty = t1_amt × (T2 weight / T1 weight)
+                    _ratio = _DW_SYNC[next_tier - 1] / _DW_SYNC[0]  # next_tier=2 → DW[1]/DW[0]
+                    _synced_qty = _t1_amt * _ratio
+                    # 노셔널 부족분과 비교 — 더 작은 쪽 (과주문 방지)
+                    if _synced_qty <= dca_qty * 1.05:  # 5% 허용오차
+                        if abs(_synced_qty - dca_qty) / max(dca_qty, 1e-9) > 0.001:
+                            print(f"[DCA_QTY_SYNC] {sym} T{next_tier} qty sync: "
+                                  f"raw={dca_qty:.6f} → t1_amt비율={_synced_qty:.6f} "
+                                  f"(t1_amt={_t1_amt}, ratio={_ratio:.3f})")
+                        dca_qty = _synced_qty
+            except Exception as _sync_e:
+                print(f"[DCA_QTY_SYNC] {sym} sync 실패(원본 qty 사용): {_sync_e}")
 
             min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
             if dca_qty < min_qty or dca_qty * limit_price < 10.0:

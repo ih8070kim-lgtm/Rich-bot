@@ -411,7 +411,7 @@ OPEN_CORR_MIN           = 0.50   # ★ V10.31AM: 0.60 → 0.50 (3시간 corr 기
 #   사용자 결정: 3h corr은 너무 길음 — 진입 직전 30분 BTC 상관성으로 디커플링 감지
 #   [실측] 1초 윈도우 동시 진입 SL 3% vs 단독 18.2% — 단독은 BTC 디커플링 시 위험
 #   30분 corr ≥ 0.50 통과한 심볼만 OPEN 허용. corr_30m 없으면 corr_3h fallback.
-OPEN_CORR_MIN_30M       = 0.50   # ★ V10.31AO: 30분 corr 임계 (진입 필터)
+OPEN_CORR_MIN_30M       = 0.60   # ★ V10.31AO-hf2 [04-30]: 0.50 → 0.60 (5시간 운영 후 — 0.38~0.50 거절 5건, 노이즈 vs 진짜 디커플링 구분 위해 강화)
                                  #   기존 2일 corr 기준 0.60 → 3시간 corr 기준 0.50으로 재조정
                                  #   극단 decoupling(OP 같은 corr 0.2~0.3)은 여전 차단, 정적 구간 노이즈는 통과
 HEDGE_STAGE1_MULTIPLIER = 1.4
@@ -690,17 +690,59 @@ def calc_tier_from_amt(amt: float, price: float, bal: float) -> int:
 
 
 def calc_trim_qty(total_amt: float, tier: int, ep: float = 0.0, bal: float = 0.0,
-                  mark_price: float = 0.0) -> float:
+                  mark_price: float = 0.0, t1_amt: float = 0.0,
+                  t2_amt: float = 0.0, t3_amt: float = 0.0) -> float:
     """★ V10.29d: Trim 수량 — 순수 노셔널 기반 + 안전 캡.
 
     현재 포지션 노셔널에서 목표 tier 노셔널을 빼서 트림할 수량 계산.
     ★ 안전장치: tier 비중 기반 최대값 초과 방지 (이중 trim 방어)
+    
+    ★ V10.31AO-hf3 [04-30]: 산만큼 그대로 팔기 (사용자 통찰)
+       사용자: "살때 수량 기억했다가 파는게 어려워?"
+       원리: TRIM_T2 → t2_amt 그대로 청산 (T2 fill qty 정확히 재사용)
+             계산 재실행 없음 → dust 발생 차단
+       fallback: tier별 amt 없으면 기존 노셔널 계산 사용
     """
     if tier < 1 or total_amt <= 0:
         return 0.0
 
     target_tier = tier - 1
     price = mark_price if mark_price > 0 else ep
+
+    # ★ V10.31AO-hf3: 산만큼 그대로 팔기 — tier별 fill qty 우선
+    if tier == 2 and target_tier == 1 and t2_amt > 0:
+        # T2 fill qty 그대로 청산 (T1 잔량은 자연히 t1_amt)
+        # 안전 검증: t2_amt가 total보다 작거나 같아야 정상
+        if t2_amt <= total_amt:
+            # 잔량 dust 방어
+            _residual = total_amt - t2_amt
+            if price > 0:
+                _residual_notional = _residual * price
+                if 0 < _residual_notional < 5.0:
+                    return total_amt  # 전량
+            return t2_amt
+        # t2_amt > total → 비정상 (TRIM 후 다시 trim 등) → fallback
+    
+    if tier == 3 and target_tier == 2 and t3_amt > 0:
+        if t3_amt <= total_amt:
+            _residual = total_amt - t3_amt
+            if price > 0:
+                _residual_notional = _residual * price
+                if 0 < _residual_notional < 5.0:
+                    return total_amt
+            return t3_amt
+
+    # ★ V10.31AO-hf3 (fallback 1): t1_amt sync (T2 → T1, t2_amt 없을 때)
+    if t1_amt > 0 and tier == 2 and target_tier == 1:
+        _sync_qty = total_amt - t1_amt
+        if _sync_qty > 0:
+            _ratio = _sync_qty / total_amt
+            if 0.3 < _ratio < 0.85:
+                if price > 0:
+                    _residual_notional = t1_amt * price
+                    if 0 < _residual_notional < 5.0:
+                        return total_amt
+                return _sync_qty
 
     # ★ V10.29d: tier 비중 기반 최대 trim — 절대 이 이상 안 팔림
     total_w = sum(DCA_WEIGHTS)

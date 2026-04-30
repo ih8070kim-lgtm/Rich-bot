@@ -333,6 +333,11 @@ def apply_order_results(
                 p["ep"]     = total_cost / p["amt"] if p["amt"] > 0 else avg_px
                 tier        = meta.get("tier", p.get("dca_level", 1) + 1)
                 p["dca_level"]     = tier
+                # ★ V10.31AO-hf3 [04-30]: tier별 fill qty 저장 (runner _apply_pending_fill 미러링)
+                if tier == 2:
+                    p["t2_amt"] = filled
+                elif tier == 3:
+                    p["t3_amt"] = filled
                 p["last_dca_time"] = now
                 # ★ V10.31t: p["time"] OPEN 시각 유지 — DCA 체결 시 덮어쓰지 않음
                 # (runner._apply_pending_fill 동일 수정, 시간컷 무력화 버그 해결)
