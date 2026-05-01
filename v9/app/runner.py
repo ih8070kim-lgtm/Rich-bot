@@ -3542,6 +3542,87 @@ async def _main_loop(ex_init, dry_run: bool):
                     dry_run=dry_run,
                 )
                 evaluated.append(evaluated_intent)
+                
+                # ★ V10.31AO-hf3 [05-01]: corr reject 사후 추적 (shadow evaluator)
+                #   사용자: "0.5 데이터 기록하자" → 임계 0.6 vs 0.5 비교 위해
+                #   거절 케이스 5/15/30분 후 가격 추적 → 가상 ROI 계산 → EV 계산
+                #   목적: corr 임계 false positive 측정 (진입했으면 익절이었을 케이스)
+                try:
+                    _rcode = getattr(evaluated_intent, "rejection_code", None)
+                    _rcode_str = str(_rcode.value if _rcode else "")
+                    if _rcode_str == "REJECT_CORR_LOW" and getattr(intent, "intent_type", None) is not None:
+                        from v9.types import IntentType as _IT_SHADOW
+                        if intent.intent_type == _IT_SHADOW.OPEN:
+                            _shadow_sym = intent.symbol
+                            _shadow_side = intent.side
+                            _shadow_p = float((snapshot.all_prices or {}).get(_shadow_sym, 0) or 0)
+                            if _shadow_p > 0:
+                                _shadow_corr_30m = float((snapshot.correlations_30m or {}).get(_shadow_sym, -999) or -999)
+                                _shadow_corr_3h = float((snapshot.correlations_3h or {}).get(_shadow_sym, -999) or -999)
+                                _shadow_corr_24h = float((snapshot.correlations or {}).get(_shadow_sym, -999) or -999)
+                                _shadow_record = {
+                                    "sym": _shadow_sym,
+                                    "side": _shadow_side,
+                                    "entry_p": _shadow_p,
+                                    "ts": time.time(),
+                                    "corr_30m": _shadow_corr_30m,
+                                    "corr_3h": _shadow_corr_3h,
+                                    "corr_24h": _shadow_corr_24h,
+                                    "trace_id": intent.trace_id,
+                                    "checkpoints_done": [],  # ['5m', '15m', '30m'] 추적
+                                }
+                                if "shadow_corr_queue" not in system_state:
+                                    system_state["shadow_corr_queue"] = []
+                                system_state["shadow_corr_queue"].append(_shadow_record)
+                                # 큐 max 200개 (메모리 제한)
+                                if len(system_state["shadow_corr_queue"]) > 200:
+                                    system_state["shadow_corr_queue"] = system_state["shadow_corr_queue"][-200:]
+                except Exception as _shadow_e:
+                    print(f"[SHADOW_CORR] reject 등록 실패(무시): {_shadow_e}")
+
+            # ★ V10.31AO-hf3 [05-01]: shadow corr 큐 사후 추적
+            #   매 사이클 큐 순회 → 5/15/30분 경과 시 가격 측정 + 가상 ROI 기록
+            try:
+                _shadow_q = system_state.get("shadow_corr_queue", [])
+                _new_q = []
+                for _rec in _shadow_q:
+                    _elapsed = time.time() - _rec["ts"]
+                    _checkpoints = ["5m", "15m", "30m"]
+                    _thresholds = {"5m": 300, "15m": 900, "30m": 1800}
+                    _curr_p_shadow = float((snapshot.all_prices or {}).get(_rec["sym"], 0) or 0)
+                    
+                    for _cp in _checkpoints:
+                        if _cp in _rec["checkpoints_done"]:
+                            continue
+                        if _elapsed >= _thresholds[_cp] and _curr_p_shadow > 0:
+                            # 가상 ROI 계산: side=buy면 (curr - entry)/entry, sell이면 (entry - curr)/entry
+                            _entry = _rec["entry_p"]
+                            if _rec["side"] == "buy":
+                                _virtual_roi = (_curr_p_shadow - _entry) / _entry * 100
+                            else:
+                                _virtual_roi = (_entry - _curr_p_shadow) / _entry * 100
+                            # 레버리지 적용 (실제 진입 시 PnL 비교 위해)
+                            _virtual_roi_lev = _virtual_roi * LEVERAGE
+                            try:
+                                from v9.logging.logger_csv import log_system as _ls_shadow
+                                _ls_shadow("SHADOW_CORR_REJECT",
+                                           f"{_rec['sym']} {_rec['side']} cp={_cp} "
+                                           f"entry={_entry:.6f} curr={_curr_p_shadow:.6f} "
+                                           f"corr_30m={_rec['corr_30m']:.3f} "
+                                           f"corr_3h={_rec['corr_3h']:.3f} "
+                                           f"corr_24h={_rec['corr_24h']:.3f} "
+                                           f"virtual_roi={_virtual_roi:+.3f}% "
+                                           f"virtual_roi_x{LEVERAGE}={_virtual_roi_lev:+.3f}%")
+                            except Exception:
+                                pass
+                            _rec["checkpoints_done"].append(_cp)
+                    
+                    # 30분 미경과면 큐 유지
+                    if _elapsed < 1800:
+                        _new_q.append(_rec)
+                system_state["shadow_corr_queue"] = _new_q
+            except Exception as _track_e:
+                print(f"[SHADOW_CORR] 사후 추적 실패(무시): {_track_e}")
 
             # ── 실행 ─────────────────────────────────────────────
             results = await execute_intents(ex, evaluated, dry_run=dry_run, st=st)
