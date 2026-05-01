@@ -83,6 +83,78 @@ _SYNC_INTERVAL = 30  # 초
 # ARB 16:48:40 amt=13101.9 (의도 2배) 재현 방지
 _APPLIED_FILL_OIDS = {}  # {oid: ts}
 
+
+def _apply_cancel_partial_fill(p, sym, pos_side, cancel_result, tier, fallback_price=0.0):
+    """★ V10.31AO-hf6 [05-01]: cancel 응답에 partial fill 있으면 봇 amt 반영
+    
+    배경: 05-01 APT 사이즈 3배 폭증 — Binance Order History [실측]
+       T2 DCA limit 802.95 placed → 796.07 fill (99.1%) → cancel 호출 시점에 이미 fill됨
+       Status: "Cancelled" (status는 cancelled이나 filled 부분 그대로 유지)
+       봇: cancel response의 filled 무시 → _PENDING_LIMITS.pop만 → 좀비 amt
+    
+    원리: ccxt cancel_order 응답은 dict {id, status, filled, average, amount, ...}
+       filled > 0이면 partial fill 발생 → 봇에 누적 처리
+    
+    Args:
+        p: position dict (book)
+        sym: symbol
+        pos_side: buy/sell
+        cancel_result: ex.cancel_order() 반환값
+        tier: 어느 tier로 진입할지 (DCA cancel 시 next_tier)
+        fallback_price: cancel_result에 average 없을 때 사용할 가격
+    
+    Returns:
+        bool: partial fill 처리 발생 시 True
+    """
+    if not isinstance(cancel_result, dict):
+        return False
+    _filled = float(cancel_result.get("filled", 0) or 0)
+    if _filled <= 0:
+        return False
+    _avg = float(cancel_result.get("average", 0) or 0)
+    if _avg <= 0:
+        _avg = fallback_price
+    if _avg <= 0:
+        return False
+    _old_amt = float(p.get("amt", 0) or 0)
+    _old_ep = float(p.get("ep", 0) or 0)
+    _new_amt = _old_amt + _filled
+    if _new_amt <= 0:
+        return False
+    _total_cost = (_old_amt * _old_ep) + (_filled * _avg)
+    _new_ep = _total_cost / _new_amt if _new_amt > 0 else _avg
+    p["amt"] = _new_amt
+    p["ep"] = _new_ep
+    p["last_dca_time"] = time.time()
+    # tier 갱신 (DCA cancel partial fill인 경우)
+    if tier and tier > int(p.get("dca_level", 1) or 1):
+        p["dca_level"] = tier
+        if tier == 2:
+            p["t2_amt"] = _filled
+        elif tier == 3:
+            p["t3_amt"] = _filled
+        # tier 전환 시 max_roi/worst_roi 리셋
+        try:
+            p.setdefault("max_roi_by_tier", {})[str(int(p.get("dca_level", 1) or 1) - 1)] = float(p.get("max_roi_seen", 0.0) or 0.0)
+        except Exception:
+            pass
+        p["max_roi_seen"] = 0.0
+        p["worst_roi"] = 0.0
+        p["step"] = 0
+        p["tp1_done"] = False
+    print(f"[CANCEL_PARTIAL_FILL] ★ {sym} {pos_side} cancel 시 {_filled}@{_avg:.6f} 부분 체결 발견")
+    print(f"   → amt {_old_amt:.4f}→{_new_amt:.4f} ep {_old_ep:.6f}→{_new_ep:.6f} "
+          f"dca_level={p.get('dca_level')}")
+    try:
+        from v9.logging.logger_csv import log_system as _ls_cpf
+        _ls_cpf("CANCEL_PARTIAL_FILL",
+                f"{sym} {pos_side} filled={_filled} avg={_avg:.6f} "
+                f"amt={_old_amt:.4f}→{_new_amt:.4f} dca={p.get('dca_level')}")
+    except Exception:
+        pass
+    return True
+
+
 async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None):
     """바이낸스 실제 포지션과 포지션북 비교, 불일치 시 바이낸스 기준 반영.
     ★ v10.14: snapshot 파라미터 추가 (dca_level 역추정 정확도 개선)
@@ -2297,11 +2369,27 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 
                 # 가격 반등 → 취소 (마진 회수)
                 if roi > deactivation_roi:
+                    # ★ V10.31AO-hf6 [05-01]: cancel 시점 partial fill 처리
+                    #   배경: 05-01 APT 사이즈 3배 — T2 limit 802.95 placed → 796.07 fill (99.1%)
+                    #         → cancel 호출 시 거래소 status="Cancelled" 응답
+                    #         → 봇이 filled 무시하고 _PENDING_LIMITS.pop만 → 좀비 amt
+                    _cancel_result = None
                     try:
-                        await asyncio.to_thread(ex.cancel_order, _oid, sym)
+                        _cancel_result = await asyncio.to_thread(ex.cancel_order, _oid, sym)
                         print(f"[DCA_PRE_CANCEL] {sym} T{next_tier}: roi={roi:.1f}%>{deactivation_roi:.1f}% 반등 취소")
-                    except Exception:
-                        pass
+                    except Exception as _ce:
+                        # cancel 실패 시 fetch_order로 fill 확인
+                        try:
+                            _cancel_result = await asyncio.to_thread(ex.fetch_order, _oid, sym)
+                            print(f"[DCA_PRE_CANCEL] {sym} T{next_tier} cancel 실패 → fetch_order 결과 사용: {str(_ce)[:60]}")
+                        except Exception:
+                            pass
+                    # ★ partial fill 검출 + 봇 amt 반영
+                    if _cancel_result:
+                        _existing_price = float(_existing.get("price", 0) or 0)
+                        _apply_cancel_partial_fill(p, sym, pos_side, _cancel_result,
+                                                    tier=next_tier,
+                                                    fallback_price=_existing_price)
                     _PENDING_LIMITS.pop(_oid, None)
                     _dca_pre.pop(next_tier, None)
                     continue
@@ -2391,6 +2479,47 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
                     }
                     print(f"[DCA_PRE] {sym} {pos_side} T{next_tier}: "
                           f"roi={roi:.1f}% → LIMIT @${safe_price:.4f}")
+                else:
+                    # ★ V10.31AO-hf5 [05-01]: oid 누락 시 좀비 limit 즉시 취소
+                    #   배경: 05-01 APT 사이즈 3배 폭증 ($1191) — T2 DCA preorder 좀비 fill
+                    #         create_order는 거래소에 limit 등록 성공했으나 응답에 id 누락
+                    #         → 봇 _PENDING_LIMITS 등록 X → 봇은 "발사 실패" 인식
+                    #         → 다음 사이클(5초) 또 발사 → 거래소엔 같은 limit 여러 개
+                    #         → 가격 도달 시 모두 fill → amt 누적 (T1 → T3+)
+                    #   진단: order dict에 id가 빈 문자열로 반환되는 케이스 (Binance API/ccxt 응답 이상)
+                    #   해결: oid 누락 시 immediate fetch_open_orders로 같은 sym의 미등록 limit 조회 후 cancel
+                    print(f"[DCA_PRE_OID_MISSING] ★ {sym} T{next_tier} create_order 응답에 oid 누락 — "
+                          f"좀비 limit 가능성. 즉시 cancel 시도")
+                    try:
+                        # 거래소에서 sym의 모든 open orders 조회
+                        _open_orders = await asyncio.to_thread(ex.fetch_open_orders, sym)
+                        # 방금 발사한 limit 추정: side + price + qty 매칭
+                        for _oo in (_open_orders or []):
+                            _oo_side = _oo.get("side", "")
+                            _oo_price = float(_oo.get("price", 0) or 0)
+                            _oo_qty = float(_oo.get("amount", 0) or 0)
+                            _oo_oid = str(_oo.get("id", ""))
+                            # 가격/qty 정확 매칭 + oid가 _PENDING_LIMITS에 없으면 좀비
+                            if (_oo_oid and _oo_oid not in _PENDING_LIMITS
+                                and _oo_side == pos_side
+                                and abs(_oo_price - safe_price) / max(safe_price, 1e-9) < 0.0001
+                                and abs(_oo_qty - safe_qty) / max(safe_qty, 1e-9) < 0.01):
+                                # 좀비 발견 → 즉시 cancel
+                                try:
+                                    await asyncio.to_thread(ex.cancel_order, _oo_oid, sym)
+                                    print(f"[DCA_PRE_OID_MISSING] ★ {sym} 좀비 limit cancel 성공: "
+                                          f"oid={_oo_oid} qty={_oo_qty} @{_oo_price}")
+                                    try:
+                                        from v9.logging.logger_csv import log_system as _ls_zombie
+                                        _ls_zombie("DCA_PRE_ZOMBIE_CANCEL",
+                                                   f"{sym} {pos_side} T{next_tier} oid={_oo_oid} "
+                                                   f"qty={_oo_qty} price={_oo_price}")
+                                    except Exception:
+                                        pass
+                                except Exception as _zc_err:
+                                    print(f"[DCA_PRE_OID_MISSING] cancel 실패: {_zc_err}")
+                    except Exception as _foo_err:
+                        print(f"[DCA_PRE_OID_MISSING] fetch_open_orders 실패: {_foo_err}")
             except Exception as e:
                 print(f"[DCA_PRE_ERR] {sym} T{next_tier}: {str(e)[:80]}")
 

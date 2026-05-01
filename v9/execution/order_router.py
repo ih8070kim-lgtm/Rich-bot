@@ -41,7 +41,16 @@ async def cancel_pending_orders(ex, sym: str):
     TRAIL_ON / FORCE_CLOSE 실행 직전, pending limit 주문 전부 취소.
     TP1 미체결이 남아 있으면 TRAIL 전량 reduceOnly가 -2022로 거절됨.
     ★ V10.29d: _PENDING_LIMITS도 같이 취소 (DCA limit 잔존 방지)
+    ★ V10.31AO-hf5 [05-01]: cancel 실패 시 fetch_open_orders로 재확인
+       배경: 04-30 AVAX, 04-30 TIA, 05-01 APT — 비대 사이즈 자동 청산 빈도 24h당 1건
+    ★ V10.31AO-hf6 [05-01]: cancel 응답의 partial fill 검출 + 반환
+       배경: 05-01 APT [실측] — T2 limit 802.95 placed → 796.07 fill (99.1%) → cancel
+              status="Cancelled"이지만 filled=796.07. 봇 처리 안 함 → 좀비.
+       반환: list of partial fills [(oid, info, filled, avg_price), ...]
+              caller가 봇 amt에 반영 (또는 _apply_cancel_partial_fill helper 사용)
     """
+    _partial_fills = []  # ★ V10.31AO-hf6: caller가 처리할 partial fill 목록
+    
     # (1) _PENDING_ORDERS 취소
     orders = list(_PENDING_ORDERS.pop(sym, []))
     for oid, itype_s in orders:
@@ -54,14 +63,91 @@ async def cancel_pending_orders(ex, sym: str):
     # (2) _PENDING_LIMITS에서 같은 심볼 취소
     _to_cancel = [(oid, info) for oid, info in list(_PENDING_LIMITS.items())
                   if info.get("sym") == sym]
+    _failed_cancels = []
     for oid, info in _to_cancel:
         try:
-            await asyncio.to_thread(ex.cancel_order, oid, sym)
+            _cresult = await asyncio.to_thread(ex.cancel_order, oid, sym)
+            # ★ V10.31AO-hf6: partial fill 검출
+            if isinstance(_cresult, dict):
+                _filled = float(_cresult.get("filled", 0) or 0)
+                if _filled > 0:
+                    _avg = float(_cresult.get("average", 0) or info.get("price", 0))
+                    _partial_fills.append((oid, info, _filled, _avg))
+                    print(f"[order_router] cancel_PARTIAL_FILL {sym} oid={oid} "
+                          f"filled={_filled}@{_avg:.6f} (caller 처리 필요)")
             _PENDING_LIMITS.pop(oid, None)
             print(f"[order_router] cancel_pending_limit {sym} oid={oid} ({info.get('intent_type','')})")
         except Exception as e:
-            _PENDING_LIMITS.pop(oid, None)  # 실패해도 레지스트리에서 제거
-            print(f"[order_router] cancel_pending_limit {sym} oid={oid} 실패(무시): {e}")
+            _err_str = str(e)
+            # "Unknown order" / "-2013": 이미 fill 또는 cancel됨 → fetch_order로 확인
+            if "Unknown order" in _err_str or "-2013" in _err_str:
+                # ★ V10.31AO-hf6: "Unknown order" 케이스도 fetch_order로 fill 확인 (좀비 fill 가능)
+                try:
+                    _ford = await asyncio.to_thread(ex.fetch_order, oid, sym)
+                    if isinstance(_ford, dict):
+                        _filled = float(_ford.get("filled", 0) or 0)
+                        if _filled > 0:
+                            _avg = float(_ford.get("average", 0) or info.get("price", 0))
+                            _partial_fills.append((oid, info, _filled, _avg))
+                            print(f"[order_router] cancel_UNKNOWN_BUT_FILLED {sym} oid={oid} "
+                                  f"filled={_filled}@{_avg:.6f}")
+                except Exception:
+                    pass
+                _PENDING_LIMITS.pop(oid, None)
+                print(f"[order_router] cancel_pending_limit {sym} oid={oid} 이미 처리됨")
+            else:
+                # 다른 에러 → 거래소 재확인 후 재시도
+                _failed_cancels.append((oid, info, _err_str))
+                print(f"[order_router] cancel_pending_limit {sym} oid={oid} 1차 실패: {_err_str[:60]}")
+    
+    # ★ V10.31AO-hf5: 1차 실패한 cancel은 fetch_open_orders로 재확인 + 재시도
+    if _failed_cancels:
+        try:
+            _open_orders = await asyncio.to_thread(ex.fetch_open_orders, sym)
+            _open_oids = set(str(_oo.get("id", "")) for _oo in (_open_orders or []) if _oo.get("id"))
+            for oid, info, _orig_err in _failed_cancels:
+                if oid in _open_oids:
+                    # 거래소에 정말 살아있음 → 재시도 cancel
+                    try:
+                        _retry_result = await asyncio.to_thread(ex.cancel_order, oid, sym)
+                        # partial fill 검출
+                        if isinstance(_retry_result, dict):
+                            _filled = float(_retry_result.get("filled", 0) or 0)
+                            if _filled > 0:
+                                _avg = float(_retry_result.get("average", 0) or info.get("price", 0))
+                                _partial_fills.append((oid, info, _filled, _avg))
+                        _PENDING_LIMITS.pop(oid, None)
+                        print(f"[order_router] cancel_RETRY {sym} oid={oid} ✓ 재시도 성공")
+                    except Exception as _retry_e:
+                        _retry_err = str(_retry_e)
+                        if "Unknown order" in _retry_err or "-2013" in _retry_err:
+                            _PENDING_LIMITS.pop(oid, None)
+                            print(f"[order_router] cancel_RETRY {sym} oid={oid} 이미 처리됨")
+                        else:
+                            print(f"[order_router] cancel_RETRY {sym} oid={oid} ★ 재시도도 실패: {_retry_err[:60]}")
+                            try:
+                                from v9.logging.logger_csv import log_system as _ls_zombie_warn
+                                _ls_zombie_warn("CANCEL_FAIL_ZOMBIE_RISK",
+                                                f"{sym} oid={oid} 1차+2차 실패")
+                            except Exception:
+                                pass
+                else:
+                    # 거래소에 없음 → fill 확인 후 봇 제거
+                    try:
+                        _ford2 = await asyncio.to_thread(ex.fetch_order, oid, sym)
+                        if isinstance(_ford2, dict):
+                            _filled = float(_ford2.get("filled", 0) or 0)
+                            if _filled > 0:
+                                _avg = float(_ford2.get("average", 0) or info.get("price", 0))
+                                _partial_fills.append((oid, info, _filled, _avg))
+                    except Exception:
+                        pass
+                    _PENDING_LIMITS.pop(oid, None)
+                    print(f"[order_router] cancel_RETRY {sym} oid={oid} 거래소에 없음 (이미 처리)")
+        except Exception as _foo_e:
+            print(f"[order_router] fetch_open_orders {sym} 실패(보수적 처리): {_foo_e}")
+    
+    return _partial_fills
 # 이유: open_fail_cooldown_until = now + 300 과 일치시킴
 #       5초 TTL이면 같은 심볼을 5초 후에 다시 OPEN 가능 → 중복매수 원인
 DEDUP_TTL = 300
@@ -297,7 +383,20 @@ async def route_order(
             # [BUG-2 FIX] TRAIL_ON/FORCE_CLOSE: pending limit 선취소 후 전량 market
             from v9.types import IntentType as _IT2
             if intent.intent_type in (_IT2.TRAIL_ON, _IT2.FORCE_CLOSE):
-                await cancel_pending_orders(ex, sym)
+                _cpo_partials = await cancel_pending_orders(ex, sym)
+                # ★ V10.31AO-hf6 [05-01]: cancel 시점 partial fill 로깅
+                #   TRAIL_ON/FORCE_CLOSE는 곧바로 market force close → partial fill amt가 즉시 청산됨
+                #   그러나 로깅으로 빈도 측정 (좀비 진단)
+                if _cpo_partials:
+                    for _po, _pi, _pf, _pa in _cpo_partials:
+                        print(f"[FORCE_CLOSE_CANCEL_PARTIAL] {sym} oid={_po} "
+                              f"filled={_pf}@{_pa:.6f} (force close가 통합 청산)")
+                        try:
+                            from v9.logging.logger_csv import log_system as _ls_fcp
+                            _ls_fcp("FORCE_CLOSE_CANCEL_PARTIAL",
+                                    f"{sym} oid={_po} filled={_pf} avg={_pa:.6f}")
+                        except Exception:
+                            pass
             order = await asyncio.to_thread(
                 ex.create_order, sym, 'market', side, safe_qty, params=params
             )
