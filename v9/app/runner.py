@@ -184,6 +184,61 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
         ep = float(pos.get('entryPrice', 0) or 0)
         ex_pos[(sym, side)] = {'qty': contracts, 'ep': ep}
 
+    # ★ V10.31AO-hf7 [05-01]: 거래소 open orders 검증 (좀비 limit 검출)
+    #   사용자 통찰: "주문 낸거 다 기록될거 아니야" — 봇이 모르는 limit은 좀비
+    #   배경: 05-01 OP — orders.csv에 V9_DCA_PRE placed 기록 0건이지만
+    #         fills.csv에 V9_DCA_PRE fill 9727.7 발견 → 봇이 추적 못함
+    #   해결: SYNC 시 거래소 open orders 모두 조회 → _PENDING_LIMITS와 대조
+    #         봇이 모르는 oid 발견 시 즉시 cancel (좀비 차단)
+    #   주의: TP1 발동 직후 등 합법적인 placed→pending 등록 race 있을 수 있어
+    #         발사 후 5초 grace 적용 (placed_ts 기준 너무 최근 oid는 무시)
+    try:
+        for (sym, side) in list(ex_pos.keys()):
+            try:
+                _open_orders_sync = await asyncio.to_thread(ex.fetch_open_orders, sym)
+            except Exception:
+                continue
+            if not _open_orders_sync:
+                continue
+            from v9.execution.order_router import _PENDING_LIMITS as _PL_SYNC
+            _known_oids = set(_PL_SYNC.keys())
+            for _oo in _open_orders_sync:
+                _oo_oid = str(_oo.get("id", "") or "")
+                if not _oo_oid:
+                    continue
+                if _oo_oid in _known_oids:
+                    continue  # 봇이 인지하는 limit
+                # 봇이 모르는 oid — 좀비 가능성
+                _oo_side = _oo.get("side", "")
+                _oo_price = float(_oo.get("price", 0) or 0)
+                _oo_qty = float(_oo.get("amount", 0) or 0)
+                _oo_status = _oo.get("status", "")
+                _oo_ts_ms = float(_oo.get("timestamp", 0) or 0)
+                # placed 후 30초 grace (race condition 방어)
+                _oo_age_sec = (now * 1000 - _oo_ts_ms) / 1000 if _oo_ts_ms > 0 else 999
+                if _oo_age_sec < 30:
+                    continue
+                # 같은 side에 amt>0 포지션 있을 때만 좀비 위험 (DCA 또는 TP1)
+                if (sym, _oo_side) not in ex_pos and (sym, "buy" if _oo_side == "sell" else "sell") not in ex_pos:
+                    continue
+                # 좀비 검출 → 즉시 cancel
+                print(f"[SYNC_ZOMBIE_LIMIT] ★ {sym} {_oo_side} 봇 미인지 limit 검출: "
+                      f"oid={_oo_oid} qty={_oo_qty} @{_oo_price} age={_oo_age_sec:.0f}s status={_oo_status}")
+                try:
+                    await asyncio.to_thread(ex.cancel_order, _oo_oid, sym)
+                    print(f"[SYNC_ZOMBIE_LIMIT] ✓ cancel 성공 oid={_oo_oid}")
+                    try:
+                        from v9.logging.logger_csv import log_system as _ls_zombie
+                        _ls_zombie("SYNC_ZOMBIE_LIMIT_CANCELED",
+                                   f"{sym} {_oo_side} oid={_oo_oid} qty={_oo_qty} "
+                                   f"price={_oo_price} age={_oo_age_sec:.0f}s")
+                    except Exception:
+                        pass
+                except Exception as _zc_e:
+                    print(f"[SYNC_ZOMBIE_LIMIT] cancel 실패: {_zc_e}")
+    except Exception as _zse:
+        print(f"[SYNC_ZOMBIE_LIMIT] 좀비 검사 실패(무시): {_zse}")
+
     # 포지션북의 모든 활성 포지션 수집
     book_pos = {}
     for sym, sym_st in st.items():
@@ -1146,6 +1201,23 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
                 _rpl(f"tp1pre_{oid}", sym, close_side, safe_qty, safe_price, oid,
                      f"V9_TP1_PRE_{sym}", _pre_intent)
                 _rp(sym, oid, "TP1")
+                # ★ V10.31AO-hf7 [05-01]: log_order 호출 — orders.csv에 placed 기록
+                #   (DCA preorder 동일 fix — 모든 주문 추적 가능하도록)
+                try:
+                    from v9.logging.logger_csv import log_order as _log_order_tp1
+                    _log_order_tp1(
+                        trace_id=f"tp1pre_{oid}",
+                        symbol=sym,
+                        side=close_side,
+                        order_type="limit",
+                        qty=safe_qty,
+                        price=safe_price,
+                        tag=f"V9_TP1_PRE_{sym}",
+                        order_id=oid,
+                        status="placed",
+                    )
+                except Exception as _lo_tp1_err:
+                    print(f"[TP1_PRE_LOG] log_order 실패(무시): {_lo_tp1_err}")
                 print(f"[TP1_PRE] {sym} {pos_side} T{dca_level} 선주문 "
                       f"@{safe_price:.4f} qty={safe_qty} thresh={tp1_thresh:.1f}% "
                       f"worst={_worst:.1f}%")
@@ -2477,6 +2549,25 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
                     p.setdefault("dca_preorders", {})[next_tier] = {
                         "oid": oid, "price": safe_price, "qty": safe_qty,
                     }
+                    # ★ V10.31AO-hf7 [05-01]: log_order 호출 — orders.csv에 placed 기록
+                    #   배경: 05-01 OP 케이스 — T2 DCA preorder 9727.7 fill됐는데
+                    #         orders.csv에 placed 기록 0건 → 추적 불가능
+                    #   해결: 발사 직후 log_order 호출 → 모든 주문이 orders.csv에 기록
+                    try:
+                        from v9.logging.logger_csv import log_order as _log_order_dca
+                        _log_order_dca(
+                            trace_id=f"dca_pre_T{next_tier}_{sym}",
+                            symbol=sym,
+                            side=pos_side,
+                            order_type="limit",
+                            qty=safe_qty,
+                            price=safe_price,
+                            tag=f"V9_DCA_PRE_{sym}",
+                            order_id=oid,
+                            status="placed",
+                        )
+                    except Exception as _lo_err:
+                        print(f"[DCA_PRE_LOG] log_order 실패(무시): {_lo_err}")
                     print(f"[DCA_PRE] {sym} {pos_side} T{next_tier}: "
                           f"roi={roi:.1f}% → LIMIT @${safe_price:.4f}")
                 else:
