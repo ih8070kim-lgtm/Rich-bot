@@ -655,10 +655,14 @@ def calc_tier_from_amt(amt: float, price: float, bal: float) -> int:
     """★ V10.31AM3 hotfix-17: 잔량 기반 dca_level 역산.
     
     TRIM 후 잔량(amt)이 어느 tier 사이즈에 해당하는지 결정.
-    DCA_WEIGHTS=[33,33,34] 가정:
-      잔량 notional이 T3 누적(100%) 80% 이상 → T3 유지
-      T2 누적(66%) 50% 이상 → T2
-      그 외 → T1
+    
+    ★ V10.31AO-hf7 [05-01]: DCA_WEIGHTS 길이 동적 처리
+       사용자 통찰 [05-01]: "T3로 텔레그램에 표시된게 가장 이상해"
+       원인: V10.31AO는 [33,67] (2단)인데 함수가 [33,33,34] (3단) 가정
+              → calc_tier_notional(3) = T2와 동일 ($1170)
+              → TIA 잔량 $1066 → T3 잘못 반환 (T2 80% 임계 통과)
+              → 텔레그램 "TIA T3" 잘못 표시
+       수정: MAX_TIER = len(DCA_WEIGHTS)로 상한 결정
     
     사용자 통찰 [04-29]: "트림 잔량이 남아있으면 그 티어 유지하면 깔끔한 거 아닌가"
     → 임의 임계 X. 잔량 사이즈 = tier 결정.
@@ -669,23 +673,22 @@ def calc_tier_from_amt(amt: float, price: float, bal: float) -> int:
         bal: 잔고 (tier 사이즈 계산용)
     
     Returns:
-        1, 2, 3 중 하나
+        1 ~ len(DCA_WEIGHTS) 중 하나
     """
     if amt <= 0 or price <= 0 or bal <= 0:
         return 1
     
     remaining_notional = amt * price
     
-    # 각 tier 누적 사이즈
-    t1_target = calc_tier_notional(1, bal)
-    t2_target = calc_tier_notional(2, bal)
-    t3_target = calc_tier_notional(3, bal)
+    # ★ V10.31AO-hf7: MAX_TIER = DCA_WEIGHTS 길이
+    _MAX_TIER = len(DCA_WEIGHTS)
     
-    # 잔량이 가장 가까운 tier (반내림 방식 — 잔량이 80% 이상이면 그 tier 유지)
-    if t3_target > 0 and remaining_notional >= t3_target * 0.8:
-        return 3
-    if t2_target > 0 and remaining_notional >= t2_target * 0.8:
-        return 2
+    # 큰 tier부터 확인 (잔량이 클수록 큰 tier)
+    for _t in range(_MAX_TIER, 0, -1):
+        _target = calc_tier_notional(_t, bal)
+        if _target > 0 and remaining_notional >= _target * 0.8:
+            return _t
+    
     return 1
 
 

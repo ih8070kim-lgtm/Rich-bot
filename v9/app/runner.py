@@ -302,19 +302,26 @@ async def _sync_positions_with_exchange(ex, st, snapshot=None, system_state=None
                                                         f"T{_curr_dca_sync}→T{_amt_tier_sync}")
                                     except Exception:
                                         pass
-                                # ★ 비대 사이즈 감지 (dca_level 상한 초과)
+                                # ★ V10.31AO-hf7 [05-01]: 비대 사이즈 — 노셔널 기반 검출
+                                #   배경: calc_tier_from_amt가 MAX_TIER로 cap → tier 비교로는 못 잡음
+                                #   해결: MAX_TIER 노셔널 × 1.2 초과 시 비대 (정상 사이즈 20% 여유)
                                 _MAX_DCA = len(_SYNC_DW)
-                                if _amt_tier_sync > _MAX_DCA:
+                                from v9.config import calc_tier_notional as _ctn_sync
+                                _max_tier_notional = _ctn_sync(_MAX_DCA, _bal_sync)
+                                _curr_notional_sync = ex_qty * _curr_p_sync
+                                if _max_tier_notional > 0 and _curr_notional_sync > _max_tier_notional * 1.2:
                                     book_p['_oversized_flag'] = True
                                     book_p['_oversized_ts'] = now
+                                    _excess_pct = (_curr_notional_sync / _max_tier_notional - 1) * 100
                                     print(f"[SYNC_OVERSIZED] ★★ {sym} {side} 비대 사이즈 감지: "
-                                          f"T{_amt_tier_sync} > MAX_T{_MAX_DCA} "
-                                          f"notional=${ex_qty*_curr_p_sync:.2f} → _oversized_flag SET")
+                                          f"notional=${_curr_notional_sync:.2f} > MAX(T{_MAX_DCA})${_max_tier_notional:.0f}×1.2 "
+                                          f"(+{_excess_pct:.0f}% 초과) → _oversized_flag SET")
                                     try:
                                         from v9.logging.logger_csv import log_system as _ls_oversized
                                         _ls_oversized("SYNC_OVERSIZED",
-                                                      f"{sym} {side} T{_amt_tier_sync}>MAX{_MAX_DCA} "
-                                                      f"notional=${ex_qty*_curr_p_sync:.2f}")
+                                                      f"{sym} {side} notional=${_curr_notional_sync:.2f} "
+                                                      f"max(T{_MAX_DCA})=${_max_tier_notional:.0f} "
+                                                      f"excess=+{_excess_pct:.0f}%")
                                     except Exception:
                                         pass
                         except Exception as _sync_recalc_e:
