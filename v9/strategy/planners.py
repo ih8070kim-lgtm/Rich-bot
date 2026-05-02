@@ -1887,6 +1887,19 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     },
                 ))
                 print(f"[T2_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
+                # ★ V10.31AO-hf10 [05-02]: 사다리 cut ml 기록
+                try:
+                    from v9.logging.logger_ml import record_ml_event as _rec_ml_def
+                    from v9.config import LEVERAGE as _LEV_DEF
+                    _rec_ml_def(
+                        trace_id=intents[-1].trace_id,
+                        event_type=f"T2_DEF_{mode}",
+                        p=p, sym=symbol, snapshot=snapshot, st=st,
+                        real_balance=float(getattr(snapshot, 'real_balance_usdt', 0) or 0),
+                        leverage=_LEV_DEF, log_dir="v9_logs",
+                    )
+                except Exception:
+                    pass
             else:  # TRIM
                 # ★ V10.31AO: T2 사이즈만 부분 청산 (T2→T1 복귀)
                 _trim_qty = calc_trim_qty(_amt, 2, ep=ep, bal=_bal, mark_price=curr_p, t1_amt=float(p.get("t1_amt", 0) or 0), t2_amt=float(p.get("t2_amt", 0) or 0), t3_amt=float(p.get("t3_amt", 0) or 0))
@@ -1917,6 +1930,19 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     },
                 ))
                 print(f"[T2_DEF_V2] ✂ {symbol} {side} TRIM qty={_trim_qty} roi={roi:+.2f}% worst={worst:+.2f}% (T2→T1)")
+                # ★ V10.31AO-hf10 [05-02]: TRIM cut ml 기록
+                try:
+                    from v9.logging.logger_ml import record_ml_event as _rec_ml_trim
+                    from v9.config import LEVERAGE as _LEV_TRIM
+                    _rec_ml_trim(
+                        trace_id=intents[-1].trace_id,
+                        event_type=f"T2_DEF_{mode}",
+                        p=p, sym=symbol, snapshot=snapshot, st=st,
+                        real_balance=float(getattr(snapshot, 'real_balance_usdt', 0) or 0),
+                        leverage=_LEV_TRIM, log_dir="v9_logs",
+                    )
+                except Exception:
+                    pass
 
     return intents
 

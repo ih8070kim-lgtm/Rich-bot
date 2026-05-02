@@ -1887,6 +1887,19 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 _ms_p["min_slot_hold"] = False
                 print(f"[MIN_SLOT] {_ms_sym} {side} 교체 해제 ← 새 진입 {sym}")
 
+        # ★ V10.31AO-hf10 [05-02]: T1 OPEN ml 피처 기록 (학습 데이터 확장)
+        try:
+            from v9.logging.logger_ml import record_ml_event as _rec_ml_open
+            _rec_ml_open(
+                trace_id=info.get("trace_id", "") or f"open_{sym}_{int(now)}",
+                event_type="OPEN_T1",
+                p=get_p(sym_st, side), sym=sym, snapshot=snapshot, st=st,
+                real_balance=float(getattr(snapshot, 'real_balance_usdt', 0) or 0),
+                leverage=LEVERAGE, log_dir="v9_logs",
+            )
+        except Exception:
+            pass
+
     elif itype == "DCA":
         p = get_p(sym_st, side)
         if not (p and isinstance(p, dict) and avg_price > 0 and filled_qty > 0):
@@ -2307,6 +2320,18 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 t1_max_roi_pre_dca=_t1_pre_tp1,  # ★ V10.31e
                 worst_roi_seen=float(p.get("worst_roi", 0) or 0),  # ★ V10.31j
             )
+            # ★ V10.31AO-hf10 [05-02]: TP1 익절 ml 기록
+            try:
+                from v9.logging.logger_ml import record_ml_event as _rec_ml_tp1
+                _rec_ml_tp1(
+                    trace_id=info["trace_id"],
+                    event_type="TP1_FULL",
+                    p=p, sym=sym, snapshot=snapshot, st=st,
+                    real_balance=float(getattr(snapshot, 'real_balance_usdt', 0) or 0),
+                    leverage=LEVERAGE, log_dir="v9_logs",
+                )
+            except Exception:
+                pass
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
 
@@ -3080,12 +3105,6 @@ async def _place_trim_preorders(ex, st, snapshot, system_state=None):
                 else:
                     ttp["_retry"] = _retry + 1
                     print(f"[TRIM_ERR] {sym} T{tier}: 재시도 {_retry+1}/3 — {e}")
-
-
-async def _cancel_trim_preorders(ex, st, sym, pos_side):
-    # ★ V10.31c: 구현은 v9/execution/order_router.py로 이동 (wrapper 유지)
-    from v9.execution.order_router import cancel_trim_preorders as _impl
-    return await _impl(ex, st, sym, pos_side)
 
 
 async def _funding_fetch_loop(ex):
@@ -3898,8 +3917,9 @@ async def _main_loop(ex_init, dry_run: bool):
             # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
             await _place_dca_preorders(ex, st, snapshot, system_state=system_state)
 
-            # ★ V10.31e-6: HEDGE_SIM 가상 헷지 시뮬 업데이트 (관찰 전용, 실전 영향 0)
-            _tick_hedge_sim(system_state, snapshot)
+            # ★ V10.31AO-hf10 [05-02]: HEDGE_SIM 비활성 — V10.31AO에서 헷지(CORE_HEDGE/INSURANCE_SH) 제거
+            #   log_hedge_sim.csv 활용 X. 함수 본체는 보존 (BC/CB 등 향후 활용 여지).
+            # _tick_hedge_sim(system_state, snapshot)
 
             # ★ V10.31AM3: DCA_SIM — DCA 폭 변경 백테스트용 시계열 가격 로그
             # 60초 throttle, 실거래 영향 0. 사후 백테스트로 임의 DCA 파라미터 시뮬 가능
