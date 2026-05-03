@@ -706,31 +706,21 @@ def apply_order_results(
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
 
-                # ★ V10.31AN: PTP defense_close 모드 — T3 사다리/T4 디펜스 청산 시 PTP 트리거
-                # 사용자 결정 [04-30]: T3_DEF_SL/HARD_SL/TP 사다리 완료 후 ROI ≤ -3% 시 발동
-                # 트리거 hook은 log_trade와 독립 try-except (실패해도 청산/거래 영향 0)
-                # 이미 활성/쿨다운 중이면 skip — race condition 방지
-                # ─── 구조 ─────────────────────────────────────────────────────
-                # 1. mode == "defense_close" 체크
-                # 2. intent.reason prefix가 PTP_DEFENSE_TRIGGER_REASONS에 매칭
-                # 3. 청산 ROI ≤ PTP_DEFENSE_ROI_THRESH
-                # 4. 이미 트리거 활성/쿨다운 아닌 경우만 발동
-                # 5. system_state에 trigger_ts/last_step/cooldown_until 세팅
-                # 6. 다음 틱 plan_portfolio_tp가 _ptp_active_syms 세팅 + step 0 발사
+                # ★ V10.31AO-hf11 [05-03]: ROI 기반 트리거 (reason 무관)
+                #   사용자 의도 [05-03]: "ROI -2 이하로 체결되면 PTP 하는 거 아냐?"
+                #   배경: ARB 05-03 케이스 — reason="HARD_SL_T2(-3.5%)" (BTC_DECOUPLE_CLOSE 분기)
+                #         T2_DEF prefix 미매칭 → PTP 미발동 → 사용자 의도와 불일치
+                #   해결: reason 조건 제거. ROI ≤ -2.0% 체결 시 무조건 PTP 발동
+                #         (사다리/HARD_SL/BTC_DECOUPLE/그 외 모든 close 메커니즘 포함)
                 try:
                     from v9.config import (PTP_TRIGGER_MODE, PTP_DEFENSE_ROI_THRESH,
-                                            PTP_DEFENSE_TRIGGER_REASONS, PTP_COOLDOWN_SEC)
+                                            PTP_COOLDOWN_SEC)
                     if (PTP_TRIGGER_MODE == "defense_close"
                             and system_state is not None
                             and intent is not None):
                         _intent_reason = str(getattr(intent, "reason", "") or "")
-                        # prefix match: "T3_DEF_SL(worst=-3.5%,...)" → "T3_DEF_SL" 시작
-                        _matched_prefix = None
-                        for _p in PTP_DEFENSE_TRIGGER_REASONS:
-                            if _intent_reason.startswith(_p):
-                                _matched_prefix = _p
-                                break
-                        if _matched_prefix and _roi <= PTP_DEFENSE_ROI_THRESH:
+                        # ROI만 체크 (reason 무관) — ARB 같은 BTC_DECOUPLE_CLOSE 케이스도 잡음
+                        if _roi <= PTP_DEFENSE_ROI_THRESH:
                             _already_active = bool(system_state.get("_ptp_trigger_ts"))
                             _cd_until_chk = float(system_state.get("_ptp_cooldown_until", 0.0) or 0.0)
                             _in_cooldown = (_cd_until_chk > 0 and now < _cd_until_chk)
@@ -742,7 +732,7 @@ def apply_order_results(
                                     from v9.logging.logger_csv import log_system
                                     log_system("PTP_TRIGGER",
                                                f"mode=defense_close trigger_sym={sym} "
-                                               f"prefix={_matched_prefix} reason={_intent_reason[:60]} "
+                                               f"reason={_intent_reason[:60]} "
                                                f"roi={_roi:.2f}% bal=${getattr(snapshot, 'real_balance_usdt', 0):.2f}")
                                     print(f"[PTP_TRIGGER] mode=defense_close {sym} "
                                           f"reason={_intent_reason[:50]} roi={_roi:.2f}%")
