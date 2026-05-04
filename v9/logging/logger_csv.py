@@ -338,6 +338,54 @@ def log_skew(
     _append_csv(_log_path("log_skew.csv"), SKEW_COLUMNS, row)
 
 
+def log_btc_timeline(
+    btc_price: float,
+    btc_1h_change: float,
+    btc_6h_change: float,
+    btc_dev_ma: float,
+    btc_5m_closes: list,        # 최근 36봉 (3시간) close 가격
+    btc_1m_closes: list,        # 최근 30봉 (30분) close 가격
+    holds_buy: int,             # 현재 buy 보유 수
+    holds_sell: int,            # 현재 sell 보유 수
+    holds_avg_roi_buy: float,   # buy 평균 ROI
+    holds_avg_roi_sell: float,  # sell 평균 ROI
+    real_balance: float,
+):
+    """★ V10.31AO-hf15 [05-04]: BTC 시계열 + 보유 상태 매 1분 기록.
+    
+    사용자 통찰 [05-04]:
+      "BTC 차트만 기록해두면 거기서 조건은 찾으면 되지 왜 조건을 미리 정하려고 해"
+    
+    목적: 1~2주 데이터 누적 후 진짜 효과 있는 추세 조건 탐색.
+      - 어느 단위 (3봉/6봉/12봉/1h)가 진짜 신호인지
+      - 어느 임계 (0.2/0.3/0.5/0.7%)가 sweet spot인지
+      - 같은 방향 비율 60/70/80 어느 게 좋은지
+      - 보유 vs cut 효과 백테스트 가능
+    
+    실전 영향: 0 (로그만 기록).
+    """
+    row = {
+        "time": _now_str(),
+        "btc_price": round(btc_price, 2),
+        "btc_1h_change": round(btc_1h_change, 5),
+        "btc_6h_change": round(btc_6h_change, 5),
+        "btc_dev_ma": round(btc_dev_ma, 3),
+        "btc_5m_closes": ",".join(f"{c:.2f}" for c in btc_5m_closes[-12:]),  # 최근 12봉만 기록 (60분, 효율)
+        "btc_1m_closes": ",".join(f"{c:.2f}" for c in btc_1m_closes[-10:]),  # 최근 10봉 (10분)
+        "holds_buy": holds_buy,
+        "holds_sell": holds_sell,
+        "holds_avg_roi_buy": round(holds_avg_roi_buy, 3),
+        "holds_avg_roi_sell": round(holds_avg_roi_sell, 3),
+        "real_balance": round(real_balance, 2),
+    }
+    _append_csv(_log_path("log_btc_timeline.csv"),
+                ["time", "btc_price", "btc_1h_change", "btc_6h_change", "btc_dev_ma",
+                 "btc_5m_closes", "btc_1m_closes",
+                 "holds_buy", "holds_sell", "holds_avg_roi_buy", "holds_avg_roi_sell",
+                 "real_balance"],
+                row)
+
+
 # ── log_btc_context (★ V10.31AM3 hotfix-10: BTC 컨텍스트 검증 인프라)
 # ★ V10.31AM3 hotfix-21: universe_beta/universe_corr/vol_ratio_5m 파라미터 추가
 def log_btc_context(

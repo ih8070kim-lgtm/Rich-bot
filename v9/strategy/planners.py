@@ -2928,10 +2928,10 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
     #   하단 V10.31AJ~AM3 정상 청산 로직 복원 (active_syms, step 0/1, log_btc_context)
     
     # ★ V10.31AJ: trigger 활성 진입 즉시 _ptp_active_syms 세팅 (step gap 방지)
-    # 이유: 기존 코드는 step 발사 시점에만 세팅 → 4~5분 step 사이에 공백
-    # → 그 동안 trim/tp1/preorder가 재생성되어 ReduceOnly -2022 재발
-    # 해결: trigger 활성 동안 매 틱 _ptp_active_syms 유지
-    # 대상: 청산 대상인 모든 활성 포지션 심볼 (CORE_MR/CORE_MR_HEDGE, BC/CB 제외)
+    # ★ V10.31AO-hf13 [05-04]: TREND_FILTER 기반 — _ptp_trigger_side 같은 방향만 청산
+    #   사용자 통찰 [05-04]: 추세 반대 cut 발생 시 같은 방향 보유 = 같은 위험
+    #   _ptp_trigger_side 미세팅 시 모든 sym (이전 동작) — 호환성
+    _trigger_side = system_state.get("_ptp_trigger_side", None)
     _active_sym_set = set()
     try:
         from v9.execution.position_book import iter_positions as _ip_ptp
@@ -2947,6 +2947,9 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
                 # BC/CB/INSURANCE/SOFT_HEDGE/CORE_HEDGE는 PTP 대상 아님 (청산 제외)
                 if _r in ("BC", "CB", "INSURANCE_SH", "SOFT_HEDGE", "CORE_HEDGE"):
                     continue
+                # ★ hf13: trigger_side 세팅된 경우 같은 방향만 청산
+                if _trigger_side and _sd != _trigger_side:
+                    continue  # 반대 방향 보유 = 추세 따름 = 안전 → 보유 유지
                 _active_sym_set.add(_s)
     except Exception:
         pass
@@ -3086,6 +3089,7 @@ def plan_portfolio_tp(snapshot: "MarketSnapshot", st: Dict,
         system_state.pop("_ptp_trigger_ts", None)
         system_state.pop("_ptp_last_step", None)
         system_state.pop("_ptp_active_syms", None)  # ★ V10.31AJ: preorder 차단 해제
+        system_state.pop("_ptp_trigger_side", None)  # ★ V10.31AO-hf13: TREND_FILTER 기반 정리
         # ★ V10.31AM3 hotfix-9: PTP 후 신규 진입 차단 (사용자 결정 [04-27])
         #   "이벤트 끝난 두시간 정도" — 1차/2차 추세 cover, 추세 진정 후 진입
         from v9.config import PTP_ENTRY_COOLDOWN_SEC as _PEC

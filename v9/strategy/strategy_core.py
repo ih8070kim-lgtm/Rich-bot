@@ -706,79 +706,14 @@ def apply_order_results(
                 except Exception as _lt_err:
                     print(f"[strategy_core] log_trade 오류(무시): {_lt_err}")
 
-                # ★ V10.31AO-hf12 [05-03]: PTP — 2건 연속 또는 단발 -3.5% 시 청산
-                #   사용자 결정 [05-03]:
-                #     "2건 연속 발생하면 강제컷, 한건만 발생하면 신규 진입만 막기"
-                #     "3.5도 그냥 청산"
-                #   배경: hf11 1건 PTP → 다른 포지션 회복 가능했던 케이스 강제 청산 (-$12 추가 손실)
-                #   원리: MR 시스템 sym별 독립
-                #         단발 -2~-3.5% = sym 디커플링 (다른 sym은 회복 가능) → cooldown only
-                #         연속 -2% 2건 = 시장 위험 시그널 → 청산
-                #         단발 -3.5% = 깊은 손실 = 시장 위험 강한 시그널 → 청산
-                #   동작:
-                #     1건 close (ROI -2.0% ~ -3.5%): cooldown 2h (청산 X)
-                #     30분 내 2건째 발생: 청산 + cooldown
-                #     1건 close (ROI ≤ -3.5%): 청산 + cooldown (단발이라도)
-                try:
-                    from v9.config import (PTP_TRIGGER_MODE, PTP_DEFENSE_ROI_THRESH,
-                                            PTP_COOLDOWN_SEC)
-                    PTP_HARD_CUT_ROI = -3.5  # ★ 단발 청산 임계
-                    if (PTP_TRIGGER_MODE == "defense_close"
-                            and system_state is not None
-                            and intent is not None
-                            and _roi <= PTP_DEFENSE_ROI_THRESH):
-                        _intent_reason = str(getattr(intent, "reason", "") or "")
-                        _already_active = bool(system_state.get("_ptp_trigger_ts"))
-                        _cd_until_chk = float(system_state.get("_ptp_cooldown_until", 0.0) or 0.0)
-                        _in_cooldown = (_cd_until_chk > 0 and now < _cd_until_chk)
-                        
-                        if not _already_active and not _in_cooldown:
-                            # 최근 cut 추적 (30분 윈도우)
-                            _recent_cuts = list(system_state.get("_ptp_recent_cuts", []) or [])
-                            _CUT_WINDOW_SEC = 1800  # 30분
-                            _recent_cuts = [t for t in _recent_cuts if (now - t) < _CUT_WINDOW_SEC]
-                            _recent_cuts.append(now)
-                            system_state["_ptp_recent_cuts"] = _recent_cuts
-                            
-                            # cooldown은 무조건 활성
-                            system_state["_ptp_cooldown_until"] = now + PTP_COOLDOWN_SEC
-                            
-                            # 청산 발동 조건: 2건 연속 OR 단발 -3.5% 이하
-                            _hard_cut = (_roi <= PTP_HARD_CUT_ROI)
-                            _consecutive = (len(_recent_cuts) >= 2)
-                            
-                            if _hard_cut or _consecutive:
-                                # ★ 청산 발동
-                                system_state["_ptp_trigger_ts"] = now
-                                system_state["_ptp_last_step"] = -1
-                                system_state["_ptp_recent_cuts"] = []  # 리셋
-                                _trigger_reason = ("hard_cut_-3.5%" if _hard_cut 
-                                                   else "2cuts_in_30min")
-                                try:
-                                    from v9.logging.logger_csv import log_system
-                                    log_system("PTP_TRIGGER",
-                                               f"mode={_trigger_reason} trigger_sym={sym} "
-                                               f"reason={_intent_reason[:50]} "
-                                               f"roi={_roi:.2f}% cuts_30min={len(_recent_cuts)} → 청산+cooldown")
-                                    print(f"[PTP_TRIGGER] ★ {_trigger_reason} — 청산 발동: "
-                                          f"{sym} roi={_roi:.2f}% cuts={len(_recent_cuts)}")
-                                except Exception:
-                                    pass
-                            else:
-                                # ★ 1건 -2~-3.5% → cooldown only
-                                try:
-                                    from v9.logging.logger_csv import log_system
-                                    log_system("PTP_COOLDOWN_ONLY",
-                                               f"sym={sym} reason={_intent_reason[:50]} "
-                                               f"roi={_roi:.2f}% cooldown_2h "
-                                               f"(cuts={len(_recent_cuts)}, 청산 X)")
-                                    print(f"[PTP_COOLDOWN] {sym} 1건 cut: roi={_roi:.2f}% "
-                                          f"→ 2h 신규 진입 차단 (다른 포지션 회복 대기)")
-                                except Exception:
-                                    pass
-                except Exception as _ptp_hook_err:
-                    # 트리거 hook 실패 시 청산 로직에 영향 주면 안 됨 → silent skip
-                    pass
+                # ★ V10.31AO-hf14 [05-04]: PTP ROI 기반 트리거 제거
+                #   사용자 결정 [05-04]: BTC 1h 추세 기반 청산으로 대체 (runner.py 매 사이클)
+                #   이전 hf11 (ROI -2 청산) → AVAX 케이스 -$12 추가 손실
+                #   이전 hf12 (-3.5 단발 청산) → 05-04 -$22 추가 손실
+                #   이전 hf13 (TREND_FILTER + ROI) → close 시점에만 발동, 늦음
+                #   새 정책: 매 사이클 BTC 1h 체크, ±0.5% 도달 시 불리 방향 청산
+                #   → close 시점 PTP 트리거 X (tick 기반으로 이동)
+                pass  # PTP 트리거는 _tick_btc_trend_cut 함수에서 처리
             # ★ v10.6: CORE 포지션 청산 시 반대방향 HEDGE/CORE_HEDGE에 orphan 플래그 세팅
             # ★ V10.28b: 포지션 청산 전 trim 선주문 취소 큐
             if p and p.get("trim_preorders"):

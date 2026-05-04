@@ -222,18 +222,14 @@ def evaluate_intent(
         if now < cd_until:
             return _reject(RejectCode.REJECT_COOLDOWN, f"cooldown until {cd_until:.0f}")
 
-        # ★ V10.31AO-hf12 [05-03]: PTP cooldown OPEN 차단 재활성화
-        #   사용자 결정 [05-03]: "한건만 발생하면 신규 진입만 막기"
-        #   원리: ROI ≤ -2% close 발생 시 2h 신규 진입 차단
-        #         기존 포지션은 회복 기회 보존 (MR 독립성)
-        #   이전 [04-26] 제거 사유: PTP 직후 진입이 양호한 MR 자리였다는 관찰
-        #   재활성 [05-03]: 청산은 1건일 땐 X (cooldown만), 부작용 적음
-        #         단, 2건 연속 또는 -3.5% 단발 시 청산 + cooldown
-        if itype == IntentType.OPEN:
-            _ptp_cd = float((system_state or {}).get("_ptp_cooldown_until", 0.0) or 0.0)
-            if _ptp_cd > 0 and now < _ptp_cd:
-                return _reject(RejectCode.REJECT_COOLDOWN,
-                               f"ptp_cooldown {_ptp_cd - now:.0f}s")
+        # ★ V10.31AO-hf15 [05-04]: PTP cooldown 차단 비활성 (shadow_only 모드)
+        #   사용자 결정 [05-04]: PTP 실전 비활성, BTC 시계열 로깅만
+        #   사다리 5단으로 깊은 손실 차단, PTP cooldown 불필요
+        # if itype == IntentType.OPEN:
+        #     _ptp_cd = float((system_state or {}).get("_ptp_cooldown_until", 0.0) or 0.0)
+        #     if _ptp_cd > 0 and now < _ptp_cd:
+        #         return _reject(RejectCode.REJECT_COOLDOWN,
+        #                        f"ptp_cooldown {_ptp_cd - now:.0f}s")
 
         corr     = (snapshot.correlations or {}).get(sym, 1.0)
         # ★ V10.31AM: OPEN 체크는 3시간 corr 사용 (단기 decoupling 감지)

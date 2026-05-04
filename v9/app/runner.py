@@ -2650,6 +2650,122 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
+def _tick_btc_trend_cut(ex, system_state: dict, st: dict, snapshot):
+    """★ V10.31AO-hf15 [05-04]: BTC 시계열 + 보유 상태 매 1분 기록 (실전 청산 X).
+    
+    사용자 통찰 [05-04]:
+      "BTC 차트만 기록해두면 거기서 조건은 찾으면 되지 왜 조건을 미리 정하려고 해"
+      "PTP 비활성하고 로그로만 적용해봐"
+    
+    목적: 1~2주 BTC + 보유 데이터 누적 후 사후 분석으로 진짜 조건 탐색.
+      - 어느 시간 단위 (10m/30m/1h)가 진짜 신호?
+      - 어느 임계가 sweet spot?
+      - 같은 방향 비율 / 누적 변화 / 패턴 인식 비교
+      - 보유 vs cut 백테스트 가능
+    
+    실전 영향: 0 (로그만 기록, 실제 청산 X).
+    """
+    try:
+        if not system_state or not snapshot:
+            return
+        
+        now_ts = time.time()
+        
+        # 1분 throttle (스팸 방지)
+        _last_log = float(system_state.get("_btc_timeline_last_log", 0.0) or 0.0)
+        if now_ts - _last_log < 60:
+            return
+        system_state["_btc_timeline_last_log"] = now_ts
+        
+        # BTC 시계열 추출
+        btc_price = float(getattr(snapshot, "btc_price", 0.0) or 0.0)
+        btc_1h = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
+        btc_6h = float(getattr(snapshot, "btc_6h_change", 0.0) or 0.0)
+        btc_dev = float(getattr(snapshot, "dev_ma", 0.0) or 0.0)
+        
+        btc_5m_closes = []
+        btc_1m_closes = []
+        try:
+            _ohlcv = getattr(snapshot, "ohlcv_pool", {}) or {}
+            _btc_data = _ohlcv.get("BTC/USDT", {})
+            if isinstance(_btc_data, dict):
+                _5m = _btc_data.get("5m", []) or []
+                btc_5m_closes = [float(c[4]) for c in _5m[-36:] if len(c) >= 5]
+                _1m = _btc_data.get("1m", []) or []
+                btc_1m_closes = [float(c[4]) for c in _1m[-30:] if len(c) >= 5]
+        except Exception:
+            pass
+        
+        # 보유 포지션 통계
+        from v9.execution.position_book import iter_positions
+        from v9.config import LEVERAGE
+        holds_buy = 0
+        holds_sell = 0
+        roi_sum_buy = 0.0
+        roi_sum_sell = 0.0
+        
+        for sym, sym_st in st.items():
+            if not isinstance(sym_st, dict):
+                continue
+            for side, p in iter_positions(sym_st):
+                if not isinstance(p, dict):
+                    continue
+                role = p.get("role", "")
+                if role in ("BC", "CB", "INSURANCE_SH", "SOFT_HEDGE", "CORE_HEDGE"):
+                    continue
+                qty = float(p.get("amt", 0) or 0)
+                if qty <= 0:
+                    continue
+                ep = float(p.get("ep", 0) or 0)
+                if ep <= 0:
+                    continue
+                
+                mark = 0.0
+                try:
+                    _ticker = getattr(snapshot, "tickers", {}) or {}
+                    _t = _ticker.get(sym) or _ticker.get(sym.replace("/USDT", "/USDT:USDT"))
+                    if _t:
+                        mark = float(_t.get("last", 0) or _t.get("close", 0) or 0)
+                except Exception:
+                    pass
+                if mark <= 0:
+                    mark = ep
+                
+                if side == "buy":
+                    raw = (mark - ep) / ep
+                    holds_buy += 1
+                    roi_sum_buy += raw * LEVERAGE * 100
+                else:
+                    raw = (ep - mark) / ep
+                    holds_sell += 1
+                    roi_sum_sell += raw * LEVERAGE * 100
+        
+        avg_roi_buy = roi_sum_buy / holds_buy if holds_buy > 0 else 0
+        avg_roi_sell = roi_sum_sell / holds_sell if holds_sell > 0 else 0
+        
+        bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
+        
+        try:
+            from v9.logging.logger_csv import log_btc_timeline
+            log_btc_timeline(
+                btc_price=btc_price,
+                btc_1h_change=btc_1h,
+                btc_6h_change=btc_6h,
+                btc_dev_ma=btc_dev,
+                btc_5m_closes=btc_5m_closes,
+                btc_1m_closes=btc_1m_closes,
+                holds_buy=holds_buy,
+                holds_sell=holds_sell,
+                holds_avg_roi_buy=avg_roi_buy,
+                holds_avg_roi_sell=avg_roi_sell,
+                real_balance=bal,
+            )
+        except Exception as _le:
+            print(f"[BTC_TIMELINE] log 무시: {_le}")
+    except Exception as e:
+        print(f"[BTC_TIMELINE] 무시: {e}")
+
+
 def _tick_dca_sim(system_state: dict, st: dict, snapshot):
     """★ V10.31AM3: DCA 폭 변경 백테스트용 시계열 가격 로그 (관찰 전용).
     
@@ -3924,6 +4040,14 @@ async def _main_loop(ex_init, dry_run: bool):
             # ★ V10.31AM3: DCA_SIM — DCA 폭 변경 백테스트용 시계열 가격 로그
             # 60초 throttle, 실거래 영향 0. 사후 백테스트로 임의 DCA 파라미터 시뮬 가능
             _tick_dca_sim(system_state, st, snapshot)
+
+            # ★ V10.31AO-hf14 [05-04]: BTC 1h 추세 기반 불리 포지션 청산
+            #   사용자 통찰: "0.5로 하고 유리한 포지션은 두고 불리한 포지션만 청산"
+            #   매 틱 BTC 1h ±0.5% 도달 시 추세 반대 보유 청산 + 2h cooldown
+            try:
+                _tick_btc_trend_cut(ex, system_state, st, snapshot)
+            except Exception as _btce:
+                print(f"[BTC_TREND_CUT] tick 무시: {_btce}")
 
             # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
             try:

@@ -230,6 +230,16 @@ PTP_COOLDOWN_SEC          = 3600  # ★ V10.31AE: 발동 후 1시간 쿨다운 (
 #   결정: hf-9 비활성 (값 0). MR 시그널 진입 알파 보존, 손절은 T3 사다리(hf-4) + PTP(hf-5)에 위임
 #   1주 후 재검토: hf-10 BTC context 데이터로 정밀 cooldown 조건 결정 (예: 1h ≤ -1.5% 시만)
 PTP_ENTRY_COOLDOWN_SEC    = 7200  # ★ V10.31AM3 hotfix-20: hf-9 부활 (2h) — 04-29 시뮬 데이터 PTP3 차단 효과
+
+# ★ V10.31AO-hf14 [05-04]: BTC 추세 기반 불리 포지션 청산 (사용자 통찰)
+#   "0.5로 하고 유리한 포지션은 두고 불리한 포지션만 청산"
+#   매 틱 BTC 1h 변동률 ±0.5% 도달 시 추세 반대 방향 MR 보유 즉시 시장가 청산
+#   유리 방향 보유는 유지 (회복 가능)
+#   [실측] 5일 검증: LDO 케이스 +$24 절감, SUI 케이스 +$4.58 익절 보존
+# ★ V10.31AO-hf15 [05-04]: BTC 시계열 + 보유 상태 매 1분 기록 (실전 청산 X)
+# 사용자 통찰: "BTC 차트만 기록해두면 거기서 조건은 찾으면 되지"
+# 1~2주 데이터 누적 → 사후 분석으로 임계/단위/패턴 찾기
+# 실전 청산 X — 사다리 5단으로 깊은 손실 자동 차단
 # ★ V10.31AM: drop 0.5 → 0.6 상향 — 실측 4일 분석: 0.5%p는 평상시 자주 찍힘 + 방어 미작동
 #   (발동 2건 중 1건 false positive, 1건 하락 지속 중 limit 미체결 → taker 시장가 컷)
 # 근거: 4일 일내 max drop 1.53/2.13/2.94/0.23% — 0.5%는 noise 영역, 0.6부터 의미 있는 drop
@@ -298,7 +308,13 @@ PTP_PREMIUMS_BY_STEP      = {
 #   - "peak_drop" → "defense_close" : peak/drop 추적 데이터(_ptp_session_start, _ptp_peak_balance)
 #                                     는 보존되지만 트리거 판정에 사용 안 됨 (대시보드 표시용)
 #   - "defense_close" → "peak_drop" : 즉시 peak/drop 판정 활성화. peak 갱신 따라 자연 arming
-PTP_TRIGGER_MODE = "defense_close"  # "peak_drop" | "defense_close"
+PTP_TRIGGER_MODE = "shadow_only"  # ★ V10.31AO-hf15 [05-04]: PTP 실전 비활성, BTC 시계열 로깅만
+# 사용자 결정 [05-04]:
+#   "PTP 비활성하고 로그로만"
+#   "BTC 차트 기록해두면 거기서 조건은 찾으면 되지 왜 미리 정하려고 해"
+# 5일 [실측] PTP 효과 -$34 (음수). 사다리 5단으로 깊은 손실 차단 가능.
+# 1~2주 BTC 시계열 + 보유 데이터 누적 → 사후 분석으로 진짜 조건 탐색
+# 모드: "peak_drop" | "defense_close" | "shadow_only"
 
 # defense_close 모드 전용 파라미터
 PTP_DEFENSE_ROI_THRESH = -2.0  # ★ V10.31AO: -3.0 → -2.0 (T2 사다리에 정합, T2_DEF_HARD_SL close -3% 캐치)
