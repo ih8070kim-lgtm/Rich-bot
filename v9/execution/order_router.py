@@ -539,11 +539,13 @@ async def cancel_tp1_preorder(ex, p: dict, sym: str):
     """기존 TP1 선주문 취소 + 레지스트리 정리.
     
     ★ V10.31c: runner.py에서 이동. 주문 실행 책임을 order_router에 통합.
+    ★ V11 [05-04]: tp1_preorder_qty도 정리 (산 만큼 팔기)
     """
     oid = p.get("tp1_preorder_id")
     if not oid or oid == "DRY_PREORDER":
         p["tp1_preorder_id"] = None
         p["tp1_preorder_price"] = None
+        p["tp1_preorder_qty"] = None
         p["tp1_preorder_ts"] = None
         return
     try:
@@ -567,6 +569,7 @@ async def cancel_tp1_preorder(ex, p: dict, sym: str):
         pass
     p["tp1_preorder_id"] = None
     p["tp1_preorder_price"] = None
+    p["tp1_preorder_qty"] = None
     p["tp1_preorder_ts"] = None
 
 

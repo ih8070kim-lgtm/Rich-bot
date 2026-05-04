@@ -1128,8 +1128,19 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
 
             if existing_id and existing_price > 0:
                 _diff = abs(target_price - existing_price) / existing_price
-                if _diff < _TP1_PREORDER_REPRICE_PCT:
-                    continue  # 0.3% 미만 차이 → 유지
+                
+                # ★ V11 [05-04]: amt 변동 감지 → 강제 cancel + 재등록
+                #   사용자 통찰: "산 만큼 팔기" — 부분 fill 시 amt 증가에 맞춰 갱신
+                #   기존 TP1 limit qty와 현재 amt 다르면 reprice 강제
+                _existing_qty = float(p.get("tp1_preorder_qty", 0) or 0)
+                _amt_changed = (_existing_qty > 0 and abs(close_qty - _existing_qty) > _existing_qty * 0.01)
+                
+                if _diff < _TP1_PREORDER_REPRICE_PCT and not _amt_changed:
+                    continue  # 가격 차이 작고 amt도 동일 → 유지
+                
+                if _amt_changed:
+                    print(f"[TP1_AMT_CHANGE] {sym} qty {_existing_qty:.4f}→{close_qty:.4f} → cancel+재등록")
+                
                 await _cancel_tp1_preorder(ex, p, sym)
 
             # 선주문 배치
@@ -1181,6 +1192,7 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
                 oid = order.get('id')
                 p["tp1_preorder_id"] = oid
                 p["tp1_preorder_price"] = safe_price
+                p["tp1_preorder_qty"] = safe_qty  # ★ V11: amt 변동 감지용 (산 만큼 팔기)
                 p["tp1_preorder_ts"] = time.time()
                 # ★ PENDING_LIMITS + PENDING_ORDERS 등록
                 # → _manage_pending_limits가 체결 감지 + 텔레그램 "TP1_LIMIT" 알림
@@ -1826,6 +1838,47 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                               f"ep={_old_ep:.4f}→{_new_ep:.4f} dca={_old_dca}→{_new_dca}")
             except Exception:
                 pass
+            
+            # ★ V11 [05-04]: amt 증가 → 기존 TP1 limit cancel + Stop-SL 재등록 큐
+            #   사용자 통찰: "산 만큼 팔기" — 추가 fill에 맞춰 보호 갱신
+            #   동작:
+            #     1. 기존 TP1 limit cancel (다음 _manage_tp1_preorders가 새 amt로 재등록)
+            #     2. 기존 Stop-SL cancel queue (다음 _tick_register_stop_sl가 새 amt로 재등록)
+            #     3. _stop_sl_pending 새로 세팅
+            try:
+                # 기존 TP1 limit 취소 (재등록은 _manage_tp1_preorders가)
+                _stale_tp1 = existing.pop("tp1_preorder_id", None)
+                if _stale_tp1 and _stale_tp1 != "DRY_PREORDER":
+                    from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
+                    _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _stale_tp1})
+                    existing.pop("tp1_preorder_price", None)
+                    existing.pop("tp1_preorder_ts", None)
+                    print(f"[V11_AMT_GROW] {sym} {side} 기존 TP1 limit cancel: {_stale_tp1} "
+                          f"(amt {_old_amt:.4f}→{_new_amt:.4f})")
+                
+                # 기존 Stop-SL cancel queue 등록
+                _stale_sl = existing.pop("_stop_sl_oid", None)
+                if _stale_sl:
+                    _q = system_state.setdefault("_stop_sl_cancel_queue", []) if system_state else None
+                    if _q is not None:
+                        _q.append({"sym": sym, "oid": _stale_sl})
+                    existing.pop("_stop_sl_price", None)
+                    print(f"[V11_AMT_GROW] {sym} {side} 기존 Stop-SL cancel: {_stale_sl}")
+                
+                # 새 amt로 SL pending 재세팅
+                if existing.get("role") == "CORE_MR":
+                    from v9.config import HARD_SL_BY_TIER
+                    _v11_sl_pct_g = HARD_SL_BY_TIER.get(1, -0.8)
+                    existing["_stop_sl_pending"] = {
+                        "sl_pct": _v11_sl_pct_g,
+                        "ep": _new_ep,
+                        "amt": _new_amt,
+                        "side": side,
+                        "request_ts": now,
+                    }
+            except Exception as _v11_grow_e:
+                print(f"[V11_AMT_GROW] 무시: {_v11_grow_e}")
+            
             from v9.execution.position_book import set_pending_entry
             set_pending_entry(sym_st, side, None)
             return
@@ -1875,6 +1928,29 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         })
         print(f"[PENDING_FILL] {sym} {side} OPEN 반영 ep={avg_price:.4f} "
               f"qty={filled_qty} role={role} dca_targets={len(_dca_targets)}개")
+        
+        # ★ V11 [05-04]: limit OPEN fill 후 Stop-Market SL 등록 + 추가 fill 갱신
+        #   사용자 통찰 [05-04]: "산 만큼 팔기" — 부분 fill 시 amt 변경 추적
+        #   배경: 05-04 22:08 XRP 케이스 [실측]
+        #     - 첫 fill 76 qty → TP1 limit 76만 등록
+        #     - 추가 fill 750 qty → TP/SL 갱신 X → 잔량 미보호 ★
+        #   해결: amt 변경 시 _stop_sl_pending 새로 세팅
+        #     - runner._tick_register_stop_sl가 기존 SL cancel + 새 amt로 재등록
+        try:
+            if role == "CORE_MR":
+                from v9.config import HARD_SL_BY_TIER
+                _v11_sl_pct = HARD_SL_BY_TIER.get(1, -0.8)
+                _new_p_lim = get_p(sym_st, side)
+                if isinstance(_new_p_lim, dict):
+                    _new_p_lim["_stop_sl_pending"] = {
+                        "sl_pct": _v11_sl_pct,
+                        "ep": avg_price,
+                        "amt": filled_qty,
+                        "side": side,
+                        "request_ts": now,
+                    }
+        except Exception as _v11_e:
+            print(f"[V11_SL_FLAG_LIMIT] 무시: {_v11_e}")
 
         from v9.execution.position_book import set_pending_entry
         set_pending_entry(sym_st, side, None)
@@ -2726,6 +2802,40 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                     p.pop("_stop_sl_pending", None)
                     continue
                 
+                # ── 1b. ★ V11 [05-04]: amt 변동 감지 → cancel + 재등록 큐 ──
+                #   사용자 통찰: "산 만큼 팔기"
+                #   부분 fill 시 amt 증가 → 기존 SL 주문 qty 부족 → 잔량 미보호
+                #   해결: amt와 등록 시점 amt 차이 1% 이상이면 재등록
+                if existing_sl_oid and amt > 0:
+                    _registered_amt = float(p.get("_stop_sl_amt", 0) or 0)
+                    if _registered_amt > 0 and abs(amt - _registered_amt) > _registered_amt * 0.01:
+                        try:
+                            ex.cancel_order(existing_sl_oid, sym)
+                            print(f"[STOP_SL_AMT_CHANGE] {sym} {side} qty {_registered_amt:.4f}→{amt:.4f} "
+                                  f"기존 SL cancel: {existing_sl_oid}")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("STOP_SL_AMT_CHANGE",
+                                           f"{sym} {side} qty {_registered_amt:.4f}→{amt:.4f}")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        # pending 재세팅
+                        from v9.config import HARD_SL_BY_TIER
+                        _v11_sl = HARD_SL_BY_TIER.get(1, -0.8)
+                        p["_stop_sl_pending"] = {
+                            "sl_pct": _v11_sl,
+                            "ep": ep,
+                            "amt": amt,
+                            "side": side,
+                            "request_ts": now_ts,
+                        }
+                        p.pop("_stop_sl_oid", None)
+                        p.pop("_stop_sl_price", None)
+                        p.pop("_stop_sl_amt", None)
+                        existing_sl_oid = None  # 다음 단계에서 새로 등록
+                
                 # ── 2. SL 주문 등록 (pending → registered) ──
                 if pending and not existing_sl_oid and amt > 0 and ep > 0:
                     # 재시도 제한 (3회 실패 시 포기)
@@ -2792,6 +2902,7 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                         new_oid = order.get("id") or order.get("orderId")
                         p["_stop_sl_oid"] = new_oid
                         p["_stop_sl_price"] = stop_price
+                        p["_stop_sl_amt"] = amt  # ★ V11: amt 변동 감지용 (산 만큼 팔기)
                         p["_stop_sl_pending"] = None
                         print(f"[STOP_SL_REGISTER] {sym} {side} ep={ep:.6f} stop={stop_price:.6f} "
                               f"sl_pct={sl_pct}% amt={amt} oid={new_oid}")

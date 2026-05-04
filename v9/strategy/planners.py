@@ -1542,14 +1542,20 @@ def plan_tp1(snapshot: MarketSnapshot, st: Dict,
 
         # ★ V10.31b: 레짐별 exit 분기
         _regime = _btc_vol_regime(snapshot)
-        if _regime != "HIGH":
-            # LOW/NORMAL: _manage_tp1_preorders가 처리 → trail 정리 + skip
-            if p.get("trim_trail_active"):
-                p["trim_trail_active"] = False
-                p["trim_trail_max"] = 0.0
-            continue
-
-        # ── HIGH: trail 모드 ──
+        # ★ V11 [05-04]: 레짐 무관 TP1 limit 단일 모드 (사용자 결정)
+        #   사용자 통찰 [05-04]: "트레일 없이 TP만 진행 레짐 상관없이"
+        #   배경: 이전 V10에서는 HIGH 레짐 시 trail 모드 (max-gap 0.3% 추적)
+        #         → +1.5% 도달 후 +1.8% 갔다가 +1.5% 떨어지면 +1.5% 청산
+        #         → 그러나 가속 변동 시 +1.5% 도달 후 즉시 +1.2% 청산도 가능
+        #         → 손익비 변동, 단순함 깨짐, V11 의도 위배
+        #   V11: 모든 레짐에서 limit preorder 사용 (정확 +1.5% 체결)
+        #   _manage_tp1_preorders가 처리, trail 코드 비활성
+        if p.get("trim_trail_active"):
+            p["trim_trail_active"] = False
+            p["trim_trail_max"] = 0.0
+        continue
+        
+        # ── 이하 HIGH 레짐 trail 코드 (V11에서 비활성, 보존) ──
         # 이전 LOW/NORMAL에서 남은 선주문 정리
         _stale_pre = p.pop("tp1_preorder_id", None)
         if _stale_pre and _stale_pre != "DRY_PREORDER":
