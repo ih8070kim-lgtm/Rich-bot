@@ -2650,6 +2650,166 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
+def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
+    """★ V11 [05-04]: Stop-Market SL 등록 + 관리.
+    
+    사용자 결정 [05-04]:
+      slippage 실측 -0.51% (V10 FORCE_CLOSE 케이스)
+      → Stop-Market 도입으로 -0.05~-0.15% [추정] 개선
+      → 월 +$1,200 [추정]
+    
+    동작:
+      1. 진입 후 _stop_sl_pending 플래그 있으면 Stop-Market 주문 등록
+      2. 주문 ID를 p["_stop_sl_oid"]에 저장
+      3. 청산 시 (CLOSE/FORCE_CLOSE) cancel queue 처리
+      4. 좀비 주문 가드 (포지션 amt=0인데 stop_sl_oid 있으면 cancel)
+    """
+    try:
+        if not system_state or not snapshot:
+            return
+        
+        # ── 0. CLOSE 발동된 SL 주문 취소 큐 처리 ──
+        _cancel_queue = system_state.get("_stop_sl_cancel_queue", [])
+        if _cancel_queue:
+            remaining = []
+            for entry in _cancel_queue:
+                _sym = entry.get("sym", "")
+                _oid = entry.get("oid", "")
+                if not _sym or not _oid:
+                    continue
+                try:
+                    ex.cancel_order(_oid, _sym)
+                    print(f"[STOP_SL_CLOSE_CANCEL] {_sym} oid={_oid} 청산으로 SL 취소")
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("STOP_SL_CLOSE_CANCEL", f"{_sym} oid={_oid}")
+                    except Exception:
+                        pass
+                except Exception as _ce:
+                    # 이미 cancel/체결됐을 수 있음 (정상)
+                    pass
+            system_state["_stop_sl_cancel_queue"] = remaining
+        
+        from v9.config import LEVERAGE
+        from v9.execution.position_book import iter_positions
+        
+        for sym, sym_st in st.items():
+            if not isinstance(sym_st, dict):
+                continue
+            for side, p in iter_positions(sym_st):
+                if not isinstance(p, dict):
+                    continue
+                
+                role = p.get("role", "")
+                if role != "CORE_MR":
+                    continue
+                
+                amt = float(p.get("amt", 0) or 0)
+                ep = float(p.get("ep", 0) or 0)
+                existing_sl_oid = p.get("_stop_sl_oid")
+                pending = p.get("_stop_sl_pending")
+                
+                # ── 1. 좀비 가드: amt=0인데 stop_sl_oid 있으면 cancel ──
+                if amt <= 0 and existing_sl_oid:
+                    try:
+                        ex.cancel_order(existing_sl_oid, sym)
+                        print(f"[STOP_SL_CANCEL] {sym} {side} amt=0 → SL 주문 {existing_sl_oid} 취소")
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("STOP_SL_CANCEL_ZOMBIE", f"{sym} {side} oid={existing_sl_oid}")
+                        except Exception:
+                            pass
+                    except Exception as _ce:
+                        # 이미 cancel/체결됐을 수 있음
+                        pass
+                    p.pop("_stop_sl_oid", None)
+                    p.pop("_stop_sl_pending", None)
+                    continue
+                
+                # ── 2. SL 주문 등록 (pending → registered) ──
+                if pending and not existing_sl_oid and amt > 0 and ep > 0:
+                    # 재시도 제한 (3회 실패 시 포기)
+                    _retry_count = pending.get("_retry_count", 0)
+                    if _retry_count >= 3:
+                        print(f"[STOP_SL_REGISTER] {sym} {side} 3회 실패 → 포기, fallback: ROI 매 틱 체크")
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("STOP_SL_REGISTER_ABORT", f"{sym} {side} 3회 실패")
+                        except Exception:
+                            pass
+                        p.pop("_stop_sl_pending", None)
+                        continue
+                    
+                    sl_pct = float(pending.get("sl_pct", -0.8))
+                    
+                    # ★ 봇 재시작 시 좀비 가드: 같은 sym/side 기존 STOP_MARKET reduceOnly 주문 모두 cancel
+                    # (다른 instance에서 등록한 주문 정리)
+                    try:
+                        _open_orders = ex.fetch_open_orders(sym)
+                        for _oo in _open_orders:
+                            _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "")).upper()
+                            _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                            _oo_side = (_oo.get("side") or "").lower()
+                            _expected_close_side = "sell" if side == "buy" else "buy"
+                            if "STOP" in _oo_type and _oo_reduce and _oo_side == _expected_close_side:
+                                _oo_id = _oo.get("id")
+                                try:
+                                    ex.cancel_order(_oo_id, sym)
+                                    print(f"[STOP_SL_PRE_CANCEL] {sym} {side} 기존 좀비 STOP 취소: {_oo_id}")
+                                    try:
+                                        from v9.logging.logger_csv import log_system
+                                        log_system("STOP_SL_PRE_CANCEL", f"{sym} oid={_oo_id} (재시작 좀비)")
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass  # fetch_open_orders 실패 시 그냥 진행 (rate limit 등)
+                    
+                    # SL 트리거 가격 계산 (lev 적용)
+                    raw_pct = sl_pct / LEVERAGE / 100
+                    
+                    if side == "buy":
+                        stop_price = ep * (1 + raw_pct)
+                    else:
+                        stop_price = ep * (1 - raw_pct)
+                    
+                    stop_price = round(stop_price, 6)
+                    
+                    close_side = "sell" if side == "buy" else "buy"
+                    ps = "LONG" if side == "buy" else "SHORT"
+                    
+                    try:
+                        order = ex.create_order(
+                            sym, "STOP_MARKET", close_side, amt, None,
+                            params={
+                                "positionSide": ps,
+                                "reduceOnly": True,
+                                "stopPrice": stop_price,
+                                "workingType": "MARK_PRICE",
+                            }
+                        )
+                        new_oid = order.get("id") or order.get("orderId")
+                        p["_stop_sl_oid"] = new_oid
+                        p["_stop_sl_price"] = stop_price
+                        p["_stop_sl_pending"] = None
+                        print(f"[STOP_SL_REGISTER] {sym} {side} ep={ep:.6f} stop={stop_price:.6f} "
+                              f"sl_pct={sl_pct}% amt={amt} oid={new_oid}")
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("STOP_SL_REGISTER",
+                                       f"{sym} {side} ep={ep:.6f} stop={stop_price:.6f} "
+                                       f"sl_pct={sl_pct}% oid={new_oid}")
+                        except Exception:
+                            pass
+                    except Exception as _se:
+                        # 재시도 카운트 증가
+                        pending["_retry_count"] = _retry_count + 1
+                        print(f"[STOP_SL_REGISTER] {sym} {side} 실패 ({_retry_count + 1}/3): {_se}")
+    except Exception as e:
+        print(f"[STOP_SL_TICK] 무시: {e}")
+
+
 def _tick_shadow_companion_hedge(system_state: dict, st: dict, snapshot):
     """★ V11 [05-04]: COMPANION/HEDGE SHADOW 시뮬 (실전 영향 X).
     
@@ -4248,6 +4408,13 @@ async def _main_loop(ex_init, dry_run: bool):
             # 60초 throttle, 실거래 영향 0. 사후 백테스트로 임의 DCA 파라미터 시뮬 가능
             _tick_dca_sim(system_state, st, snapshot)
 
+            # ★ V11 [05-04]: Stop-Market SL 등록/관리 (slippage 개선)
+            #   사용자 결정: 실측 slippage -0.51% → Stop-Market으로 -0.05~-0.15%
+            try:
+                _tick_register_stop_sl(ex, system_state, st, snapshot)
+            except Exception as _sse:
+                print(f"[STOP_SL_TICK] 무시: {_sse}")
+            
             # ★ V10.31AO-hf14 [05-04]: BTC 1h 추세 기반 불리 포지션 청산
             #   사용자 통찰: "0.5로 하고 유리한 포지션은 두고 불리한 포지션만 청산"
             #   매 틱 BTC 1h ±0.5% 도달 시 추세 반대 보유 청산 + 2h cooldown

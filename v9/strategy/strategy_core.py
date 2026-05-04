@@ -297,6 +297,23 @@ def apply_order_results(
                 "insurance_timecut": meta.get("insurance_timecut", 0),
             })
             _log_pos(result.trace_id, sym, get_p(sym_st, intent.side), snapshot)
+            # ★ V11 [05-04]: Stop-Market SL 등록 플래그 (runner._tick_register_stop_sl 처리)
+            #   사용자 결정 [05-04]: slippage 실측 -0.51% → Stop-Market 도입
+            #   진입 직후 SL 주문 등록 필요 → flag 세팅, runner가 다음 틱에 등록
+            try:
+                from v9.config import HARD_SL_BY_TIER
+                _v11_sl_pct = HARD_SL_BY_TIER.get(1, -0.8)
+                _new_p = get_p(sym_st, intent.side)
+                if isinstance(_new_p, dict) and _new_p.get("role") == "CORE_MR":
+                    _new_p["_stop_sl_pending"] = {
+                        "sl_pct": _v11_sl_pct,
+                        "ep": _new_p.get("ep", 0.0),
+                        "amt": _new_p.get("amt", 0.0),
+                        "side": intent.side,
+                        "request_ts": now,
+                    }
+            except Exception as _sse:
+                print(f"[V11_SL_FLAG] 무시: {_sse}")
             # ★ V10.29: 새 진입 → 같은 방향 min_slot_hold 해제 (교체 완료)
             for _ms_sym, _ms_ss in st.items():
                 if not isinstance(_ms_ss, dict) or _ms_sym == sym:
@@ -628,6 +645,21 @@ def apply_order_results(
         # ── TRAIL_ON / FORCE_CLOSE / CLOSE ──────────────────────
         elif itype in (IntentType.TRAIL_ON, IntentType.FORCE_CLOSE, IntentType.CLOSE):
 
+            # ★ V11 [05-04]: Stop-Market SL 주문 취소 큐 등록
+            #   청산 발동 시 기존 stop SL 주문 취소 (좀비 방지)
+            #   직접 ex.cancel 호출 X (sync 함수 + 외부 호출 분리), 큐에 등록 → runner가 처리
+            try:
+                if isinstance(p, dict):
+                    _stop_oid = p.get("_stop_sl_oid")
+                    if _stop_oid:
+                        _queue = system_state.setdefault("_stop_sl_cancel_queue", [])
+                        _queue.append({"sym": sym, "oid": _stop_oid})
+                        p.pop("_stop_sl_oid", None)
+                        p.pop("_stop_sl_price", None)
+                        p.pop("_stop_sl_pending", None)
+            except Exception as _ssc:
+                print(f"[STOP_SL_CANCEL_QUEUE] 무시: {_ssc}")
+            
             # ★ [BUG-SH3] role 교차검증 — 잘못된 side로 소스 삭제 방지
             # intent.metadata에 기대하는 role이 있으면, 실제 포지션 role과 비교
             _expected_role = meta.get("_expected_role")  # plan_trail_on에서 설정
