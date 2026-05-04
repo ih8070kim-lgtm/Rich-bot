@@ -2650,6 +2650,213 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 # ═════════════════════════════════════════════════════════════════
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
+def _tick_shadow_companion_hedge(system_state: dict, st: dict, snapshot):
+    """★ V11 [05-04]: COMPANION/HEDGE SHADOW 시뮬 (실전 영향 X).
+    
+    사용자 통찰 [05-04]:
+      "WR 45%라도 손익비 좋으면 이득 아냐?"
+      "둘 중 하나는 이득 볼 확률이 커지잖아"
+    
+    SHADOW 시뮬 (실제 진입 X, 가상 추적만):
+      - COMPANION: MR 진입 시 반대 방향 강세 sym 가상 진입
+      - HEDGE: MR 진입 시 같은 sym 반대 방향 가상 진입
+    
+    각 가상 포지션:
+      사이즈: 50% ($600) — V11 사이즈의 절반
+      SL: -0.8% / TP: +1.5% (V11과 동일)
+      추적: 매 틱 가격 비교 → SL/TP 도달 시 가상 청산
+      로깅: log_shadow_companion / log_shadow_hedge
+    
+    1주 데이터 후 분석:
+      V11 단독 PnL vs V11 + COMPANION vs V11 + HEDGE
+      어느 게 진짜 우위 있는지 [실측] 검증
+    """
+    try:
+        if not system_state or not snapshot:
+            return
+        
+        now_ts = time.time()
+        
+        # 1분 throttle
+        _last = float(system_state.get("_shadow_companion_last", 0.0) or 0.0)
+        if now_ts - _last < 60:
+            return
+        system_state["_shadow_companion_last"] = now_ts
+        
+        # 가상 포지션 추적 dict
+        if "_shadow_companion_positions" not in system_state:
+            system_state["_shadow_companion_positions"] = {}
+        if "_shadow_hedge_positions" not in system_state:
+            system_state["_shadow_hedge_positions"] = {}
+        
+        SHADOW_NOTIONAL = 600.0  # V11 절반 사이즈
+        SHADOW_SL = -0.8
+        SHADOW_TP = 1.5
+        
+        from v9.config import LEVERAGE
+        from v9.execution.position_book import iter_positions
+        
+        # ── 1. 새 MR 진입 감지 → SHADOW 가상 진입 등록 ─────────────
+        # 각 sym의 현재 활성 MR 포지션 확인
+        active_mr_positions = []  # (sym, side, ep, entry_time)
+        for sym, sym_st in st.items():
+            if not isinstance(sym_st, dict):
+                continue
+            for side, p in iter_positions(sym_st):
+                if not isinstance(p, dict):
+                    continue
+                role = p.get("role", "")
+                if role != "CORE_MR":
+                    continue
+                qty = float(p.get("amt", 0) or 0)
+                if qty <= 0:
+                    continue
+                ep = float(p.get("ep", 0) or 0)
+                if ep <= 0:
+                    continue
+                # 진입 시각 (포지션 dict에 저장된 값)
+                _entry_t = float(p.get("entry_time", 0) or p.get("ts_open", 0) or 0)
+                if _entry_t <= 0:
+                    continue
+                active_mr_positions.append((sym, side, ep, _entry_t))
+        
+        # 새 진입: shadow 등록되지 않은 활성 MR 찾기
+        # key = sym|side|entry_time (재진입 구분)
+        for sym, side, ep, entry_t in active_mr_positions:
+            shadow_key = f"{sym}|{side}|{int(entry_t)}"
+            
+            # COMPANION: 이미 등록됐는지 확인
+            if shadow_key not in system_state["_shadow_companion_positions"]:
+                # 강세 sym 선정 (BTC 추세 따른 방향)
+                # 단순화: 사용자 sym universe 중 BTC 변동률 따라 강세 sym 선정
+                # 정밀하게 하려면 universe 데이터 필요 — SHADOW이라 간단 가정
+                btc_1h = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
+                comp_side = "buy" if btc_1h > 0 else "sell"  # 추세 따른 방향
+                # COMPANION은 추세 따라가는 sym: 단순화로 BTC 자체 사용
+                comp_sym = "BTC/USDT"
+                # BTC 가격
+                btc_price = float(getattr(snapshot, "btc_price", 0.0) or 0.0)
+                if btc_price > 0 and abs(btc_1h) >= 0.001:  # 약한 추세도 OK
+                    system_state["_shadow_companion_positions"][shadow_key] = {
+                        "trigger_sym": sym,
+                        "trigger_side": side,
+                        "trigger_ep": ep,
+                        "comp_sym": comp_sym,
+                        "comp_side": comp_side,
+                        "comp_ep": btc_price,
+                        "entry_time": now_ts,
+                        "notional": SHADOW_NOTIONAL,
+                    }
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("SHADOW_COMP_OPEN",
+                                   f"trigger={sym}/{side}@{ep:.4f} "
+                                   f"comp={comp_sym}/{comp_side}@{btc_price:.2f} "
+                                   f"btc_1h={btc_1h*100:+.2f}% size=${SHADOW_NOTIONAL}")
+                    except Exception:
+                        pass
+            
+            # HEDGE: 같은 sym 반대 방향
+            if shadow_key not in system_state["_shadow_hedge_positions"]:
+                hedge_side = "sell" if side == "buy" else "buy"
+                # 같은 sym 현재 가격 (entry ep와 거의 같음, 시장가 가정)
+                _ticker = getattr(snapshot, "tickers", {}) or {}
+                _t = _ticker.get(sym) or _ticker.get(sym.replace("/USDT", "/USDT:USDT"))
+                hedge_ep = ep  # MR 진입가와 거의 동시 진입 가정
+                if _t:
+                    _last_px = float(_t.get("last", 0) or _t.get("close", 0) or 0)
+                    if _last_px > 0:
+                        hedge_ep = _last_px
+                
+                system_state["_shadow_hedge_positions"][shadow_key] = {
+                    "trigger_sym": sym,
+                    "trigger_side": side,
+                    "trigger_ep": ep,
+                    "hedge_sym": sym,
+                    "hedge_side": hedge_side,
+                    "hedge_ep": hedge_ep,
+                    "entry_time": now_ts,
+                    "notional": SHADOW_NOTIONAL,
+                }
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("SHADOW_HEDGE_OPEN",
+                               f"trigger={sym}/{side}@{ep:.4f} "
+                               f"hedge={sym}/{hedge_side}@{hedge_ep:.4f} size=${SHADOW_NOTIONAL}")
+                except Exception:
+                    pass
+        
+        # ── 2. SHADOW 포지션 SL/TP 도달 검사 ──────────────────────
+        for shadow_dict_key in ["_shadow_companion_positions", "_shadow_hedge_positions"]:
+            shadow_dict = system_state.get(shadow_dict_key, {})
+            keys_to_remove = []
+            
+            for sk, sp in list(shadow_dict.items()):
+                target_sym = sp.get("comp_sym") if "comp_sym" in sp else sp.get("hedge_sym")
+                target_side = sp.get("comp_side") if "comp_side" in sp else sp.get("hedge_side")
+                target_ep = sp.get("comp_ep") if "comp_ep" in sp else sp.get("hedge_ep")
+                
+                if not target_sym or target_ep <= 0:
+                    keys_to_remove.append(sk)
+                    continue
+                
+                # 현재가
+                cur_px = 0.0
+                try:
+                    if target_sym == "BTC/USDT":
+                        cur_px = float(getattr(snapshot, "btc_price", 0.0) or 0.0)
+                    else:
+                        _ticker = getattr(snapshot, "tickers", {}) or {}
+                        _t = _ticker.get(target_sym) or _ticker.get(target_sym.replace("/USDT", "/USDT:USDT"))
+                        if _t:
+                            cur_px = float(_t.get("last", 0) or _t.get("close", 0) or 0)
+                except Exception:
+                    pass
+                
+                if cur_px <= 0:
+                    continue
+                
+                # ROI 계산 (lev 적용)
+                if target_side == "buy":
+                    raw_pct = (cur_px - target_ep) / target_ep
+                else:
+                    raw_pct = (target_ep - cur_px) / target_ep
+                roi = raw_pct * LEVERAGE * 100
+                
+                # SL/TP 검사
+                pnl = 0.0
+                close_reason = None
+                if roi <= SHADOW_SL:
+                    pnl = SHADOW_SL / 100 * sp["notional"]
+                    close_reason = "SL"
+                elif roi >= SHADOW_TP:
+                    pnl = SHADOW_TP / 100 * sp["notional"]
+                    close_reason = "TP"
+                
+                # 시간 만료 (24h 후 강제 청산)
+                if close_reason is None and (now_ts - sp["entry_time"]) >= 86400:
+                    pnl = roi / 100 * sp["notional"]
+                    close_reason = "TIMEOUT_24H"
+                
+                if close_reason:
+                    duration = now_ts - sp["entry_time"]
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        tag = "SHADOW_COMP_CLOSE" if shadow_dict_key == "_shadow_companion_positions" else "SHADOW_HEDGE_CLOSE"
+                        log_system(tag,
+                                   f"trigger={sp['trigger_sym']}/{sp['trigger_side']} "
+                                   f"target={target_sym}/{target_side}@{target_ep:.4f}->{cur_px:.4f} "
+                                   f"roi={roi:+.2f}% pnl=${pnl:+.2f} reason={close_reason} dur={int(duration)}s")
+                    except Exception:
+                        pass
+                    keys_to_remove.append(sk)
+            
+            for k in keys_to_remove:
+                shadow_dict.pop(k, None)
+    except Exception as e:
+        print(f"[SHADOW_COMP_HEDGE] 무시: {e}")
+
+
 def _tick_btc_trend_cut(ex, system_state: dict, st: dict, snapshot):
     """★ V10.31AO-hf15 [05-04]: BTC 시계열 + 보유 상태 매 1분 기록 (실전 청산 X).
     
@@ -4048,6 +4255,14 @@ async def _main_loop(ex_init, dry_run: bool):
                 _tick_btc_trend_cut(ex, system_state, st, snapshot)
             except Exception as _btce:
                 print(f"[BTC_TREND_CUT] tick 무시: {_btce}")
+            
+            # ★ V11 [05-04]: COMPANION/HEDGE SHADOW 시뮬 (실전 영향 X)
+            #   사용자 통찰: "WR 45%라도 손익비 좋으면 이득 아냐?"
+            #   1주 데이터 후 V11 단독 vs V11+COMP vs V11+HEDGE 비교
+            try:
+                _tick_shadow_companion_hedge(system_state, st, snapshot)
+            except Exception as _she:
+                print(f"[SHADOW_COMP_HEDGE] tick 무시: {_she}")
 
             # ★ V10.28b: Trim 선주문 취소 (포지션 청산 시)
             try:
