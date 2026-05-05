@@ -2889,34 +2889,66 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                     close_side = "sell" if side == "buy" else "buy"
                     ps = "LONG" if side == "buy" else "SHORT"
                     
+                    # ★ V11 hf1 [05-05]: Stop-Market 등록 ccxt 표준 형식 + 정밀도 + HEDGE_MODE 호환
+                    #   이전 버그: type='STOP_MARKET' 직접 전달 → ccxt 거부 → 모든 등록 실패
+                    #   추가 버그: HEDGE_MODE에서 reduceOnly 사용 → Binance 거부 (-2022 또는 -1106)
+                    #   해결:
+                    #     1. type='market' + params에 stopPrice/type 명시
+                    #     2. HEDGE_MODE면 reduceOnly 제거 (positionSide가 reduce 역할)
+                    #     3. price_to_precision 거쳐 정밀도 맞춤
                     try:
+                        from v9.config import HEDGE_MODE
+                        # 가격 정밀도
+                        try:
+                            stop_price_safe = float(ex.price_to_precision(sym, stop_price))
+                        except Exception:
+                            stop_price_safe = stop_price
+                        # 수량 정밀도
+                        try:
+                            amt_safe = float(ex.amount_to_precision(sym, amt))
+                        except Exception:
+                            amt_safe = amt
+                        
+                        # ccxt 표준: type='market' + params={'stopPrice': X, 'type': 'STOP_MARKET'}
+                        _params = {
+                            "positionSide": ps,
+                            "stopPrice": stop_price_safe,
+                            "type": "STOP_MARKET",
+                            "workingType": "MARK_PRICE",
+                        }
+                        if not HEDGE_MODE:
+                            # one-way 모드에서만 reduceOnly 사용
+                            _params["reduceOnly"] = True
+                        
                         order = ex.create_order(
-                            sym, "STOP_MARKET", close_side, amt, None,
-                            params={
-                                "positionSide": ps,
-                                "reduceOnly": True,
-                                "stopPrice": stop_price,
-                                "workingType": "MARK_PRICE",
-                            }
+                            sym, "market", close_side, amt_safe, None,
+                            params=_params
                         )
                         new_oid = order.get("id") or order.get("orderId")
                         p["_stop_sl_oid"] = new_oid
-                        p["_stop_sl_price"] = stop_price
-                        p["_stop_sl_amt"] = amt  # ★ V11: amt 변동 감지용 (산 만큼 팔기)
+                        p["_stop_sl_price"] = stop_price_safe
+                        p["_stop_sl_amt"] = amt_safe
                         p["_stop_sl_pending"] = None
-                        print(f"[STOP_SL_REGISTER] {sym} {side} ep={ep:.6f} stop={stop_price:.6f} "
-                              f"sl_pct={sl_pct}% amt={amt} oid={new_oid}")
+                        print(f"[STOP_SL_REGISTER] {sym} {side} ep={ep:.6f} stop={stop_price_safe:.6f} "
+                              f"sl_pct={sl_pct}% amt={amt_safe} oid={new_oid}")
                         try:
                             from v9.logging.logger_csv import log_system
                             log_system("STOP_SL_REGISTER",
-                                       f"{sym} {side} ep={ep:.6f} stop={stop_price:.6f} "
-                                       f"sl_pct={sl_pct}% oid={new_oid}")
+                                       f"{sym} {side} ep={ep:.6f} stop={stop_price_safe:.6f} "
+                                       f"sl_pct={sl_pct}% amt={amt_safe} oid={new_oid}")
                         except Exception:
                             pass
                     except Exception as _se:
-                        # 재시도 카운트 증가
+                        # ★ 에러 메시지 log_system에 남김 (콘솔만이면 사후 분석 X)
                         pending["_retry_count"] = _retry_count + 1
-                        print(f"[STOP_SL_REGISTER] {sym} {side} 실패 ({_retry_count + 1}/3): {_se}")
+                        _err_msg = str(_se)[:200]
+                        print(f"[STOP_SL_REGISTER] {sym} {side} 실패 ({_retry_count + 1}/3): {_err_msg}")
+                        try:
+                            from v9.logging.logger_csv import log_system
+                            log_system("STOP_SL_REGISTER_FAIL",
+                                       f"{sym} {side} retry={_retry_count + 1}/3 err={_err_msg}")
+                        except Exception:
+                            pass
     except Exception as e:
         print(f"[STOP_SL_TICK] 무시: {e}")
 
@@ -2986,7 +3018,8 @@ def _tick_shadow_companion_hedge(system_state: dict, st: dict, snapshot):
                 if ep <= 0:
                     continue
                 # 진입 시각 (포지션 dict에 저장된 값)
-                _entry_t = float(p.get("entry_time", 0) or p.get("ts_open", 0) or 0)
+                # ★ V11 hf2 [05-05]: 필드명 fix (time이 표준, entry_time/ts_open은 SHADOW 자체 필드)
+                _entry_t = float(p.get("time", 0) or p.get("entry_time", 0) or p.get("ts_open", 0) or 0)
                 if _entry_t <= 0:
                     continue
                 active_mr_positions.append((sym, side, ep, _entry_t))
