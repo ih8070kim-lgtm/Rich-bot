@@ -2769,6 +2769,7 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
         _last_zombie_scan = float(system_state.get("_last_stop_sl_zombie_scan", 0) or 0)
         if _now_t - _last_zombie_scan >= 60:  # 1분
             system_state["_last_stop_sl_zombie_scan"] = _now_t
+            print(f"[STOP_SL_ZOMBIE_TICK] ★ V11 hf4 좀비 scan 시작 (1분 주기)")
             
             # 봇이 인식하는 활성 sym 목록
             _active_syms = set()
@@ -2787,8 +2788,13 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                     # 포지션 X but 봇이 추적하는 sym = 잠재 좀비
                     _zombie_check_syms.add(_sym_chk)
             
+            print(f"[STOP_SL_ZOMBIE_TICK] 활성 sym {len(_active_syms)}개, 좀비 후보 sym {len(_zombie_check_syms)}개")
+            
             # 잠재 좀비 sym에 대해 per-symbol fetch
+            _scanned = 0
+            _cancelled = 0
             for _z_sym in list(_zombie_check_syms)[:10]:  # rate limit 회피, 10개씩
+                _scanned += 1
                 try:
                     _open = ex.fetch_open_orders(_z_sym)
                     for _oo in _open:
@@ -2799,6 +2805,7 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                         _oo_id = _oo.get("id")
                         try:
                             ex.cancel_order(_oo_id, _z_sym)
+                            _cancelled += 1
                             print(f"[STOP_SL_CANCEL_ZOMBIE_SCAN] {_z_sym} 포지션 X → SL 취소: {_oo_id}")
                             try:
                                 from v9.logging.logger_csv import log_system
@@ -2806,10 +2813,58 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                                            f"{_z_sym} oid={_oo_id} (포지션 없음, 좀비)")
                             except Exception:
                                 pass
+                        except Exception as _ce:
+                            print(f"[STOP_SL_ZOMBIE_TICK] {_z_sym} cancel 실패: {_ce}")
+                except Exception as _fe:
+                    print(f"[STOP_SL_ZOMBIE_TICK] {_z_sym} fetch 실패: {_fe}")
+            
+            if _scanned > 0:
+                print(f"[STOP_SL_ZOMBIE_TICK] scan 완료: {_scanned}개 체크, {_cancelled}개 cancel")
+        
+        # ── 0b. ★ V11 hf4 [05-05]: 매 5분 fetch_open_orders 전체 (봇 추적 외 sym 잡기) ──
+        #   봇 재시작 시 LINK/ETH가 st에 없으면 위 1분 scan에서 누락
+        #   매 5분 1회 전체 fetch로 backup
+        _last_full_scan = float(system_state.get("_last_stop_sl_full_scan", 0) or 0)
+        if _now_t - _last_full_scan >= 300:  # 5분
+            system_state["_last_stop_sl_full_scan"] = _now_t
+            print(f"[STOP_SL_FULL_SCAN] ★ 5분 전체 fetch_open_orders backup 시작")
+            try:
+                _all_open = ex.fetch_open_orders()
+                _full_cancelled = 0
+                for _oo in _all_open:
+                    _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "") or "").upper()
+                    _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                    if "STOP" not in _oo_type or not _oo_reduce:
+                        continue
+                    _oo_sym = _oo.get("symbol", "")
+                    if not _oo_sym:
+                        continue
+                    # 봇에 해당 sym 활성 포지션 있나?
+                    _has_pos = False
+                    if _oo_sym in st:
+                        _ss = st[_oo_sym]
+                        if isinstance(_ss, dict):
+                            for _ps2, _pp2 in iter_positions(_ss):
+                                if isinstance(_pp2, dict) and float(_pp2.get("amt", 0) or 0) > 0:
+                                    _has_pos = True
+                                    break
+                    if not _has_pos:
+                        _oo_id = _oo.get("id")
+                        try:
+                            ex.cancel_order(_oo_id, _oo_sym)
+                            _full_cancelled += 1
+                            print(f"[STOP_SL_CANCEL_ZOMBIE_FULL] {_oo_sym} 포지션 X → SL 취소: {_oo_id}")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("STOP_SL_CANCEL_ZOMBIE_FULL",
+                                           f"{_oo_sym} oid={_oo_id} (전체 scan)")
+                            except Exception:
+                                pass
                         except Exception:
-                            pass  # 이미 취소
-                except Exception:
-                    pass  # fetch 실패
+                            pass
+                print(f"[STOP_SL_FULL_SCAN] 전체 scan 완료: {_full_cancelled}개 cancel")
+            except Exception as _fe:
+                print(f"[STOP_SL_FULL_SCAN] fetch 실패: {_fe}")
         
         # ── 0. CLOSE 발동된 SL 주문 취소 큐 처리 ──
         _cancel_queue = system_state.get("_stop_sl_cancel_queue", [])
