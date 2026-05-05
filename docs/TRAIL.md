@@ -141,3 +141,82 @@ T1 TP trail과 T2+ TRIM trail과 TRAIL_ON 모두 동일 기준 사용.
 - [ ] `_stop_sl_oid` 필드는 등록/V11_AMT_GROW 흐름 추적에만 사용 (cancel 결정에 의존 X)
 - [ ] reconcile 주기 변경 시 weight 영향 평가 (1분=40 weight, 30초=80 weight)
 - [ ] BC/CB/HEDGE role은 SL 등록 자체 안 함 — `if role != "CORE_MR": continue` 가드 유지
+
+
+---
+
+## STOP_SL 라이프사이클 (V12 [05-06]) — 봇 시장가 매도
+
+### 컨셉
+거래소 STOP_MARKET 등록 폐기. 봇이 매 cycle ROI 검사 → 임계 도달 시 시장가 청산.
+좀비 SL 구조적으로 발생 불가능.
+
+### 라이프사이클
+```
+[봇 startup]
+1. 첫 _tick_register_stop_sl 호출 → V12 startup_cleanup
+   fetch_open_orders → STOP+reduceOnly 일괄 cancel (V11 잔존 정리)
+   system_state["_v12_stop_sl_cleanup_done"] = True
+2. 이후 호출은 no-op (즉시 return)
+
+[진입]
+1. limit OPEN fill → set_p() → 포지션 활성
+2. 거래소 STOP_MARKET 등록 X (V11과 다름)
+3. plan_force_close 매 cycle ROI 검사 시작
+
+[정상 운영 (HARD_SL 미도달)]
+- plan_force_close: 매 cycle 매 포지션 ROI 계산
+- ROI > HARD_SL_BY_TIER[dca_lv] → force_close intent 발급 X
+- main loop sleep 2초 → 다시 검사
+
+[HARD_SL 발동]
+1. ROI ≤ HARD_SL_BY_TIER[dca_lv] (예: T1=-1.4%)
+2. plan_force_close: force_close intent 발급
+   reason = "HARD_SL_T1(-1.4%, roi=-1.4%)"
+3. execute_intents → ex.create_order MARKET reduceOnly
+4. 시장가 체결 → set_p None
+5. slippage: V10 baseline -0.51% [실측]
+
+[청산]
+- TP1/TRIM/HARD_SL/PTP 등 모든 청산은 봇 주도 시장가/limit
+- 좀비 SL 발생 가능성 0 (등록 자체 안 했음)
+```
+
+### plan_force_close가 처리하는 케이스 (hedge_engine.py:57)
+- HARD_SL_T1 (-1.4%) / HARD_SL_T2 (-3.0%)
+- T2_DEFENSE_LADDER 사다리 SL/HARD_SL
+- T4_HARD_SL (-12.0%, dca_lv≥3 fallback)
+- DD_SHUTDOWN (catastrophic 잔고 보호)
+
+### HARD_SL_BY_TIER (V12)
+```python
+HARD_SL_BY_TIER = {1: -1.4}  # T1만 (T3는 V10.31AO에서 제거)
+```
+
+### 위험 — 봇 다운 시
+- supervisor/watchdog 재시작 1~3분 의존
+- 평상시 다운: 가격 변동 ≤ -1.5%~-3% (slippage 포함) [추정]
+- Flash crash + 다운 동시: -10%~-20% tail risk [추정]
+- 월 0~1회 빈도 [추정]
+
+### V11 → V12 변경 추적
+| V11 (5/4~5/5) | V12 (5/6~) |
+|---|---|
+| STOP_MARKET 등록 + 1분 reconcile | 등록 폐기, plan_force_close만 |
+| `_stop_sl_pending` 3곳 세팅 | 모두 제거 |
+| `_stop_sl_oid` 추적 | startup cleanup 1회만 처리 |
+| hf1~hf8 8개 hotfix | 1개 변경 (V12) |
+| 좀비 패턴 5번 발생 | 구조적 0 |
+
+### 함정
+- **활성 포지션 보호 공백**: V12에서 거래소 SL 0이라 봇 다운 시 무방비. supervisor heartbeat 30초 권장.
+- **startup_cleanup race**: cleanup이 활성 포지션 정상 SL도 cancel. but V12는 SL 등록 자체 X라 cancel할 \"정상 SL\" 존재 0. 좀비만 정리됨.
+- **`_v12_stop_sl_cleanup_done` 영속**: system_state JSON에 저장. 봇 재시작 시 키 사라지면 다시 cleanup 실행 (정상 동작).
+- **fetch_open_orders 실패 시 재시도**: 플래그 풀림 → 다음 호출에 다시 시도. rate limit 일시 실패 안전.
+
+### 체크리스트 (코드 수정 시)
+- [ ] V12에선 `_stop_sl_pending` 세팅하지 말 것 — 의미 없는 키
+- [ ] `_stop_sl_oid` 필드 사용은 V11 잔존 정리(pop)에만 — 새로 세팅 X
+- [ ] STOP_MARKET 등록 코드 다시 도입하지 말 것 — 좀비 인프라 5번 실패 패턴
+- [ ] `plan_force_close` HARD_SL 로직(hedge_engine.py:361~390)은 보호 핵심 — 함부로 수정 X
+- [ ] 봇 다운 보호 강화하려면 거래소 SL이 아닌 watchdog/heartbeat 강화로

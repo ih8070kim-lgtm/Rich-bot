@@ -1856,29 +1856,14 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                     print(f"[V11_AMT_GROW] {sym} {side} 기존 TP1 limit cancel: {_stale_tp1} "
                           f"(amt {_old_amt:.4f}→{_new_amt:.4f})")
                 
-                # ★ V11 hf8 [05-05]: cancel queue 등록 제거 — _tick_register_stop_sl이 처리
-                #   기존: cancel queue 등록 → runner가 cancel → pending 재세팅 → 새 SL 등록
-                #   변경: stale OID pop만 (다음 _tick_register_stop_sl이 새 등록 발동)
-                #         새 SL 등록 시 line ~2978 PRE_CANCEL이 같은 sym 모든 STOP+reduceOnly cancel
-                #         → stale SL 자동 정리됨 (이중 보호 불필요)
+                # ★ V12 [05-06]: STOP_MARKET 등록 폐기 — stale OID pop 유지(메모리 정리)
+                #   기존 V11 hf8: 새 SL 등록 시 PRE_CANCEL이 정리
+                #   변경 V12: 등록 자체 없음, V11 잔존은 startup_cleanup이 처리
                 _stale_sl = existing.pop("_stop_sl_oid", None)
                 if _stale_sl:
                     existing.pop("_stop_sl_price", None)
                     existing.pop("_stop_sl_amt", None)
-                    print(f"[V11_AMT_GROW] {sym} {side} stale SL pop: {_stale_sl} "
-                          f"(amt {_old_amt:.4f}→{_new_amt:.4f}, 새 등록 시 PRE_CANCEL이 정리)")
-                
-                # 새 amt로 SL pending 재세팅
-                if existing.get("role") == "CORE_MR":
-                    from v9.config import HARD_SL_BY_TIER
-                    _v11_sl_pct_g = HARD_SL_BY_TIER.get(1, -0.8)
-                    existing["_stop_sl_pending"] = {
-                        "sl_pct": _v11_sl_pct_g,
-                        "ep": _new_ep,
-                        "amt": _new_amt,
-                        "side": side,
-                        "request_ts": now,
-                    }
+                    print(f"[V12_AMT_GROW] {sym} {side} V11 잔존 SL field pop: {_stale_sl}")
             except Exception as _v11_grow_e:
                 print(f"[V11_AMT_GROW] 무시: {_v11_grow_e}")
             
@@ -1932,28 +1917,10 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
         print(f"[PENDING_FILL] {sym} {side} OPEN 반영 ep={avg_price:.4f} "
               f"qty={filled_qty} role={role} dca_targets={len(_dca_targets)}개")
         
-        # ★ V11 [05-04]: limit OPEN fill 후 Stop-Market SL 등록 + 추가 fill 갱신
-        #   사용자 통찰 [05-04]: "산 만큼 팔기" — 부분 fill 시 amt 변경 추적
-        #   배경: 05-04 22:08 XRP 케이스 [실측]
-        #     - 첫 fill 76 qty → TP1 limit 76만 등록
-        #     - 추가 fill 750 qty → TP/SL 갱신 X → 잔량 미보호 ★
-        #   해결: amt 변경 시 _stop_sl_pending 새로 세팅
-        #     - runner._tick_register_stop_sl가 기존 SL cancel + 새 amt로 재등록
-        try:
-            if role == "CORE_MR":
-                from v9.config import HARD_SL_BY_TIER
-                _v11_sl_pct = HARD_SL_BY_TIER.get(1, -0.8)
-                _new_p_lim = get_p(sym_st, side)
-                if isinstance(_new_p_lim, dict):
-                    _new_p_lim["_stop_sl_pending"] = {
-                        "sl_pct": _v11_sl_pct,
-                        "ep": avg_price,
-                        "amt": filled_qty,
-                        "side": side,
-                        "request_ts": now,
-                    }
-        except Exception as _v11_e:
-            print(f"[V11_SL_FLAG_LIMIT] 무시: {_v11_e}")
+        # ★ V12 [05-06]: STOP_MARKET 등록 폐기
+        #   기존 V11 [05-04]: limit OPEN fill 후 _stop_sl_pending 세팅 → _tick_register_stop_sl 등록
+        #   변경: plan_force_close (HARD_SL_BY_TIER) 매 cycle ROI 검사로 통합
+        #   장점: 좀비 SL 구조적 발생 0, race condition 0, cancel queue 인프라 불필요
 
         from v9.execution.position_book import set_pending_entry
         set_pending_entry(sym_st, side, None)
@@ -2735,292 +2702,73 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
 def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
-    """★ V11 [05-04]: Stop-Market SL 등록 + 관리.
+    """★ V12 [05-06]: STOP_MARKET 폐기 — startup 1회 좀비 cleanup만 수행.
     
-    사용자 결정 [05-04]:
-      slippage 실측 -0.51% (V10 FORCE_CLOSE 케이스)
-      → Stop-Market 도입으로 -0.05~-0.15% [추정] 개선
-      → 월 +$1,200 [추정]
+    사용자 결정 [05-06]: "둘 중 하나 — 봇이 하든 스탑로스 취소를 해결하든"
+      → V11 인프라 5번째 좀비 패턴 발생, 매 hf 시리즈마다 새 결함
+      → 봇 시장가 매도(plan_force_close HARD_SL_BY_TIER 매 cycle)만 사용
     
-    동작:
-      1. 진입 후 _stop_sl_pending 플래그 있으면 Stop-Market 주문 등록
-      2. 주문 ID를 p["_stop_sl_oid"]에 저장
-      3. 청산 시 (CLOSE/FORCE_CLOSE) cancel queue 처리
-      4. 좀비 주문 가드 (포지션 amt=0인데 stop_sl_oid 있으면 cancel)
+    구조:
+      - V10/V12: 봇이 매 cycle ROI 검사 → -1.4% 도달 시 plan_force_close가 시장가 청산
+      - 거래소 STOP_MARKET 등록 X → 좀비 자체 발생 불가능
+      - slippage baseline -0.51% [실측 V10] (V11 추정 -0.05~0.15%는 미검증)
+    
+    이 함수의 역할:
+      봇 startup 시 1회만 fetch_open_orders → STOP+reduceOnly 일괄 cancel
+      (V11 시기 등록된 잔존 좀비 정리)
+      이후 호출은 no-op
+    
+    위험 (필수 고지):
+      - 봇 다운 시 SL 보호 0 (watchdog/supervisor 1~3분 재시작 의존)
+      - Flash crash + 봇 다운 동시 시나리오: tail risk
+      - 메인 루프 ~2초 cycle → SL trigger 지연 ≤2초 (V10과 동일)
     """
     try:
-        if not system_state or not snapshot:
+        if not system_state:
             return
         
-        import time as _t
-        _now_t = _t.time()
+        # ── V12: startup 1회만 좀비 cleanup ──
+        if system_state.get("_v12_stop_sl_cleanup_done"):
+            return  # 2번째 호출부터 no-op (정상 작동 경로)
         
-        # ── ★ V11 hf8 [05-05]: 1분 단일 reconcile (0a/0b/0 통합) ──
-        #   사용자 결정: "그냥 1분에 한번씩 스캔해서 매칭 안되는거 취소"
-        #   원리: 거래소(fetch_open_orders)를 진실 공급원으로 — 봇 상태와 무관
-        #         STOP+reduceOnly 주문 중 같은 sym+side에 활성 포지션 없으면 cancel
-        #   기존 구조 결함:
-        #     - 0a (1분 per-sym): `[:10]` set 슬라이싱 비결정적 → LINK 같은 누락 가능
-        #     - 0b (5분 full): 주기 길어 사용자 캡처 시점(2분차)에 미발동
-        #     - 0  (cancel queue): 한 번 소비 후 OID 손실, 일부 race 케이스 작동 X
-        #   라이프사이클 단순화: 진입 시 등록 + 1분 reconcile만, 청산 cancel queue 제거
-        #   weight: fetch_open_orders 1분당 1회 = 40 weight/분 (현재 ~600/분 대비 미미)
-        #   최대 1분 지연 위험: reduceOnly라 신규 포지션 못 만듦 → 위험 0
-        from v9.execution.position_book import iter_positions
-        _last_reconcile = float(system_state.get("_last_stop_sl_reconcile", 0) or 0)
-        if _now_t - _last_reconcile >= 60:  # 1분
-            system_state["_last_stop_sl_reconcile"] = _now_t
-            try:
-                _all_open = ex.fetch_open_orders()
-                _checked = 0
-                _cancelled = 0
-                for _oo in _all_open:
-                    # ★ V11 hf8: type/info.type 둘 다 체크 — ccxt Binance가 STOP_MARKET을
-                    #   type="market" + info.type="STOP_MARKET"로 반환하는 케이스 대응
-                    #   기존 0a/0b 코드의 OR 단락 평가는 이 케이스 누락 (LINK miss 원인 의심)
-                    _top = str(_oo.get("type") or "").upper()
-                    _info_type = str(_oo.get("info", {}).get("type", "") or "").upper()
-                    _is_stop = ("STOP" in _top) or ("STOP" in _info_type)
-                    _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
-                    if not _is_stop or not _oo_reduce:
-                        continue
-                    _checked += 1
-                    _oo_sym = _oo.get("symbol", "")
-                    if not _oo_sym:
-                        continue
-                    # close-side → 원래 포지션 side 추론
-                    #   롱 포지션 SL = sell stop → close side="sell" → pos_side="buy"
-                    #   숏 포지션 SL = buy stop → close side="buy" → pos_side="sell"
-                    _oo_close_side = (_oo.get("side") or "").lower()
-                    _pos_side = "sell" if _oo_close_side == "buy" else "buy"
-                    # 활성 포지션 체크 (해당 sym + 해당 pos_side)
-                    _has_pos = False
-                    _ss = st.get(_oo_sym, {})
-                    if isinstance(_ss, dict):
-                        _pos_key = "p_long" if _pos_side == "buy" else "p_short"
-                        _pos = _ss.get(_pos_key)
-                        if isinstance(_pos, dict) and float(_pos.get("amt", 0) or 0) > 0:
-                            _has_pos = True
-                    if _has_pos:
-                        continue  # 정상 — SL 보호 중
-                    # 좀비 → cancel
-                    _oo_id = _oo.get("id")
-                    if not _oo_id:
-                        continue
+        system_state["_v12_stop_sl_cleanup_done"] = True
+        
+        try:
+            _all_open = ex.fetch_open_orders()
+            _cleaned = 0
+            for _oo in _all_open:
+                # type/info.type 둘 다 체크 (V11 hf8에서 발견한 결함 대응)
+                _top = str(_oo.get("type") or "").upper()
+                _info_type = str(_oo.get("info", {}).get("type", "") or "").upper()
+                _is_stop = ("STOP" in _top) or ("STOP" in _info_type)
+                _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                if not _is_stop or not _oo_reduce:
+                    continue
+                _oo_id = _oo.get("id")
+                _oo_sym = _oo.get("symbol", "")
+                if not _oo_id or not _oo_sym:
+                    continue
+                try:
+                    ex.cancel_order(_oo_id, _oo_sym)
+                    _cleaned += 1
+                    print(f"[V12_STARTUP_CLEANUP] {_oo_sym} STOP+reduceOnly oid={_oo_id} cancel "
+                          f"(V11 잔존 좀비 정리)")
                     try:
-                        ex.cancel_order(_oo_id, _oo_sym)
-                        _cancelled += 1
-                        print(f"[STOP_SL_RECONCILE] {_oo_sym} {_oo_close_side} oid={_oo_id} cancel "
-                              f"(pos_side={_pos_side} 활성 포지션 없음)")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("STOP_SL_RECONCILE",
-                                       f"{_oo_sym} close_side={_oo_close_side} oid={_oo_id}")
-                        except Exception:
-                            pass
+                        from v9.logging.logger_csv import log_system
+                        log_system("V12_STARTUP_CLEANUP", f"{_oo_sym} oid={_oo_id} (V11 잔존 정리)")
                     except Exception:
-                        # 이미 cancel/체결됐을 수 있음 (정상)
                         pass
-                if _checked > 0 or _cancelled > 0:
-                    print(f"[STOP_SL_RECONCILE] 1분 reconcile: STOP+reduceOnly {_checked}건 체크, "
-                          f"{_cancelled}건 cancel")
-            except Exception as _re:
-                print(f"[STOP_SL_RECONCILE] fetch 실패(무시): {_re}")
-        
-        # ★ V11 hf8: _stop_sl_cancel_queue 제거 — reconcile이 통합 처리
-        #   기존 system_state["_stop_sl_cancel_queue"] 키는 더 이상 채우지 않음
-        #   재시작 시 잔존 키 있어도 누구도 안 읽으므로 무해 (자연 소멸)
-        
-        from v9.config import LEVERAGE
-        from v9.execution.position_book import iter_positions
-        
-        for sym, sym_st in st.items():
-            if not isinstance(sym_st, dict):
-                continue
-            for side, p in iter_positions(sym_st):
-                if not isinstance(p, dict):
-                    continue
-                
-                role = p.get("role", "")
-                if role != "CORE_MR":
-                    continue
-                
-                amt = float(p.get("amt", 0) or 0)
-                ep = float(p.get("ep", 0) or 0)
-                existing_sl_oid = p.get("_stop_sl_oid")
-                pending = p.get("_stop_sl_pending")
-                
-                # ── 1. 좀비 가드: amt=0인데 stop_sl_oid 있으면 cancel ──
-                if amt <= 0 and existing_sl_oid:
-                    try:
-                        ex.cancel_order(existing_sl_oid, sym)
-                        print(f"[STOP_SL_CANCEL] {sym} {side} amt=0 → SL 주문 {existing_sl_oid} 취소")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("STOP_SL_CANCEL_ZOMBIE", f"{sym} {side} oid={existing_sl_oid}")
-                        except Exception:
-                            pass
-                    except Exception as _ce:
-                        # 이미 cancel/체결됐을 수 있음
-                        pass
-                    p.pop("_stop_sl_oid", None)
-                    p.pop("_stop_sl_pending", None)
-                    continue
-                
-                # ── 1b. ★ V11 [05-04]: amt 변동 감지 → cancel + 재등록 큐 ──
-                #   사용자 통찰: "산 만큼 팔기"
-                #   부분 fill 시 amt 증가 → 기존 SL 주문 qty 부족 → 잔량 미보호
-                #   해결: amt와 등록 시점 amt 차이 1% 이상이면 재등록
-                if existing_sl_oid and amt > 0:
-                    _registered_amt = float(p.get("_stop_sl_amt", 0) or 0)
-                    if _registered_amt > 0 and abs(amt - _registered_amt) > _registered_amt * 0.01:
-                        try:
-                            ex.cancel_order(existing_sl_oid, sym)
-                            print(f"[STOP_SL_AMT_CHANGE] {sym} {side} qty {_registered_amt:.4f}→{amt:.4f} "
-                                  f"기존 SL cancel: {existing_sl_oid}")
-                            try:
-                                from v9.logging.logger_csv import log_system
-                                log_system("STOP_SL_AMT_CHANGE",
-                                           f"{sym} {side} qty {_registered_amt:.4f}→{amt:.4f}")
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                        # pending 재세팅
-                        from v9.config import HARD_SL_BY_TIER
-                        _v11_sl = HARD_SL_BY_TIER.get(1, -0.8)
-                        p["_stop_sl_pending"] = {
-                            "sl_pct": _v11_sl,
-                            "ep": ep,
-                            "amt": amt,
-                            "side": side,
-                            "request_ts": now_ts,
-                        }
-                        p.pop("_stop_sl_oid", None)
-                        p.pop("_stop_sl_price", None)
-                        p.pop("_stop_sl_amt", None)
-                        existing_sl_oid = None  # 다음 단계에서 새로 등록
-                
-                # ── 2. SL 주문 등록 (pending → registered) ──
-                if pending and not existing_sl_oid and amt > 0 and ep > 0:
-                    # 재시도 제한 (3회 실패 시 포기)
-                    _retry_count = pending.get("_retry_count", 0)
-                    if _retry_count >= 3:
-                        print(f"[STOP_SL_REGISTER] {sym} {side} 3회 실패 → 포기, fallback: ROI 매 틱 체크")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("STOP_SL_REGISTER_ABORT", f"{sym} {side} 3회 실패")
-                        except Exception:
-                            pass
-                        p.pop("_stop_sl_pending", None)
-                        continue
-                    
-                    sl_pct = float(pending.get("sl_pct", -0.8))
-                    
-                    # ★ V11 hf7 [05-05]: 같은 sym 기존 STOP_MARKET reduceOnly 모두 cancel
-                    #   사용자 질문: "마켓 클로즈 오더 남아있다가 같은 심볼 새로 진입하면 갱신되나 오더가 두개가 되나"
-                    #   진짜 답: 이전엔 close_side 매칭 좁아서 반대 방향 좀비는 잔존 → 2개 됨
-                    #   해결: 같은 sym + STOP + reduceOnly = 모두 cancel (방향 무관)
-                    try:
-                        _open_orders = ex.fetch_open_orders(sym)
-                        for _oo in _open_orders:
-                            # ★ V11 hf8: type/info.type 둘 다 체크 (reconcile과 동일 패턴)
-                            _top = str(_oo.get("type") or "").upper()
-                            _info_type = str(_oo.get("info", {}).get("type", "") or "").upper()
-                            _is_stop = ("STOP" in _top) or ("STOP" in _info_type)
-                            _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
-                            if _is_stop and _oo_reduce:
-                                _oo_id = _oo.get("id")
-                                _oo_side = (_oo.get("side") or "").lower()
-                                try:
-                                    ex.cancel_order(_oo_id, sym)
-                                    print(f"[STOP_SL_PRE_CANCEL] {sym} 기존 STOP 취소: {_oo_id} (side={_oo_side})")
-                                    try:
-                                        from v9.logging.logger_csv import log_system
-                                        log_system("STOP_SL_PRE_CANCEL",
-                                                   f"{sym} oid={_oo_id} side={_oo_side} (좀비/재시작)")
-                                    except Exception:
-                                        pass
-                                except Exception:
-                                    pass
-                    except Exception as _fe:
-                        print(f"[STOP_SL_PRE_CANCEL] {sym} fetch 실패: {_fe}")
-                    
-                    # SL 트리거 가격 계산 (lev 적용)
-                    raw_pct = sl_pct / LEVERAGE / 100
-                    
-                    if side == "buy":
-                        stop_price = ep * (1 + raw_pct)
-                    else:
-                        stop_price = ep * (1 - raw_pct)
-                    
-                    stop_price = round(stop_price, 6)
-                    
-                    close_side = "sell" if side == "buy" else "buy"
-                    ps = "LONG" if side == "buy" else "SHORT"
-                    
-                    # ★ V11 hf1 [05-05]: Stop-Market 등록 ccxt 표준 형식 + 정밀도 + HEDGE_MODE 호환
-                    #   이전 버그: type='STOP_MARKET' 직접 전달 → ccxt 거부 → 모든 등록 실패
-                    #   추가 버그: HEDGE_MODE에서 reduceOnly 사용 → Binance 거부 (-2022 또는 -1106)
-                    #   해결:
-                    #     1. type='market' + params에 stopPrice/type 명시
-                    #     2. HEDGE_MODE면 reduceOnly 제거 (positionSide가 reduce 역할)
-                    #     3. price_to_precision 거쳐 정밀도 맞춤
-                    try:
-                        from v9.config import HEDGE_MODE
-                        # 가격 정밀도
-                        try:
-                            stop_price_safe = float(ex.price_to_precision(sym, stop_price))
-                        except Exception:
-                            stop_price_safe = stop_price
-                        # 수량 정밀도
-                        try:
-                            amt_safe = float(ex.amount_to_precision(sym, amt))
-                        except Exception:
-                            amt_safe = amt
-                        
-                        # ccxt 표준: type='market' + params={'stopPrice': X, 'type': 'STOP_MARKET'}
-                        _params = {
-                            "positionSide": ps,
-                            "stopPrice": stop_price_safe,
-                            "type": "STOP_MARKET",
-                            "workingType": "MARK_PRICE",
-                        }
-                        if not HEDGE_MODE:
-                            # one-way 모드에서만 reduceOnly 사용
-                            _params["reduceOnly"] = True
-                        
-                        order = ex.create_order(
-                            sym, "market", close_side, amt_safe, None,
-                            params=_params
-                        )
-                        new_oid = order.get("id") or order.get("orderId")
-                        p["_stop_sl_oid"] = new_oid
-                        p["_stop_sl_price"] = stop_price_safe
-                        p["_stop_sl_amt"] = amt_safe
-                        p["_stop_sl_pending"] = None
-                        print(f"[STOP_SL_REGISTER] {sym} {side} ep={ep:.6f} stop={stop_price_safe:.6f} "
-                              f"sl_pct={sl_pct}% amt={amt_safe} oid={new_oid}")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("STOP_SL_REGISTER",
-                                       f"{sym} {side} ep={ep:.6f} stop={stop_price_safe:.6f} "
-                                       f"sl_pct={sl_pct}% amt={amt_safe} oid={new_oid}")
-                        except Exception:
-                            pass
-                    except Exception as _se:
-                        # ★ 에러 메시지 log_system에 남김 (콘솔만이면 사후 분석 X)
-                        pending["_retry_count"] = _retry_count + 1
-                        _err_msg = str(_se)[:200]
-                        print(f"[STOP_SL_REGISTER] {sym} {side} 실패 ({_retry_count + 1}/3): {_err_msg}")
-                        try:
-                            from v9.logging.logger_csv import log_system
-                            log_system("STOP_SL_REGISTER_FAIL",
-                                       f"{sym} {side} retry={_retry_count + 1}/3 err={_err_msg}")
-                        except Exception:
-                            pass
+                except Exception:
+                    pass
+            print(f"[V12_STARTUP_CLEANUP] startup 좀비 정리 완료: {_cleaned}건 cancel "
+                  f"(이후 STOP_MARKET 등록 없음, 봇 시장가 매도만 사용)")
+        except Exception as _ce:
+            print(f"[V12_STARTUP_CLEANUP] fetch 실패(무시, 다음 시작 시 재시도): {_ce}")
+            # 실패 시 플래그 다시 풀어서 다음 호출에 재시도
+            system_state["_v12_stop_sl_cleanup_done"] = False
     except Exception as e:
-        print(f"[STOP_SL_TICK] 무시: {e}")
+        print(f"[V12_STARTUP_CLEANUP] 무시: {e}")
+
 
 
 def _tick_shadow_companion_hedge(system_state: dict, st: dict, snapshot):

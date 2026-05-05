@@ -297,23 +297,10 @@ def apply_order_results(
                 "insurance_timecut": meta.get("insurance_timecut", 0),
             })
             _log_pos(result.trace_id, sym, get_p(sym_st, intent.side), snapshot)
-            # ★ V11 [05-04]: Stop-Market SL 등록 플래그 (runner._tick_register_stop_sl 처리)
-            #   사용자 결정 [05-04]: slippage 실측 -0.51% → Stop-Market 도입
-            #   진입 직후 SL 주문 등록 필요 → flag 세팅, runner가 다음 틱에 등록
-            try:
-                from v9.config import HARD_SL_BY_TIER
-                _v11_sl_pct = HARD_SL_BY_TIER.get(1, -0.8)
-                _new_p = get_p(sym_st, intent.side)
-                if isinstance(_new_p, dict) and _new_p.get("role") == "CORE_MR":
-                    _new_p["_stop_sl_pending"] = {
-                        "sl_pct": _v11_sl_pct,
-                        "ep": _new_p.get("ep", 0.0),
-                        "amt": _new_p.get("amt", 0.0),
-                        "side": intent.side,
-                        "request_ts": now,
-                    }
-            except Exception as _sse:
-                print(f"[V11_SL_FLAG] 무시: {_sse}")
+            # ★ V12 [05-06]: STOP_MARKET 등록 폐기 — plan_force_close (HARD_SL_BY_TIER) 매 cycle ROI 검사로 통합
+            #   기존 V11 [05-04]: _stop_sl_pending 세팅 → runner._tick_register_stop_sl 등록 → 좀비 발생
+            #   변경: 봇 시장가 매도만 사용 (V10 baseline, slippage -0.51% 실측)
+            #         plan_force_close hedge_engine.py:380 HARD_SL_BY_TIER[1]=-1.4% 매 cycle 발동
             # ★ V10.29: 새 진입 → 같은 방향 min_slot_hold 해제 (교체 완료)
             for _ms_sym, _ms_ss in st.items():
                 if not isinstance(_ms_ss, dict) or _ms_sym == sym:

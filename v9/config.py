@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "10.31AO-V11hf8"  # ★ V11 hf8: STOP_SL 1분 reconcile 단일화 — 청산 cancel queue 4곳 제거, 라이프사이클 단순화 (사용자 결정 [05-05])
+VERSION = "12.0"  # ★ V12 [05-06]: STOP_MARKET 폐기 — 봇 시장가 매도(plan_force_close HARD_SL)만 사용. 좀비 SL 구조적 제거. 사용자 결정 [05-06]: "둘 중 하나 — 봇이 하든 스탑로스 취소를 해결하든"
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
