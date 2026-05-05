@@ -2974,29 +2974,31 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                     
                     sl_pct = float(pending.get("sl_pct", -0.8))
                     
-                    # ★ 봇 재시작 시 좀비 가드: 같은 sym/side 기존 STOP_MARKET reduceOnly 주문 모두 cancel
-                    # (다른 instance에서 등록한 주문 정리)
+                    # ★ V11 hf7 [05-05]: 같은 sym 기존 STOP_MARKET reduceOnly 모두 cancel
+                    #   사용자 질문: "마켓 클로즈 오더 남아있다가 같은 심볼 새로 진입하면 갱신되나 오더가 두개가 되나"
+                    #   진짜 답: 이전엔 close_side 매칭 좁아서 반대 방향 좀비는 잔존 → 2개 됨
+                    #   해결: 같은 sym + STOP + reduceOnly = 모두 cancel (방향 무관)
                     try:
                         _open_orders = ex.fetch_open_orders(sym)
                         for _oo in _open_orders:
-                            _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "")).upper()
+                            _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "") or "").upper()
                             _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
-                            _oo_side = (_oo.get("side") or "").lower()
-                            _expected_close_side = "sell" if side == "buy" else "buy"
-                            if "STOP" in _oo_type and _oo_reduce and _oo_side == _expected_close_side:
+                            if "STOP" in _oo_type and _oo_reduce:
                                 _oo_id = _oo.get("id")
+                                _oo_side = (_oo.get("side") or "").lower()
                                 try:
                                     ex.cancel_order(_oo_id, sym)
-                                    print(f"[STOP_SL_PRE_CANCEL] {sym} {side} 기존 좀비 STOP 취소: {_oo_id}")
+                                    print(f"[STOP_SL_PRE_CANCEL] {sym} 기존 STOP 취소: {_oo_id} (side={_oo_side})")
                                     try:
                                         from v9.logging.logger_csv import log_system
-                                        log_system("STOP_SL_PRE_CANCEL", f"{sym} oid={_oo_id} (재시작 좀비)")
+                                        log_system("STOP_SL_PRE_CANCEL",
+                                                   f"{sym} oid={_oo_id} side={_oo_side} (좀비/재시작)")
                                     except Exception:
                                         pass
                                 except Exception:
                                     pass
-                    except Exception:
-                        pass  # fetch_open_orders 실패 시 그냥 진행 (rate limit 등)
+                    except Exception as _fe:
+                        print(f"[STOP_SL_PRE_CANCEL] {sym} fetch 실패: {_fe}")
                     
                     # SL 트리거 가격 계산 (lev 적용)
                     raw_pct = sl_pct / LEVERAGE / 100

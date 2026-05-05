@@ -2867,6 +2867,13 @@ def _ptp_update_state(system_state: Dict, current_balance: float,
         return False
 
     # ── 모드별 분기 ──────────────────────────────────────────────
+    if PTP_TRIGGER_MODE == "shadow_only":
+        # ★ V11 hf6 [05-05]: shadow_only = PTP 실전 완전 비활성
+        #   사용자 보고: UNI 12:13 PTP 발동 → -0.09% close (사다리 우회)
+        #   원인: shadow_only 분기 코드 없어서 peak_drop 그대로 작동
+        #   해결: 즉시 False 반환 (PTP intent 생성 X)
+        return False
+    
     if PTP_TRIGGER_MODE == "defense_close":
         # ★ V10.31AN defense_close: 트리거는 strategy_core hook에서 외부 설정
         # 이 함수는 cooldown/이미 활성 체크만 담당 → 미활성 + 쿨다운 만료 시 False 반환
