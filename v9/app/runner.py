@@ -2761,50 +2761,55 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
         import time as _t
         _now_t = _t.time()
         
-        # ── 0a. ★ V11 hf2 [05-05]: 매 5분 fetch_open_orders → 좀비 STOP_MARKET 자동 정리 ──
-        #   사용자 보고: "클로즈 됐는데 주문이 남아있어"
-        #   원인: cancel queue 등록 못한 케이스 다수 가능
-        #   해결: 매 5분 거래소에서 모든 STOP_MARKET reduceOnly 주문 fetch → 포지션 없으면 cancel
+        # ── 0a. ★ V11 hf4 [05-05]: 매 1분 좀비 STOP_MARKET 자동 정리 (강화) ──
+        #   사용자 보고: "ETH/LINK close됐는데 STOP 잔존" (2번째 발생)
+        #   이전 hf2: 5분 throttle, fetch_open_orders 전체 → rate limit 부담
+        #   hf4: 1분 throttle, 봇이 알고 있는 sym만 per-symbol fetch
         from v9.execution.position_book import iter_positions, get_p
         _last_zombie_scan = float(system_state.get("_last_stop_sl_zombie_scan", 0) or 0)
-        if _now_t - _last_zombie_scan >= 300:  # 5분
+        if _now_t - _last_zombie_scan >= 60:  # 1분
             system_state["_last_stop_sl_zombie_scan"] = _now_t
-            try:
-                _all_open = ex.fetch_open_orders()
-                for _oo in _all_open:
-                    _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "") or "").upper()
-                    _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
-                    if "STOP" not in _oo_type or not _oo_reduce:
-                        continue
-                    _oo_sym_raw = _oo.get("symbol", "")
-                    if not _oo_sym_raw:
-                        continue
-                    # 봇에 해당 sym 포지션이 있나?
-                    _oo_sym = _oo_sym_raw  # ccxt 형식 그대로
-                    _has_position = False
-                    if _oo_sym in st:
-                        _sym_st = st[_oo_sym]
-                        if isinstance(_sym_st, dict):
-                            for _pside, _pp in iter_positions(_sym_st):
-                                if isinstance(_pp, dict) and float(_pp.get("amt", 0) or 0) > 0:
-                                    _has_position = True
-                                    break
-                    
-                    if not _has_position:
+            
+            # 봇이 인식하는 활성 sym 목록
+            _active_syms = set()
+            _zombie_check_syms = set()
+            for _sym_chk, _sym_st_chk in st.items():
+                if not isinstance(_sym_st_chk, dict):
+                    continue
+                _has_active = False
+                for _ps_chk, _p_chk in iter_positions(_sym_st_chk):
+                    if isinstance(_p_chk, dict) and float(_p_chk.get("amt", 0) or 0) > 0:
+                        _has_active = True
+                        break
+                if _has_active:
+                    _active_syms.add(_sym_chk)
+                else:
+                    # 포지션 X but 봇이 추적하는 sym = 잠재 좀비
+                    _zombie_check_syms.add(_sym_chk)
+            
+            # 잠재 좀비 sym에 대해 per-symbol fetch
+            for _z_sym in list(_zombie_check_syms)[:10]:  # rate limit 회피, 10개씩
+                try:
+                    _open = ex.fetch_open_orders(_z_sym)
+                    for _oo in _open:
+                        _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "") or "").upper()
+                        _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                        if "STOP" not in _oo_type or not _oo_reduce:
+                            continue
                         _oo_id = _oo.get("id")
                         try:
-                            ex.cancel_order(_oo_id, _oo_sym)
-                            print(f"[STOP_SL_CANCEL_ZOMBIE_SCAN] {_oo_sym} 포지션 X → SL 취소: {_oo_id}")
+                            ex.cancel_order(_oo_id, _z_sym)
+                            print(f"[STOP_SL_CANCEL_ZOMBIE_SCAN] {_z_sym} 포지션 X → SL 취소: {_oo_id}")
                             try:
                                 from v9.logging.logger_csv import log_system
                                 log_system("STOP_SL_CANCEL_ZOMBIE_SCAN",
-                                           f"{_oo_sym} oid={_oo_id} (포지션 없음, 좀비)")
+                                           f"{_z_sym} oid={_oo_id} (포지션 없음, 좀비)")
                             except Exception:
                                 pass
-                        except Exception as _ze:
-                            pass  # 이미 취소됨
-            except Exception as _se:
-                pass  # fetch 실패 (rate limit 등) 무시
+                        except Exception:
+                            pass  # 이미 취소
+                except Exception:
+                    pass  # fetch 실패
         
         # ── 0. CLOSE 발동된 SL 주문 취소 큐 처리 ──
         _cancel_queue = system_state.get("_stop_sl_cancel_queue", [])
