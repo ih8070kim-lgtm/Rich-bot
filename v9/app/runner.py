@@ -2408,6 +2408,20 @@ def _apply_pending_fill(st, info, filled_qty, avg_price, now, snapshot):
                 )
             except Exception:
                 pass
+            # ★ V11 hf2 [05-05]: TP1 전량 체결 시 Stop-SL 좀비 cancel queue 등록
+            #   사용자 보고: "클로즈 됐는데 주문이 남아있어"
+            #   원인: clear_position 후 p 사라짐 → 좀비 가드 작동 X
+            #   해결: clear_position 직전에 cancel queue 등록
+            try:
+                _stop_oid_zombie = p.get("_stop_sl_oid")
+                if _stop_oid_zombie:
+                    _q = system_state.setdefault("_stop_sl_cancel_queue", []) if system_state else None
+                    if _q is not None:
+                        _q.append({"sym": sym, "oid": _stop_oid_zombie})
+                        print(f"[STOP_SL_CANCEL_QUEUE] TP1 체결 후 좀비 SL cancel 큐: {sym} oid={_stop_oid_zombie}")
+            except Exception as _ze:
+                print(f"[STOP_SL_CANCEL_QUEUE] TP1 무시: {_ze}")
+            
             clear_position(st, sym, pos_side)
             print(f"[PENDING_FILL] {sym} {pos_side} TP1 전량체결 → 클리어")
 
@@ -2743,6 +2757,54 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
     try:
         if not system_state or not snapshot:
             return
+        
+        import time as _t
+        _now_t = _t.time()
+        
+        # ── 0a. ★ V11 hf2 [05-05]: 매 5분 fetch_open_orders → 좀비 STOP_MARKET 자동 정리 ──
+        #   사용자 보고: "클로즈 됐는데 주문이 남아있어"
+        #   원인: cancel queue 등록 못한 케이스 다수 가능
+        #   해결: 매 5분 거래소에서 모든 STOP_MARKET reduceOnly 주문 fetch → 포지션 없으면 cancel
+        from v9.execution.position_book import iter_positions, get_p
+        _last_zombie_scan = float(system_state.get("_last_stop_sl_zombie_scan", 0) or 0)
+        if _now_t - _last_zombie_scan >= 300:  # 5분
+            system_state["_last_stop_sl_zombie_scan"] = _now_t
+            try:
+                _all_open = ex.fetch_open_orders()
+                for _oo in _all_open:
+                    _oo_type = (_oo.get("type") or _oo.get("info", {}).get("type", "") or "").upper()
+                    _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                    if "STOP" not in _oo_type or not _oo_reduce:
+                        continue
+                    _oo_sym_raw = _oo.get("symbol", "")
+                    if not _oo_sym_raw:
+                        continue
+                    # 봇에 해당 sym 포지션이 있나?
+                    _oo_sym = _oo_sym_raw  # ccxt 형식 그대로
+                    _has_position = False
+                    if _oo_sym in st:
+                        _sym_st = st[_oo_sym]
+                        if isinstance(_sym_st, dict):
+                            for _pside, _pp in iter_positions(_sym_st):
+                                if isinstance(_pp, dict) and float(_pp.get("amt", 0) or 0) > 0:
+                                    _has_position = True
+                                    break
+                    
+                    if not _has_position:
+                        _oo_id = _oo.get("id")
+                        try:
+                            ex.cancel_order(_oo_id, _oo_sym)
+                            print(f"[STOP_SL_CANCEL_ZOMBIE_SCAN] {_oo_sym} 포지션 X → SL 취소: {_oo_id}")
+                            try:
+                                from v9.logging.logger_csv import log_system
+                                log_system("STOP_SL_CANCEL_ZOMBIE_SCAN",
+                                           f"{_oo_sym} oid={_oo_id} (포지션 없음, 좀비)")
+                            except Exception:
+                                pass
+                        except Exception as _ze:
+                            pass  # 이미 취소됨
+            except Exception as _se:
+                pass  # fetch 실패 (rate limit 등) 무시
         
         # ── 0. CLOSE 발동된 SL 주문 취소 큐 처리 ──
         _cancel_queue = system_state.get("_stop_sl_cancel_queue", [])
