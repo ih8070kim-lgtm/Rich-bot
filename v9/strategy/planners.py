@@ -1797,9 +1797,20 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
         for _iter_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
                 continue
-            # ★ V10.31AO: T2 도달 (dca_level=2) + CORE_MR/CORE_MR_HEDGE만
-            if int(p.get("dca_level", 1) or 1) != 2:
-                continue
+            # ★ V11 [05-05]: T1 단일 진입 사다리 (dca_level=1만, V11 모드)
+            #   사용자 결정: 단순 SL slippage 문제 → 사다리로 회복 케이스 보호
+            #   T2_DEFENSE_LADDER 명칭은 호환용, 실제로는 T1에 적용
+            from v9.config import DCA_WEIGHTS as _V11_DCA_W
+            _is_v11 = (len(_V11_DCA_W) == 1 and _V11_DCA_W[0] == 100)
+            
+            if _is_v11:
+                # V11 모드: dca_level=1만 처리
+                if int(p.get("dca_level", 1) or 1) != 1:
+                    continue
+            else:
+                # 기존 V10 호환: dca_level=2만 처리
+                if int(p.get("dca_level", 1) or 1) != 2:
+                    continue
             _role = p.get("role", "")
             if _role not in ("CORE_MR", "CORE_MR_HEDGE"):
                 continue
