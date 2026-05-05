@@ -1903,23 +1903,10 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                         "snap_ts": getattr(snapshot, "ts", 0),
                     },
                 ))
-                # ★ V11 hf2 [05-05]: 사다리 발사 즉시 Stop-SL cancel queue 등록
-                #   사용자 보고: "클로즈 됐는데 주문이 남아있어"
-                #   원인: apply_order_results의 cancel queue가 일부 케이스 작동 X
-                #   해결: intent 발사 시점에 직접 cancel queue 등록
-                try:
-                    if system_state is not None:
-                        _stop_oid_l = p.get("_stop_sl_oid")
-                        if _stop_oid_l:
-                            _q_l = system_state.setdefault("_stop_sl_cancel_queue", [])
-                            _q_l.append({"sym": symbol, "oid": _stop_oid_l})
-                            print(f"[STOP_SL_CANCEL_QUEUE] 사다리 {mode} → SL cancel 큐: {symbol} oid={_stop_oid_l}")
-                            p.pop("_stop_sl_oid", None)
-                            p.pop("_stop_sl_price", None)
-                            p.pop("_stop_sl_amt", None)
-                            p.pop("_stop_sl_pending", None)
-                except Exception as _ssle:
-                    print(f"[STOP_SL_CANCEL_QUEUE] 사다리 무시: {_ssle}")
+                # ★ V11 hf8 [05-05]: cancel queue 등록 제거 — 1분 reconcile이 처리
+                #   기존 V11 hf2 [05-05]: 사다리 force_market 발사 시점에 SL cancel queue 등록
+                #   변경: cancel 책임 일원화 — _tick_register_stop_sl 1분 reconcile
+                #         force_market 청산 후 1분 안에 거래소 fetch 기준으로 cancel
                 print(f"[T2_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
                 # ★ V10.31AO-hf10 [05-02]: 사다리 cut ml 기록
                 try:

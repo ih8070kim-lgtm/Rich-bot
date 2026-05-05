@@ -645,20 +645,13 @@ def apply_order_results(
         # ── TRAIL_ON / FORCE_CLOSE / CLOSE ──────────────────────
         elif itype in (IntentType.TRAIL_ON, IntentType.FORCE_CLOSE, IntentType.CLOSE):
 
-            # ★ V11 [05-04]: Stop-Market SL 주문 취소 큐 등록
-            #   청산 발동 시 기존 stop SL 주문 취소 (좀비 방지)
-            #   직접 ex.cancel 호출 X (sync 함수 + 외부 호출 분리), 큐에 등록 → runner가 처리
-            try:
-                if isinstance(p, dict):
-                    _stop_oid = p.get("_stop_sl_oid")
-                    if _stop_oid:
-                        _queue = system_state.setdefault("_stop_sl_cancel_queue", [])
-                        _queue.append({"sym": sym, "oid": _stop_oid})
-                        p.pop("_stop_sl_oid", None)
-                        p.pop("_stop_sl_price", None)
-                        p.pop("_stop_sl_pending", None)
-            except Exception as _ssc:
-                print(f"[STOP_SL_CANCEL_QUEUE] 무시: {_ssc}")
+            # ★ V11 hf8 [05-05]: SL cancel queue 제거 — 1분 reconcile이 담당
+            #   기존 V11 [05-04]: 청산 시 _stop_sl_cancel_queue에 등록 → runner가 cancel
+            #   문제: cancel queue 한 번 소비 후 OID 손실, 일부 race 케이스 작동 X
+            #         (LINK 케이스: PTP_MKT FORCE_CLOSE 후 SL 잔존 [05-05 12:13])
+            #   해결: 라이프사이클의 cancel 책임을 _tick_register_stop_sl 1분 reconcile로 일원화
+            #         거래소 fetch_open_orders 기준 단일 진실 공급원, 매칭 안 되는 STOP cancel
+            #   _stop_sl_oid pop도 제거 — clear_position이 어차피 dict 통째로 제거
             
             # ★ [BUG-SH3] role 교차검증 — 잘못된 side로 소스 삭제 방지
             # intent.metadata에 기대하는 role이 있으면, 실제 포지션 role과 비교

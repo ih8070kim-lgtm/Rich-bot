@@ -89,3 +89,55 @@ T1 TP trail과 T2+ TRIM trail과 TRAIL_ON 모두 동일 기준 사용.
 검증 로그:
 - `log_system("REGIME_CHANGE", ...)` 전환 시 점수/TF 퍼센타일 기록
 - 1~2주 누적 후 HIGH 실제 빈도 + 점수 분포 확인 가능
+
+
+---
+
+## STOP_SL 라이프사이클 (V11 hf8 [05-05])
+
+### 컨셉
+거래소 Stop-Market reduceOnly 주문으로 HARD_SL을 보호. 진입 직후 등록, 1분 주기 reconcile로 좀비 정리.
+
+### 라이프사이클
+```
+[진입]
+1. limit OPEN fill → set_p() → _stop_sl_pending 세팅 (runner._apply_pending_fill)
+2. 다음 tick _tick_register_stop_sl:
+   a. PRE_CANCEL: 같은 sym 모든 STOP+reduceOnly cancel (좀비/재시작 잔존 정리)
+   b. STOP_MARKET 등록 (Binance) — type="market" + params={stopPrice, type:"STOP_MARKET", workingType:"MARK_PRICE"}
+   c. p["_stop_sl_oid"] = 새 OID 저장
+
+[amt 변경 (DCA fill)]
+1. V11_AMT_GROW 분기 발동 (runner.py:1857)
+2. existing.pop("_stop_sl_oid") — stale OID 제거
+3. _stop_sl_pending 새 amt로 재세팅
+4. 다음 tick _tick_register_stop_sl이 PRE_CANCEL + 새 등록 (1번 흐름 재사용)
+
+[청산]
+1. FORCE_CLOSE/CLOSE/TRAIL_ON/TP1 전량체결/T2_DEF_V2 사다리/GHOST_CLEANUP 어떤 경로든
+2. clear_position 또는 set_p(None) — p에서 _stop_sl_oid 사라짐 (코드 명시 처리 X)
+3. 다음 1분 reconcile: 거래소 STOP+reduceOnly fetch → st 매칭 활성 포지션 없음 → cancel
+   [STOP_SL_RECONCILE] LINK/USDT close_side=buy oid=... cancel
+```
+
+### 1분 reconcile (`_tick_register_stop_sl` 0번 블록)
+- **주기**: 1분 (`_last_stop_sl_reconcile` throttle)
+- **API**: `ex.fetch_open_orders()` 단일 호출 (weight 40)
+- **필터**: STOP type + reduceOnly (type/info.type 둘 다 체크 — ccxt Binance 호환)
+- **매칭 로직**:
+  - close_side="buy" → 원래 포지션 SHORT (pos_side="sell") → `st[sym]["p_short"]` 체크
+  - close_side="sell" → 원래 포지션 LONG (pos_side="buy") → `st[sym]["p_long"]` 체크
+  - amt > 0 활성 포지션 없으면 cancel
+- **로그**: `STOP_SL_RECONCILE` (system) + 콘솔 print
+
+### 함정
+- **type 체크 결함 (V11 hf7까지 존재, hf8에서 수정)**: `(_oo.get("type") or _oo.get("info",{}).get("type",""))`는 OR 단락 평가라 `type="market"` (truthy) 시 `info.type` 안 봄. ccxt Binance가 STOP_MARKET을 `type="market"` + `info.type="STOP_MARKET"`로 반환할 때 누락 — LINK 좀비 발생 의심 원인.
+- **cancel queue 한 번 소비 후 손실 (V11 hf7까지 존재, hf8에서 제거)**: `system_state["_stop_sl_cancel_queue"]`가 한 tick에 처리 + `remaining=[]` 빈 리스트로 교체되는 패턴. cancel API 실패 시 silent except → OID 영원히 손실.
+- **포지션 dict 단일 진실 공급원의 한계**: `_stop_sl_oid`가 p에만 저장되면 set_p(None)/clear_position 시 OID 손실. V11 hf8은 거래소 fetch를 진실 공급원으로 사용해 이 의존성 제거.
+
+### 체크리스트 (코드 수정 시)
+- [ ] STOP type 체크는 반드시 `("STOP" in _top) or ("STOP" in _info_type)` 패턴 (단락 평가 X)
+- [ ] cancel queue 다시 도입하지 말 것 — reconcile이 일원화 처리
+- [ ] `_stop_sl_oid` 필드는 등록/V11_AMT_GROW 흐름 추적에만 사용 (cancel 결정에 의존 X)
+- [ ] reconcile 주기 변경 시 weight 영향 평가 (1분=40 weight, 30초=80 weight)
+- [ ] BC/CB/HEDGE role은 SL 등록 자체 안 함 — `if role != "CORE_MR": continue` 가드 유지
