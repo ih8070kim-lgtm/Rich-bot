@@ -1040,15 +1040,18 @@ def plan_open(
                         if _tr_cp <= 0:
                             continue
                         _tr_score = _calc_trend_score(_tr_15m)
-                        _TR_MIN = 0.5
+                        # ★ V14.5 [05-06]: _TR_MIN 절대 임계 폐기 — 사용자 결정 "상대 평가"
+                        #   기존 V10.31c: _TR_MIN=0.5 (방향성 0인 sym 차단 + 약한 추세도 차단)
+                        #   변경 V14.5: 방향만 일치(score 부호) + 절댓값 최대 sym 선정
+                        #   평탄 시기에도 \"덜 평탄한\" sym으로 컴프 hedge 진입 가능
                         # ★ V10.30: score 상한 (과열 역전 방지)
                         if abs(_tr_score) > TREND_MAX_SCORE:
                             continue
-                        if _tr_opp_side == "sell" and _tr_score < -_TR_MIN:
+                        if _tr_opp_side == "sell" and _tr_score < 0:
                             if abs(_tr_score) > _tr_best_score:
                                 _tr_best_score = abs(_tr_score)
                                 _tr_best_sym = _tr_sym
-                        elif _tr_opp_side == "buy" and _tr_score > _TR_MIN:
+                        elif _tr_opp_side == "buy" and _tr_score > 0:
                             if _tr_score > _tr_best_score:
                                 _tr_best_score = _tr_score
                                 _tr_best_sym = _tr_sym
@@ -1379,14 +1382,15 @@ def plan_open(
                     if _tc_cp <= 0:
                         continue
                     _tc_score = _calc_trend_score(_tc_15m)
-                    _TC_MIN = 0.5
+                    # ★ V14.5 [05-06]: _TC_MIN 절대 임계 폐기 — 사용자 결정 "상대 평가"
+                    #   NOSLOT과 동일 변경 (line 1043 참조)
                     if abs(_tc_score) > TREND_MAX_SCORE:
                         continue
-                    if _tc_opp_side == "sell" and _tc_score < -_TC_MIN:
+                    if _tc_opp_side == "sell" and _tc_score < 0:
                         if abs(_tc_score) > _tc_best_score:
                             _tc_best_score = abs(_tc_score)
                             _tc_best_sym = _tc_sym
-                    elif _tc_opp_side == "buy" and _tc_score > _TC_MIN:
+                    elif _tc_opp_side == "buy" and _tc_score > 0:
                         if _tc_score > _tc_best_score:
                             _tc_best_score = _tc_score
                             _tc_best_sym = _tc_sym
