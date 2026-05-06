@@ -1022,13 +1022,13 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
             _role = p.get("role", "")
             if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "BC", "CB"):
                 continue
-            # ★ V10.31b: HIGH 레짐 → trail 모드 (선주문 비활성)
-            from v9.strategy.planners import _btc_vol_regime
-            _tp_regime = _btc_vol_regime(snapshot) if snapshot else "LOW"
-            if _tp_regime == "HIGH":
-                if p.get("tp1_preorder_id"):
-                    await _cancel_tp1_preorder(ex, p, sym)
-                continue
+            # ★ V14.3 hotfix [05-06]: HIGH 레짐 차단 제거 — V14.2 trail 폐기 일관성
+            #   사용자 보고 [05-06 14:42]: SUI TREND_COMP 진입 후 +1.5% 도달했으나
+            #     TP1 preorder 발사 0건 → 사용자 수동 청산
+            #   원인: line 1028 V10.31b HIGH 레짐 분기가 V14.2 trail 폐기 시 누락
+            #   결과: HIGH 레짐 시 TP1 limit preorder 발사 안 됨 + trail도 폐기 → 청산 메커니즘 0
+            #   해결: trail 폐기 전제로 모든 레짐에서 TP1 limit preorder 사용
+            # 주석만 유지, 차단 분기 제거
             # ★ V10.31b: 미장전 정리 중 선주문 차단
             if p.get("pending_close"):
                 if p.get("tp1_preorder_id"):

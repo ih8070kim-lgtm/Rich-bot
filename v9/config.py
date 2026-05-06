@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.2"  # ★ V14.2 [05-06]: NOSLOT 활성 + T2/T3 임계 변경 + trail 폐기 (모두 limit 선주문)
+VERSION = "14.3"  # ★ V14.3 hotfix [05-06]: HIGH 레짐 TP1 preorder 차단 제거 (V14.2 trail 폐기 누락 fix). 사용자 보고: SUI +1.5% 익절 안됨 → 수동 청산
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
