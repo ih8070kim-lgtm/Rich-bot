@@ -2481,6 +2481,11 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
                 continue
             if p.get("role", "") in ("BC", "CB", "HEDGE", "SOFT_HEDGE", "INSURANCE_SH", "CORE_HEDGE"):
                 continue
+            # ★ V14.2 [05-06]: entry_type=TREND (NOSLOT/TREND_COMP) → 1단 진입 유지, DCA preorder 차단
+            #   사용자 결정: "노슬랏도 트랜드 컴프랑 동일하게 t1로만 진행"
+            #   role=CORE_MR_HEDGE는 entry_type=TREND로 들어옴 (planners.py)
+            if str(p.get("entry_type", "MR")) == "TREND":
+                continue
             if p.get("pending_dca") or int(p.get("step", 0) or 0) >= 1:
                 continue
             # ★ V10.31b: 미장전 정리 중 DCA 차단
@@ -3349,22 +3354,9 @@ async def _place_trim_preorders(ex, st, snapshot, system_state=None):
             if not isinstance(p, dict):
                 continue
 
-            # ★ V10.31b: HIGH 레짐 → trail 모드, 선주문 취소
-            # ★ V10.31g: 단, T3(dca_level>=3)은 HIGH라도 선주문 유지
-            #   plan_trim_trail이 T3을 trail 경로에서 제외했으므로 이 경로가 유일 처리자
-            from v9.strategy.planners import _btc_vol_regime
-            _trim_regime = _btc_vol_regime(snapshot) if snapshot else "LOW"
-            _dca_level_p = int(p.get("dca_level", 1) or 1)
-            if _trim_regime == "HIGH" and _dca_level_p < 3:
-                _trp_h = p.get("trim_preorders")
-                if _trp_h and isinstance(_trp_h, dict):
-                    for _ht, _hv in list(_trp_h.items()):
-                        if isinstance(_hv, dict) and _hv.get("oid"):
-                            from v9.strategy.strategy_core import _TRIM_CANCEL_QUEUE
-                            _TRIM_CANCEL_QUEUE.append({"sym": sym, "oid": _hv["oid"]})
-                    p["trim_preorders"] = {}
-                p.pop("trim_to_place", None)
-                continue
+            # ★ V14.2 [05-06]: HIGH 레짐 trail 분기 제거 — 사용자 결정 "레짐과 상관없이 trail 없이 trim만"
+            # 기존 V10.31b/g: HIGH 레짐 + dca_level<3 → trim_preorders cancel + trail 모드
+            # 변경 V14.2: 모든 레짐에서 trim preorder 유지 (trail 자체 폐기)
 
             # ★ V10.31b: stale trim_preorders 정리 — 거래소 취소 포함
             _trp = p.get("trim_preorders")

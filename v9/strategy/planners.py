@@ -1502,12 +1502,16 @@ def plan_open(
         _ns_prices = snapshot.all_prices or {}
         _ns_cp = float(_ns_prices.get(_ns["sym"], 0))
         if _ns_cp > 0:
+            # ★ V14.2 [05-06]: NOSLOT 풀사이즈 1단 (TREND_COMP와 동일)
+            # 사용자 결정: "노슬랏도 트랜드 컴프랑 동일하게 t1로만 진행"
+            # 기존: T1 사이즈 (DCA_WEIGHTS[0] / sum) + DCA targets
+            # 변경: 풀사이즈 (_ns_grid 통째) + DCA targets 빈 리스트 (entry_type=TREND가 _place_dca_preorders 차단)
             _ns_total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 차감
             _ns_grid = _ns_total_cap / GRID_DIVISOR * LEVERAGE
-            _ns_notional = _ns_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+            _ns_notional = _ns_grid  # ★ V14.2: 풀사이즈
             _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
             if _ns_qty > 0:
-                _ns_dca = _build_dca_targets(_ns_cp, _ns["side"], _ns_grid, regime=_btc_regime)
+                _ns_dca = []  # ★ V14.2: 1단 진입, DCA targets 비활성
                 _trend_cooldown[_ns["sym"]] = time.time() + TREND_COOLDOWN_SEC
                 intents.append(Intent(
                     trace_id=_tid(),
@@ -1519,7 +1523,8 @@ def plan_open(
                     reason=f"TREND_NOSLOT(sig={_ns['sig_sym']},score={_ns['score']:.1f})",
                     metadata={
                         "atr": 0.0, "dca_targets": _ns_dca,
-                        "role": "CORE_MR", "entry_type": "TREND",
+                        # ★ V14.2: role=CORE_MR_HEDGE (TREND_COMP와 동일 — 슬롯 분리, DCA 차단)
+                        "role": "CORE_MR_HEDGE", "entry_type": "TREND",
                         "positionSide": "LONG" if _ns["side"] == "buy" else "SHORT",
                         "locked_regime": _btc_regime,
                     },
@@ -1725,20 +1730,15 @@ def plan_trim_trail(snapshot: MarketSnapshot, st: Dict,
         if p.get("pending_close"):
             continue
 
-        # ★ V10.31b: 레짐별 exit 분기
-        # ★ V10.31g: T3은 레짐 불문 LIMIT 선주문 경로로 위임
-        #   근거: T3 trim threshold +0.5%는 매우 작은 이익 구간 — HIGH 변동성에서
-        #   trail이 peak +0.5% 찍고 0.3% 하락만으로 발동, +0.2%만 먹고 이탈 → 다시
-        #   T3 복귀 → T3_DEF/PRE_MKT/T3_8H 강제 청산으로 끌려가는 패턴.
-        #   LIMIT은 +0.5% 정확 도달 시 maker(0.02%) 수수료로 깔끔히 tier 감소.
-        _regime = _btc_vol_regime(snapshot)
-        if _regime != "HIGH" or dca_level >= 3:
-            # LOW/NORMAL or T3(any regime): _place_trim_preorders가 처리 → trail 정리 + skip
-            # 배포 시점에 이미 HIGH+T3 trail 활성 상태로 남은 잔존 포지션도 여기서 자동 정리
-            if p.get("trim_trail_active"):
-                p["trim_trail_active"] = False
-                p["trim_trail_max"] = 0.0
-            continue
+        # ★ V14.2 [05-06]: trail 폐기 — 사용자 결정 "레짐과 상관없이 trail 없이 trim 만"
+        # 기존 V10.31g: HIGH 레짐 + T2만 trail, T3은 LIMIT 선주문 (_place_trim_preorders)
+        # 변경 V14.2: 모든 레짐/tier에서 trail 비활성, _place_trim_preorders가 단일 청산 경로
+        # 이전 trail 활성 잔존 정리 (재기동 시 자동 정리)
+        if p.get("trim_trail_active"):
+            p["trim_trail_active"] = False
+            p["trim_trail_max"] = 0.0
+        continue
+        # ── 아래 trail 코드는 V14.2부터 진입 안 함 (위 continue로 차단) ──
 
         # ── HIGH (T2만): trail 모드 ──
         # 이전 LOW/NORMAL에서 남은 trim 선주문 취소 (이중 exit 방지)

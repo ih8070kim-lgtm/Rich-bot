@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.1"  # ★ V14.1 [05-06]: 슬롯 분리 — CORE_MR과 CORE_MR_HEDGE 별도 카운트, 1대1 매칭 (사용자 결정)
+VERSION = "14.2"  # ★ V14.2 [05-06]: NOSLOT 활성 + T2/T3 임계 변경 + trail 폐기 (모두 limit 선주문)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -25,7 +25,7 @@ VERSION = "14.1"  # ★ V14.1 [05-06]: 슬롯 분리 — CORE_MR과 CORE_MR_HEDG
 #   - 나머지는 MR 전용
 #   - HEDGE는 HIGH 레짐 한정
 
-TREND_NOSLOT_ENABLED = False  # ★ V10.31AA: MR 슬롯풀 시 다른 심볼 추세 진입 (EV 음수 증명됨)
+TREND_NOSLOT_ENABLED = True  # ★ V14.2 [05-06]: 활성화 — 사용자 결정. 메모리 [실측 V10.31AA EV 음수 증명] 인지하고 재시도. MR 시그널 없을 때 추세 단독 진입 (1대1 매칭이 메우지 못하는 슬롯 보충)
 HEDGE_COMP_ENABLED   = True   # ★ V13 [05-06]: TREND COMPANION 부활 — MR 풀사이즈 단일 진입 (사용자 결정)
 # 메모리 [실측 04-24]: HEDGE_COMP off 결정 — MR 메인 HARD_SL -29.23 vs 헷지 trim +0.63 패턴
 # V13 [05-06]: 사용자 재활성 결정 + 사이즈 MR 풀사이즈 (T1+T2+T3 합산)로 변경
@@ -143,7 +143,7 @@ DCA_ENTRY_ROI     = -1.5   # 레거시 호환 (T2 기본값)
 #   사용자 결정: 빠른 평단 압축 + T3 제거로 깊은 손실 차단
 #   MR 회귀 가정 → 가까이서 평단 압축 → 작은 반등에도 회복 가능
 #   T3 제거 + T2 디펜스 사다리(-1.5/-2.0/-2.5/-3.0)로 큰 손실 cap
-DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.6}  # ★ V13 [05-06]: T2 ROI -1.8%, T3 ROI -3.6% (사용자 사양)
+DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.0}  # ★ V14.2 [05-06]: T3 trigger -3.6 → -3.0 (사용자 결정)
 
 # ★ V10.31AO [04-30]: T2 다단계 디펜스/SL 사다리 (T3 제거된 스켈핑 패러다임)
 #   사용자 결정 [04-30]: T3 제거 + T2 단계에서 사다리식 보호
@@ -199,10 +199,10 @@ T1_HEDGE_LADDER = [
 ]
 
 T2_DEFENSE_LADDER = [
-    # ★ V14 [05-06]: MR T2 trim 사다리 (사용자 사양: "t2 -2.5에 0.5 트림")
-    # worst -2.5% 도달 후 ROI 회복 +0.5% 시 TRIM (T2 사이즈만 부분 청산, T2→T1 복귀)
+    # ★ V14.2 [05-06]: MR T2 trim 사다리 worst -2.5 → -2.0 (사용자 결정)
+    # worst -2.0% 도달 후 ROI 회복 +0.5% 시 TRIM (T2 사이즈만 부분 청산, T2→T1 복귀)
     # plan_t2_defense_v2 분기: role=CORE_MR + dca_level=2만 처리
-    (-2.5, 0.5, "TRIM"),
+    (-2.0, 0.5, "TRIM"),
 ]
 
 # ★ V13 [05-06]: T3 사다리 활성화 (사용자 사양 4단)
