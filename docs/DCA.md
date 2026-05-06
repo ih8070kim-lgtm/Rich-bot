@@ -182,3 +182,108 @@ _t3_def_m5_logged → False  # T3 디펜스 활성 플래그 (worst≤-5 최초 
 - [ ] **plan_dca 호출이 제거되었는지 (generate_all_intents)**
 - [ ] **★ V10.31AD: `max_roi_by_tier` 저장 시 `_pre_tier_val`을 `p["dca_level"] = tier` 할당 이전에 캡처했는지 (runner.py + strategy_core.py 양쪽)**
 - [ ] **★ V10.31AD: strategy_core.py에 중복 저장 블록(과거 L347-354) 없는지 — 있으면 0.0 덮어쓰기**
+
+
+---
+
+## V13 [05-06] — 3단 DCA 부활 (33/33/34)
+
+### 사양
+
+| Tier | 비중 | DCA Trigger (ROI) | HARD_SL | 사다리 |
+|---|---|---|---|---|
+| T1 | 33% | (진입) | -1.4% | 없음 |
+| T2 | 33% | -1.8% | -3.0% | 없음 (사용자 사양) |
+| T3 | 34% | -3.6% | -5.5% | 4단 (V13 신규) |
+
+### T3_DEFENSE_LADDER 사양
+```python
+T3_DEFENSE_LADDER = [
+    (-4.0, -2.5, "SL"),    # worst≤-4.0% + max≥-2.5% 회복 → -2.5% market cut
+    (-4.5, -3.0, "SL"),    # worst≤-4.5% + max≥-3.0% 회복 → -3.0% market cut
+    (-5.0, -4.0, "SL"),    # worst≤-5.0% + max≥-4.0% 회복 → -4.0% market cut
+    (-5.5, None, "HARD_SL"),  # worst≤-5.5% 즉시 HARD_SL market cut
+]
+```
+
+### TRIM 부활
+```python
+TRIM_BLENDED_ROI_BY_TIER = {2: 1.0, 3: 0.5}
+```
+T2 회복 +1.0%/T3 회복 +0.5% → trim 부분 청산 (T2→T1 복귀 / T3→T2 복귀)
+
+### TREND COMPANION (HEDGE_COMP)
+- `HEDGE_COMP_ENABLED = True`
+- 비중: MR 풀사이즈 (T1+T2+T3 합산 = `_hc_grid` 100%)
+- 1단 진입 (DCA 없음, `_hc_dca_targets = []`)
+- MR 진입 시 자동 트리거 (같은 sym 반대방향)
+
+### 위험 [메모리 명시]
+- **T3 부활**: V10.31 [실측 -$1,598 손실원] 패턴 반복 가능성
+- **HEDGE_COMP 100%**: V11 hf 시기 33% 대비 3배 임팩트 ([실측 04-24 -29 vs +0.6])
+- **T2 사다리 없음**: 회복 50~80% 케이스 trim 박탈 [추정]
+- **HEDGE_COMP 1단 비대칭**: 메인 MR 3단 vs 헷지 1단 = 동시 청산 패턴 다름
+
+### V11 → V13 변경
+| | V11 (T1만) | V13 (3단) |
+|---|---|---|
+| DCA_WEIGHTS | [100] | [33, 33, 34] |
+| HARD_SL | T1: -1.4 | T1: -1.4, T2: -3.0, T3: -5.5 |
+| 사다리 | T1 (-1.0/-1.2/-1.4) | T3 4단 (-4.0/-4.5/-5.0/-5.5) |
+| TRIM | 없음 | T2: +1.0%, T3: +0.5% |
+| HEDGE_COMP | False | True (풀사이즈) |
+| 코드 분기 | _is_v11=True | _is_v11=False (자동) |
+
+### 자동 분기 (`_is_v11`)
+```python
+_is_v11 = (len(DCA_WEIGHTS) == 1 and DCA_WEIGHTS[0] == 100)
+# V13: [33, 33, 34] → False → V10 모드 (dca_level=2 처리)
+# V11: [100]       → True  → V11 모드 (dca_level=1 처리)
+```
+이 자동 분기로 코드 추가 if 없이 V11/V13 호환.
+
+### 체크리스트 (수정 시)
+- [ ] DCA_WEIGHTS 변경 시 sum=100 유지 필수
+- [ ] DCA_ENTRY_ROI_BY_TIER 키는 dca_level (2, 3) — T1 진입은 plan_open이 처리
+- [ ] HARD_SL_BY_TIER 모든 tier 키 보장 (없는 tier는 fallback -4.0%)
+- [ ] T2 사다리 사양 변경 시 plan_t2_defense_v2의 `target_tier` (현재 1) 검토
+- [ ] T3 사다리 사양 변경 시 calc_t3_defense_action + plan_t3_defense_v2 동시
+- [ ] HEDGE_COMP notional 변경 시 _hc_dca_targets 동기화
+
+
+### V13.1 [05-06] — role 분기 (T1 사다리 HEDGE_COMP 전용)
+
+#### 변경
+- `HARD_SL_BY_TIER[1]`: -1.4 → **-2.5** (MR T1만 적용)
+- `T2_DEFENSE_LADDER`: V11 사양 부활, plan_t2_defense_v2가 role 기반 차단
+
+#### role 분기 매트릭스
+```
+                | MR (CORE_MR) | HEDGE_COMP (CORE_MR_HEDGE)
+T1 사다리       | 차단         | 작동 (-1.0/-1.2/-1.4)
+HARD_SL T1      | -2.5%        | -2.5% (사다리가 먼저 -1.4)
+T2 사다리       | 없음         | N/A (1단 진입)
+T3 사다리       | 작동         | N/A
+```
+
+#### 의도
+- **MR T1 hard SL -2.5%**: T2 DCA 트리거(-1.8%) 통과 위해 멀리. T2 fill 실패 시 안전망.
+- **HEDGE_COMP T1 사다리**: 회복 시 cut, V11 사용자 통찰 [실측] 89% 회복 패턴 활용.
+
+#### 두 시스템 공존
+- HEDGE_COMP에 사다리 + plan_force_close 둘 다 적용 가능
+- 사다리 -1.4% HARD_SL이 plan_force_close -2.5%보다 먼저 발동
+- 충돌 없음 (자연 우선순위)
+
+#### 코드 분기 (plan_t2_defense_v2)
+```python
+if _is_v11:
+    if role != "CORE_MR" or dca_level != 1: continue
+else:  # V13 모드
+    if role != "CORE_MR_HEDGE" or dca_level != 1: continue
+```
+
+#### 위험
+- MR T1 단일 운영 시 손실 -2.5% (V11 -1.4% 대비)
+- T2 fill 실패 (스파이크) 시 -2.5%까지 hold
+- DCA_WEIGHTS 변경 시 _is_v11 분기 자동 변화 주의

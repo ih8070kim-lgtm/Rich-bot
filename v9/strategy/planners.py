@@ -1335,13 +1335,16 @@ def plan_open(
                     if _hc_opp_slots >= MAX_MR_PER_SIDE:
                         print(f"[HEDGE_SKIP] {symbol} {_hc_opp_side} 슬롯풀({_hc_opp_slots}/{MAX_MR_PER_SIDE})")
                     else:
-                        # ★ T1 notional — MR과 동일 크기
+                        # ★ V13 [05-06]: HEDGE_COMP MR 풀사이즈 (T1+T2+T3 합산 100%)
+                        #   기존 V10/V11: T1 notional만 (DCA_WEIGHTS[0]/sum)
+                        #   변경 V13: 풀사이즈 단일 진입 — 사용자 결정 [05-06] "트랜드 컴프로 mr 풀사이즈로"
+                        #   위험 [실측 04-24 -29 vs +0.6 패턴 재현 가능, 사이즈 3배 임팩트]
                         _hc_grid = total_cap / GRID_DIVISOR * LEVERAGE
-                        _hc_notional = _hc_grid * (DCA_WEIGHTS[0] / sum(DCA_WEIGHTS))
+                        _hc_notional = _hc_grid  # ★ V13: 풀사이즈 (DCA_WEIGHTS 분할 없음, 1단)
                         _hc_qty = _hc_notional / curr_p if curr_p > 0 and _hc_notional >= 10 else 0
                         if _hc_qty > 0:
-                            _hc_dca_targets = _build_dca_targets(
-                                curr_p, _hc_opp_side, _hc_grid, regime=_btc_regime)
+                            # ★ V13: HEDGE_COMP는 1단 진입이라 dca_targets 빈 리스트 (DCA pre-order X)
+                            _hc_dca_targets = []
                             system_state["_pending_hedge_comp"] = {
                                 "symbol": symbol,   # ★ 동일 심볼
                                 "side": _hc_opp_side,
@@ -1797,23 +1800,28 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
         for _iter_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
                 continue
-            # ★ V11 [05-05]: T1 단일 진입 사다리 (dca_level=1만, V11 모드)
-            #   사용자 결정: 단순 SL slippage 문제 → 사다리로 회복 케이스 보호
-            #   T2_DEFENSE_LADDER 명칭은 호환용, 실제로는 T1에 적용
+            # ★ V13.1 [05-06]: 사다리 적용 대상 분기
+            #   사용자 결정 [05-06]: "T1 사다리는 트랜드 컴프만"
+            #   - V11 모드 (DCA_WEIGHTS=[100]): 기존대로 dca_level=1 (MR T1 단일)
+            #   - V13 모드 (DCA_WEIGHTS=[33,33,34]):
+            #       role=CORE_MR_HEDGE + dca_level=1 → T1 사다리 적용 (HEDGE_COMP)
+            #       role=CORE_MR + 어떤 dca_level → T2_DEFENSE_LADDER 안 탐 (사용자 사양)
+            #       (MR 보호는 plan_force_close HARD_SL_BY_TIER가 매 cycle 처리)
             from v9.config import DCA_WEIGHTS as _V11_DCA_W
             _is_v11 = (len(_V11_DCA_W) == 1 and _V11_DCA_W[0] == 100)
             
+            _role_pdef = p.get("role", "")
+            _dca_lv_pdef = int(p.get("dca_level", 1) or 1)
+            
             if _is_v11:
-                # V11 모드: dca_level=1만 처리
-                if int(p.get("dca_level", 1) or 1) != 1:
+                # V11 모드 (T1 단일 운영, MR T1 사다리)
+                if _role_pdef != "CORE_MR" or _dca_lv_pdef != 1:
                     continue
             else:
-                # 기존 V10 호환: dca_level=2만 처리
-                if int(p.get("dca_level", 1) or 1) != 2:
+                # V13 모드: HEDGE_COMP T1만 사다리, MR은 차단
+                if _role_pdef != "CORE_MR_HEDGE" or _dca_lv_pdef != 1:
                     continue
-            _role = p.get("role", "")
-            if _role not in ("CORE_MR", "CORE_MR_HEDGE"):
-                continue
+            _role = _role_pdef
             _amt = float(p.get("amt", 0) or 0)
             if _amt <= 0:
                 continue
@@ -1968,12 +1976,137 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
     return intents
 
 
-# ★ V10.31AO: plan_t3_defense_v2 호환성 stub (T3 제거로 빈 리스트 반환)
+# ★ V13 [05-06]: T3 다단계 디펜스 부활 (사용자 사양 사다리)
 def plan_t3_defense_v2(snapshot: MarketSnapshot, st: Dict,
                         system_state: Dict = None,
                         exclude_syms: set = None) -> List[Intent]:
-    """★ V10.31AO: T3 제거됨 — 빈 리스트 반환 (호환성 stub)."""
-    return []
+    """T3 다단계 디펜스 — V13 사용자 사양 사다리.
+    
+    사다리 (config.T3_DEFENSE_LADDER):
+        worst -4.0% → ROI ≥ -2.5% SL (회복 cut)
+        worst -4.5% → ROI ≥ -3.0% SL
+        worst -5.0% → ROI ≥ -4.0% SL
+        worst -5.5%             HARD_SL (즉시 전량 컷)
+    
+    PTP 차단 정책: _ptp_active_syms 활성 심볼 → 본 함수 차단
+    중복 발동 방지: 포지션별 _t3_def_v2_last_step 추적
+    """
+    intents: List[Intent] = []
+    if exclude_syms is None:
+        exclude_syms = set()
+    
+    _ptp_active = set((system_state or {}).get("_ptp_active_syms", set()) or set())
+    
+    for symbol, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        if symbol in exclude_syms or symbol in _ptp_active:
+            continue
+        for _iter_side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            # T3만 처리 (dca_level=3)
+            if int(p.get("dca_level", 1) or 1) != 3:
+                continue
+            _role = p.get("role", "")
+            if _role not in ("CORE_MR", "CORE_MR_HEDGE"):
+                continue
+            _amt = float(p.get("amt", 0) or 0)
+            if _amt <= 0:
+                continue
+            ep = float(p.get("ep", 0) or 0)
+            if ep <= 0:
+                continue
+            curr_p = float((snapshot.all_prices or {}).get(symbol, 0) or 0)
+            if curr_p <= 0:
+                continue
+            
+            side = p.get("side", "")
+            roi = calc_roi_pct(ep, curr_p, side, LEVERAGE)
+            worst = float(p.get("worst_roi", 0) or 0)
+            max_r = float(p.get("max_roi_seen", 0) or 0)
+            
+            action = calc_t3_defense_action(worst, max_r)
+            if action is None:
+                continue
+            mode, exit_roi = action
+            
+            # 중복 발동 방지
+            _last_step = float(p.get("_t3_def_v2_last_step", 0) or 0)
+            _curr_step_worst = None
+            for w_enter, _ex, _md in T3_DEFENSE_LADDER:
+                if worst <= w_enter:
+                    _curr_step_worst = w_enter
+                else:
+                    break
+            if _curr_step_worst is None:
+                continue
+            if _last_step <= _curr_step_worst:
+                if mode != "HARD_SL":
+                    continue
+            
+            # 발동 조건
+            _fire = False
+            _reason = ""
+            if mode == "HARD_SL":
+                _fire = True
+                _reason = f"T3_DEF_HARD_SL(worst={worst:.2f}%)"
+            elif mode == "SL":
+                if roi >= exit_roi:
+                    _fire = True
+                    _reason = f"T3_DEF_SL(worst={worst:.2f}%,exit={exit_roi:+.1f}%,roi={roi:+.1f}%)"
+            
+            if not _fire:
+                continue
+            
+            p["_t3_def_v2_last_step"] = _curr_step_worst
+            
+            _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
+            _qty = _amt  # T3 사다리는 전량 컷만 (TRIM 단계 없음)
+            if _qty < _min_qty:
+                continue
+            
+            if system_state is not None:
+                _hsl_hist = system_state.setdefault("_hard_sl_history", [])
+                _hsl_hist.append({
+                    "ts": time.time(),
+                    "side": side,
+                    "sym": symbol,
+                    "reason": _reason,
+                })
+            
+            intents.append(Intent(
+                trace_id=_tid(),
+                intent_type=IntentType.CLOSE,
+                symbol=symbol,
+                side="sell" if side == "buy" else "buy",
+                qty=_qty,
+                price=curr_p,
+                reason=_reason,
+                metadata={
+                    "force_market": True,
+                    "is_force_close": True,
+                    "t3_defense_v2": True,
+                    "t3_def_mode": mode,
+                    "t3_def_step_worst": _curr_step_worst,
+                    "snap_ts": getattr(snapshot, "ts", 0),
+                },
+            ))
+            print(f"[T3_DEF_V2] ⛔ {symbol} {side} {mode} qty={_qty} roi={roi:+.2f}% worst={worst:+.2f}%")
+            try:
+                from v9.logging.logger_ml import record_ml_event as _rec_ml_t3
+                from v9.config import LEVERAGE as _LEV_T3
+                _rec_ml_t3(
+                    trace_id=intents[-1].trace_id,
+                    event_type=f"T3_DEF_{mode}",
+                    p=p, sym=symbol, snapshot=snapshot, st=st,
+                    real_balance=float(getattr(snapshot, 'real_balance_usdt', 0) or 0),
+                    leverage=_LEV_T3, log_dir="v9_logs",
+                )
+            except Exception:
+                pass
+    
+    return intents
 
 
 # ═════════════════════════════════════════════════════════════════
