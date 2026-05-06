@@ -483,8 +483,8 @@ _TREND_SKIP_LOG_CD_SEC = 300  # 심볼당 5분 1회
 
 def _calc_trend_score(ohlcv_15m: list, ohlcv_1m: list = None) -> float:
     """추세 점수: EMA 이격 × 거래량 서지 × RSI 가중치.
-    양수=상승 추세, 음수=하락 추세. ★ V10.31c: 후보 풀 진입 기준은 _TR_MIN=0.5,
-    NOSLOT/COMP 발사 시 abs()가 1.0~2.0이면 블록됨 (애매한 트렌드 차단)."""
+    양수=상승 추세, 음수=하락 추세. ★ V14.4 [05-06]: 후보 풀 진입 기준은 _TR_MIN=0.5,
+    1.0~2.0 차단 제거 (사용자 결정 [05-06])."""
     if len(ohlcv_15m) < 35:
         return 0.0
     closes = [float(b[4]) for b in ohlcv_15m]
@@ -1459,20 +1459,11 @@ def plan_open(
             _noslot_best = None
     if _noslot_best:
         _ns = _noslot_best
-        # ★ V10.31b: score 1.0~2.0 필터
-        if 1.0 <= _ns["score"] < 2.0:
-            # ★ V10.31c: 모듈 dict로 쿨다운 관리 (setattr 리셋 문제 fix)
-            _skip_key = f"NOSLOT:{_ns['sym']}"
-            _now_t = time.time()
-            if _now_t - _TREND_SKIP_LOG_CD.get(_skip_key, 0) > _TREND_SKIP_LOG_CD_SEC:
-                _TREND_SKIP_LOG_CD[_skip_key] = _now_t
-                print(f"[TREND_SCORE_SKIP] NOSLOT {_ns['sym']} score={_ns['score']:.1f} "
-                      f"(1.0~2.0 필터) ← {_ns['sig_sym']}")
-                try:
-                    from v9.logging.logger_csv import log_system
-                    log_system("TREND_SCORE_SKIP", f"NOSLOT {_ns['sym']} score={_ns['score']:.1f} sig={_ns['sig_sym']}")
-                except Exception: pass
-            _noslot_best = None
+        # ★ V14.4 [05-06]: score 1.0~2.0 차단 분기 제거 — 사용자 결정
+        #   기존 V10.31b: 1.0~2.0 영역 "애매한 추세"로 차단
+        #   변경: 검증 안 된 직관 기반 가드, 0.5~1.0은 OK인데 1.0~2.0은 차단의 비단조성 의심
+        #   1주 운영 후 이 영역 진입 EV 데이터로 결정
+        # 차단 분기 폐기 — _noslot_best 그대로 유지
     if _noslot_best:
         _ns = _noslot_best
         # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼 보호 — universe 풀 필터 이후에도
