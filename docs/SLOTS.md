@@ -46,3 +46,43 @@ MR ≥ 0.80 → OPEN 금지 (신규만)
 MR ≥ 0.85 → OPEN + DCA 금지
 MR ≥ 0.90 → 전체 동결 (청산만 허용)
 ```
+
+
+---
+
+## V14.1 [05-06] — 슬롯 분리 (CORE_MR vs CORE_MR_HEDGE)
+
+### 변경
+V10.31u 규칙 (CORE_MR_HEDGE를 CORE_MR 슬롯에 합쳐 카운트) 제거.
+
+### 슬롯 카운트 로직 (V14.1)
+```
+count_slots(role_filter="CORE_MR"):
+  - CORE_MR + CORE_BREAKOUT만 카운트
+  - CORE_MR_HEDGE 제외 (V14.0까지는 포함했음)
+  - BC/CB/HEDGE/SOFT_HEDGE/INSURANCE_SH 제외 (이전과 동일)
+
+CORE_MR_HEDGE는 별도 직접 카운트 (planners.py:1318):
+  - planners.py가 활성 포지션 순회하며 카운트
+  - HEDGE 슬롯 한도 = MAX_MR_PER_SIDE (4)
+```
+
+### 1대1 매칭 작동
+1. plan_open MR 진입 시그널 감지 → CORE_MR 슬롯 체크 (4 한도)
+2. MR intent 발사 → TREND_COMP 트리거 → HEDGE 슬롯 체크 (4 한도)
+3. MR fill 후 TREND_COMP 발사
+4. 결과: MR 4쌍 + TREND_COMP 4쌍 = 8 포지션 동시 가능
+
+### 위험
+- 자본 노출 2배 (마진 사용량 증가)
+- 변동성 시기 양쪽 SL 발생 시 손실 임팩트 2배
+
+### 매트릭스
+| 시나리오 | V14.0 (합쳐 카운트) | V14.1 (분리) |
+|---|---|---|
+| MR LINK BUY + AVAX TREND SHORT | CORE_MR (1L, 1S) | CORE_MR (1L, 0S) + HEDGE (0L, 1S) |
+| MR 4쌍 모두 활성 | 슬롯 풀 가능성 | MR 4 + HEDGE 4 별도 |
+| 다음 MR 진입 시도 | 슬롯풀 차단 가능 | MR 슬롯만 체크 |
+
+### V11 호환
+DCA_WEIGHTS=[100] 시 TREND_COMP 진입 안 함 → V14.1 변경 영향 0. V11 단순 운영 그대로.

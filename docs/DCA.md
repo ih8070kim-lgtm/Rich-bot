@@ -287,3 +287,71 @@ else:  # V13 모드
 - MR T1 단일 운영 시 손실 -2.5% (V11 -1.4% 대비)
 - T2 fill 실패 (스파이크) 시 -2.5%까지 hold
 - DCA_WEIGHTS 변경 시 _is_v11 분기 자동 변화 주의
+
+
+### V14 [05-06] — TREND_COMP 회귀 + MR T2 trim 사다리 + HARD_SL_T2 -4.0%
+
+#### 변경 요약
+- **HEDGE_COMP** (V13: 같은 sym 반대) → **TREND_COMP** (V14: 다른 sym 추세 방향)
+- **HARD_SL_T2** -3.0 → **-4.0** (T3 DCA -3.6% 통과 위해)
+- **T2 trim 사다리 신설**: `T2_DEFENSE_LADDER = [(-2.5, 0.5, "TRIM")]`
+- **사다리 변수 분리**:
+  - `T1_HEDGE_LADDER`: TREND_COMP T1 (V13.1 spec 그대로)
+  - `T2_DEFENSE_LADDER`: MR T2 trim
+  - `T3_DEFENSE_LADDER`: MR T3 (V13 spec 그대로)
+
+#### role/tier 매트릭스 (V14)
+```
+              | MR (CORE_MR)              | TREND_COMP (CORE_MR_HEDGE)
+T1 사다리     | 차단                       | T1_HEDGE_LADDER 작동
+T2 사다리     | T2_DEFENSE_LADDER 작동      | N/A (1단)
+T3 사다리     | T3_DEFENSE_LADDER 작동      | N/A
+HARD_SL T1    | -2.5%                     | -2.5% (사다리 -1.4 먼저)
+HARD_SL T2    | -4.0%                     | N/A
+HARD_SL T3    | -5.5%                     | N/A
+TRIM          | T2: -2.5/+0.5             | N/A
+DCA           | 33/33/34, T2/-1.8 T3/-3.6 | 없음 (1단 풀사이즈)
+```
+
+#### plan_t2_defense_v2 분기 (V14)
+```python
+if _is_v11:
+    # V11: MR T1
+    if role != "CORE_MR" or dca_level != 1: continue
+    ladder = T1_HEDGE_LADDER; calc = calc_t1_hedge_action
+    step_key = "_t1_hedge_last_step"
+elif role == "CORE_MR_HEDGE" and dca_level == 1:
+    # V14: TREND_COMP T1
+    ladder = T1_HEDGE_LADDER; calc = calc_t1_hedge_action
+    step_key = "_t1_hedge_last_step"
+elif role == "CORE_MR" and dca_level == 2:
+    # V14: MR T2 trim
+    ladder = T2_DEFENSE_LADDER; calc = calc_t2_defense_action
+    step_key = "_t2_def_v2_last_step"
+else:
+    continue  # T3는 plan_t3_defense_v2 별도
+```
+
+#### TREND_COMP 후보 선정 (planners.py:1286~)
+1. MR 진입 시 _trend_signal_side 감지 시
+2. _tc_opp_side = MR 반대방향
+3. universe 풀 (global_targets_long/short)에서 후보 검색
+4. 필터: corr ≥ OPEN_CORR_MIN, 15m candle ≥ 35, score 임계, LONG_ONLY/SHORT_ONLY 제외
+5. 최고 score 1개 선정 → _pending_trend_comp 세팅
+6. MR fill 확인 후 다음 cycle pending fire (TREND_FIRE)
+
+#### 메모리 위험 패턴
+- [실측 V10.31u]: TREND_COMP -$30 순손실, ARB -$50 큰 손실
+- V14 사이즈 풀사이즈 = 임팩트 3배
+- universe 필터 개선됐으나 같은 알파 → 1주 운영 데이터로 재검증
+
+#### HEDGE_COMP_ENABLED 플래그 재사용
+- 코드 단순화 위해 V13 플래그 그대로 사용 (변수명만 의미 변경)
+- True일 때 TREND_COMP 발사
+- False면 양쪽 다 비활성
+
+#### 체크리스트
+- [ ] 사다리 변수 변경 시 step_key 동시 업데이트
+- [ ] role 추가 시 plan_t2_defense_v2 분기 매트릭스 모두 검증
+- [ ] HARD_SL_T2 변경 시 T3 DCA 트리거(-3.6) 통과 가능 여부 검증
+- [ ] T2 trim 임계 변경 시 TP1(+1.5) 충돌 없는지 검증 (T2 trim < TP1)

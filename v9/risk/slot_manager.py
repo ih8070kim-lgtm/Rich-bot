@@ -55,9 +55,11 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
             # MR 슬롯 카운트에서 빠져 총량만 차지하는 문제 해결
             if role_filter:
                 _role = (p or {}).get("role", "CORE_MR")
-                # ★ V10.31u: CORE_MR_HEDGE도 CORE_MR 슬롯 카운트에 포함
-                # (MR과 동일 로직 사용, 같은 심볼 반대 방향 헷지 = MR 슬롯 확장)
-                if role_filter == "CORE_MR" and _role not in ("CORE_MR", "CORE_BREAKOUT", "CORE_MR_HEDGE"):
+                # ★ V14.1 [05-06]: CORE_MR_HEDGE 분리 — 별도 슬롯 카운트
+                #   사용자 결정 [05-06]: "그 규칙 없애자 그냥 1대1매칭으로 해 하나 작을필요없어"
+                #   기존 V10.31u: CORE_MR_HEDGE도 CORE_MR에 합쳐 카운트 → 같은 sym 양방향 진입 시 슬롯 2 차지
+                #   변경: 분리 → 1대1 매칭 (MR 진입 시 컴프 자동 진입)이 슬롯 자연 제한
+                if role_filter == "CORE_MR" and _role not in ("CORE_MR", "CORE_BREAKOUT"):
                     continue
                 if role_filter == "CORE_HEDGE" and _role != "CORE_HEDGE":
                     continue
@@ -120,8 +122,8 @@ def count_slots(st: Dict, role_filter: str = None) -> SlotCounts:
                 continue
             # role_filter 적용
             if role_filter:
-                # ★ V10.31u: CORE_MR_HEDGE도 CORE_MR 슬롯 카운트에 포함
-                if role_filter == "CORE_MR" and _pl_role not in ("CORE_MR", "CORE_BREAKOUT", "CORE_MR_HEDGE"):
+                # ★ V14.1 [05-06]: CORE_MR_HEDGE 분리 (위와 동일 로직)
+                if role_filter == "CORE_MR" and _pl_role not in ("CORE_MR", "CORE_BREAKOUT"):
                     continue
                 if role_filter == "CORE_HEDGE" and _pl_role != "CORE_HEDGE":
                     continue

@@ -632,7 +632,7 @@ def plan_open(
                     side=_ptc_side,
                     qty=_ptc_qty,
                     price=_ptc_cp,
-                    reason=f"HEDGE_COMP(mr={_ptc_mr_sym})",
+                    reason=f"TREND_COMP(mr={_ptc_mr_sym})",
                     metadata={
                         "atr": 0,
                         "dca_targets": _ptc.get("dca_targets", []),
@@ -647,7 +647,7 @@ def plan_open(
                         "locked_regime": _ptc.get("regime", "LOW"),
                     },
                 ))
-                print(f"[HEDGE_FIRE] {_ptc_sym} {_ptc_side} (동일 심볼 반대방향) "
+                print(f"[TREND_FIRE] {_ptc_sym} {_ptc_side} (다른 sym 추세) "
                       f"← MR {_ptc_mr_sym} filled (delay={_ptc_age:.0f}s)")
             system_state.pop("_pending_hedge_comp", None)
             system_state.pop("_pending_trend_comp", None)
@@ -1283,13 +1283,13 @@ def plan_open(
         else:
             _tick_new_short += 1
 
-        # ★ V10.31u: TREND_COMP → HEDGE_COMP (동일 심볼 반대방향)
-        # MR 진입 성공 시, 같은 심볼 반대 방향으로 CORE_HEDGE 동시 진입
-        # 이전 TREND_COMP (다른 심볼 선정)는 -$30 순손실, ARB -$50 등 큰 손실
-        # HEDGE_SIM 13건 +2% 모두 수익 → 실전 동일 로직 적용
-        # entry_type=TREND → T3_3H 시간컷 적용, role=CORE_HEDGE (반대방향 식별용)
+        # ★ V14 [05-06]: HEDGE_COMP → TREND_COMP 회귀 (다른 sym 추세 방향, MR 풀사이즈)
+        # 사용자 결정 [05-06]: "헷지 컴프말고 트랜드 컴프라니까 / 지금 1단으로 하던 mr을 트랜드 컴프한테 넘기고"
+        # 메모리 [실측 V10.31u]: 이전 TREND_COMP -$30 순손실 (ARB -$50 등) 패턴 가능성 인지
+        # V13에서 같은 sym 반대(HEDGE_COMP)였던 것을 다른 sym 추세 방향으로 변경
+        # 사이즈는 V13 그대로 MR 풀사이즈 (T1+T2+T3 합산)
 
-        # ★ V10.31AA: HEDGE_COMP_ENABLED flag 체크 (MR 단일 모드 시 비활성)
+        # ★ V10.31AA: HEDGE_COMP_ENABLED flag 체크 (TREND_COMP도 같은 플래그 재사용)
         _hc_flag_ok = True
         try:
             from v9.config import HEDGE_COMP_ENABLED
@@ -1298,70 +1298,129 @@ def plan_open(
         except Exception: pass
 
         if _trend_signal_side and _hc_flag_ok:
-            _hc_opp_side = "sell" if trigger_side == "buy" else "buy"
-            # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼은 HEDGE 제외
-            # 예: XRP는 LONG_ONLY → sell HEDGE 금지 (펀딩/토크노믹스 제약)
-            #     FIL은 SHORT_ONLY → buy HEDGE 금지
-            # MR 단독 운용은 계속 유지 (plan_open에서 이미 방향 필터링 완료)
-            _hc_skip_whitelist = False
-            try:
-                from v9.config import LONG_ONLY_SYMBOLS as _LONG_ONLY, SHORT_ONLY_SYMBOLS as _SHORT_ONLY
-                if _hc_opp_side == "sell" and symbol in _LONG_ONLY:
-                    _hc_skip_whitelist = True
-                    print(f"[HEDGE_SKIP] {symbol} sell (LONG_ONLY 심볼 → HEDGE 제외)")
-                elif _hc_opp_side == "buy" and symbol in _SHORT_ONLY:
-                    _hc_skip_whitelist = True
-                    print(f"[HEDGE_SKIP] {symbol} buy (SHORT_ONLY 심볼 → HEDGE 제외)")
-                if _hc_skip_whitelist:
-                    try:
-                        from v9.logging.logger_csv import log_system
-                        log_system("HEDGE_SKIP_WHITELIST",
-                                   f"{symbol} {_hc_opp_side} ← MR {trigger_side} (전용심볼)")
-                    except Exception: pass
-            except Exception:
-                pass
+            # ★ V14: 다른 sym 추세 방향 후보 선정 (NOSLOT 로직과 동일 universe 필터)
+            _tc_opp_side = "sell" if trigger_side == "buy" else "buy"  # MR 반대방향
+            _tc_held = {s for s, ss in st.items() if isinstance(ss, dict)
+                        for _, p in iter_positions(ss)
+                        if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
+            _tc_entered = {i.symbol for i in intents}
+            _tc_ohlcv_pool = snapshot.ohlcv_pool or {}
+            _tc_prices = snapshot.all_prices or {}
+            _tc_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
+            _tc_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
+            _tc_allowed_pool = _tc_long_pool if _tc_opp_side == "buy" else _tc_short_pool
 
-            if _hc_skip_whitelist:
-                pass  # 전용심볼 → HEDGE 발사 안 함
+            # ★ V14.1 [05-06]: TREND_COMP 슬롯 체크 — CORE_MR_HEDGE 별도 카운트
+            #   기존 V14: _core_short/_core_long (V10.31u에서 CORE_MR + HEDGE 합계)
+            #   변경 V14.1: CORE_MR_HEDGE는 이제 슬롯 분리됨 → 별도 카운트
+            #   1대1 매칭 보호: TREND_COMP 슬롯이 MAX_MR_PER_SIDE 도달 시 skip
+            #   (MR 4쌍 매칭 = TREND_COMP 4 한도)
+            from v9.risk.slot_manager import count_slots as _cs_v141
+            try:
+                _hc_slots = _cs_v141(st, role_filter=None)  # 전체 카운트에서 HEDGE 별도 추출
+                # 활성 CORE_MR_HEDGE 직접 카운트
+                _hc_long_active = 0
+                _hc_short_active = 0
+                for _h_sym, _h_st in st.items():
+                    if not isinstance(_h_st, dict):
+                        continue
+                    for _h_side, _h_p in iter_positions(_h_st):
+                        if not isinstance(_h_p, dict):
+                            continue
+                        if float(_h_p.get("amt", 0) or 0) <= 0:
+                            continue
+                        if _h_p.get("role") != "CORE_MR_HEDGE":
+                            continue
+                        if _h_side == "buy":
+                            _hc_long_active += 1
+                        else:
+                            _hc_short_active += 1
+                _tc_opp_slots_count = _hc_short_active if _tc_opp_side == "sell" else _hc_long_active
+            except Exception:
+                _tc_opp_slots_count = 0
+            
+            if _tc_opp_slots_count >= MAX_MR_PER_SIDE:
+                print(f"[TREND_COMP_SKIP] {symbol} → COMP {_tc_opp_side} HEDGE 슬롯풀({_tc_opp_slots_count}/{MAX_MR_PER_SIDE})")
             else:
-                # ★ 같은 틱에서 이미 이 심볼 반대방향 intent 발사 예정이면 skip
-                _hc_sym_entered = {i.symbol + ":" + i.side for i in intents}
-                if symbol + ":" + _hc_opp_side in _hc_sym_entered:
-                    pass  # 이미 발사됨
-                else:
-                    # ★ 반대방향 슬롯 여유 체크 (MR + HEDGE 동일 슬롯 사용 — CORE로 함께 카운트)
-                    _hc_opp_slots = _core_short if _hc_opp_side == "sell" else _core_long
-                    _hc_opp_slots += (_tick_new_short if _hc_opp_side == "sell" else _tick_new_long)
-                    if _hc_opp_slots >= MAX_MR_PER_SIDE:
-                        print(f"[HEDGE_SKIP] {symbol} {_hc_opp_side} 슬롯풀({_hc_opp_slots}/{MAX_MR_PER_SIDE})")
-                    else:
-                        # ★ V13 [05-06]: HEDGE_COMP MR 풀사이즈 (T1+T2+T3 합산 100%)
-                        #   기존 V10/V11: T1 notional만 (DCA_WEIGHTS[0]/sum)
-                        #   변경 V13: 풀사이즈 단일 진입 — 사용자 결정 [05-06] "트랜드 컴프로 mr 풀사이즈로"
-                        #   위험 [실측 04-24 -29 vs +0.6 패턴 재현 가능, 사이즈 3배 임팩트]
-                        _hc_grid = total_cap / GRID_DIVISOR * LEVERAGE
-                        _hc_notional = _hc_grid  # ★ V13: 풀사이즈 (DCA_WEIGHTS 분할 없음, 1단)
-                        _hc_qty = _hc_notional / curr_p if curr_p > 0 and _hc_notional >= 10 else 0
-                        if _hc_qty > 0:
-                            # ★ V13: HEDGE_COMP는 1단 진입이라 dca_targets 빈 리스트 (DCA pre-order X)
-                            _hc_dca_targets = []
-                            system_state["_pending_hedge_comp"] = {
-                                "symbol": symbol,   # ★ 동일 심볼
-                                "side": _hc_opp_side,
-                                "qty": _hc_qty,
-                                "price": curr_p,
-                                "mr_symbol": symbol,  # 자기 자신
-                                "dca_targets": _hc_dca_targets,
+                _tc_best_sym = None
+                _tc_best_score = 0
+                for _tc_sym in _tc_ohlcv_pool:
+                    if _tc_sym == symbol or _tc_sym in _tc_held or _tc_sym in _tc_entered:
+                        continue
+                    if _tc_sym == "BTC/USDT":
+                        continue
+                    if _tc_sym not in _tc_allowed_pool:
+                        continue
+                    if _trend_cooldown.get(_tc_sym, 0) > now_ts:
+                        continue
+                    try:
+                        from v9.strategy.symbol_stats import is_symbol_cooldown as _sc_tc
+                        if _sc_tc(_tc_sym):
+                            continue
+                    except Exception:
+                        pass
+                    # ★ V10.31w: LONG_ONLY/SHORT_ONLY 심볼 필터
+                    try:
+                        from v9.config import LONG_ONLY_SYMBOLS as _LONG_ONLY_TC, SHORT_ONLY_SYMBOLS as _SHORT_ONLY_TC
+                        if _tc_opp_side == "sell" and _tc_sym in _LONG_ONLY_TC:
+                            continue
+                        if _tc_opp_side == "buy" and _tc_sym in _SHORT_ONLY_TC:
+                            continue
+                    except Exception:
+                        pass
+                    _tc_corr = (getattr(snapshot, "correlations", None) or {}).get(_tc_sym, 0)
+                    if _tc_corr < OPEN_CORR_MIN:
+                        continue
+                    _tc_pool = _tc_ohlcv_pool.get(_tc_sym, {})
+                    _tc_15m = _tc_pool.get("15m", [])
+                    if len(_tc_15m) < 35:
+                        continue
+                    _tc_cp = float(_tc_prices.get(_tc_sym, 0))
+                    if _tc_cp <= 0:
+                        continue
+                    _tc_score = _calc_trend_score(_tc_15m)
+                    _TC_MIN = 0.5
+                    if abs(_tc_score) > TREND_MAX_SCORE:
+                        continue
+                    if _tc_opp_side == "sell" and _tc_score < -_TC_MIN:
+                        if abs(_tc_score) > _tc_best_score:
+                            _tc_best_score = abs(_tc_score)
+                            _tc_best_sym = _tc_sym
+                    elif _tc_opp_side == "buy" and _tc_score > _TC_MIN:
+                        if _tc_score > _tc_best_score:
+                            _tc_best_score = _tc_score
+                            _tc_best_sym = _tc_sym
+
+                if _tc_best_sym is not None:
+                    _tc_curr_p = float(_tc_prices.get(_tc_best_sym, 0))
+                    if _tc_curr_p > 0:
+                        # ★ V14: TREND COMP MR 풀사이즈 (T1+T2+T3 합산 100%)
+                        _tc_grid = total_cap / GRID_DIVISOR * LEVERAGE
+                        _tc_notional = _tc_grid  # 풀사이즈 (1단 진입)
+                        _tc_qty = _tc_notional / _tc_curr_p if _tc_notional >= 10 else 0
+                        if _tc_qty > 0:
+                            # TREND COMP는 1단 진입 → DCA pre-order 0
+                            _tc_dca_targets = []
+                            system_state["_pending_trend_comp"] = {
+                                "symbol": _tc_best_sym,   # ★ V14: 다른 sym
+                                "side": _tc_opp_side,
+                                "qty": _tc_qty,
+                                "price": _tc_curr_p,
+                                "mr_symbol": symbol,
+                                "dca_targets": _tc_dca_targets,
                                 "regime": _btc_regime,
                                 "ts": time.time(),
                             }
-                            print(f"[HEDGE_COMP] 📊 {symbol} {_hc_opp_side} "
-                                  f"notional=${_hc_notional:.0f} (MR {symbol} {trigger_side} 반대)")
+                            print(f"[TREND_COMP] 📊 {_tc_best_sym} {_tc_opp_side} "
+                                  f"score={_tc_best_score:.2f} notional=${_tc_notional:.0f} "
+                                  f"(MR {symbol} {trigger_side} 반대 추세)")
                             try:
                                 from v9.logging.logger_csv import log_system
-                                log_system("HEDGE_COMP", f"{symbol} {_hc_opp_side} "
-                                           f"notional={_hc_notional:.0f} ← MR {trigger_side}")
+                                log_system("TREND_COMP", f"{_tc_best_sym} {_tc_opp_side} "
+                                           f"notional={_tc_notional:.0f} score={_tc_best_score:.2f} ← MR {symbol} {trigger_side}")
                             except Exception: pass
+                else:
+                    print(f"[TREND_COMP_SKIP] {symbol} {trigger_side} → 반대 추세 sym 없음")
         elif TREND_ENABLED:
             # ★ V10.29e: TREND 시그널 미감지 사유 로그
             _ts_reasons = []
@@ -1800,27 +1859,39 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
         for _iter_side, p in iter_positions(sym_st):
             if not isinstance(p, dict):
                 continue
-            # ★ V13.1 [05-06]: 사다리 적용 대상 분기
-            #   사용자 결정 [05-06]: "T1 사다리는 트랜드 컴프만"
-            #   - V11 모드 (DCA_WEIGHTS=[100]): 기존대로 dca_level=1 (MR T1 단일)
-            #   - V13 모드 (DCA_WEIGHTS=[33,33,34]):
-            #       role=CORE_MR_HEDGE + dca_level=1 → T1 사다리 적용 (HEDGE_COMP)
-            #       role=CORE_MR + 어떤 dca_level → T2_DEFENSE_LADDER 안 탐 (사용자 사양)
-            #       (MR 보호는 plan_force_close HARD_SL_BY_TIER가 매 cycle 처리)
+            # ★ V14 [05-06]: dca_level + role 분기 + 사다리 변수 동적 선택
+            #   - V11 모드: MR T1 사다리 (T1_HEDGE_LADDER 사용 — V11 사양)
+            #   - V13/V14 모드:
+            #       role=CORE_MR_HEDGE + dca_level=1 → T1_HEDGE_LADDER (HEDGE/TREND_COMP)
+            #       role=CORE_MR + dca_level=2 → T2_DEFENSE_LADDER (V14 신규: -2.5/0.5 TRIM)
+            #       그 외 → continue (T3는 plan_t3_defense_v2 별도 처리)
             from v9.config import DCA_WEIGHTS as _V11_DCA_W
+            from v9.config import T1_HEDGE_LADDER, calc_t1_hedge_action
             _is_v11 = (len(_V11_DCA_W) == 1 and _V11_DCA_W[0] == 100)
             
             _role_pdef = p.get("role", "")
             _dca_lv_pdef = int(p.get("dca_level", 1) or 1)
             
+            # ladder 변수 + 매칭 함수 동적 선택
             if _is_v11:
-                # V11 모드 (T1 단일 운영, MR T1 사다리)
+                # V11 모드 (MR T1 사다리)
                 if _role_pdef != "CORE_MR" or _dca_lv_pdef != 1:
                     continue
+                _active_ladder = T1_HEDGE_LADDER
+                _calc_action = calc_t1_hedge_action
+                _step_key = "_t1_hedge_last_step"
+            elif _role_pdef == "CORE_MR_HEDGE" and _dca_lv_pdef == 1:
+                # V13/V14: HEDGE_COMP/TREND_COMP T1
+                _active_ladder = T1_HEDGE_LADDER
+                _calc_action = calc_t1_hedge_action
+                _step_key = "_t1_hedge_last_step"
+            elif _role_pdef == "CORE_MR" and _dca_lv_pdef == 2:
+                # V14: MR T2 trim 사다리
+                _active_ladder = T2_DEFENSE_LADDER
+                _calc_action = calc_t2_defense_action
+                _step_key = "_t2_def_v2_last_step"
             else:
-                # V13 모드: HEDGE_COMP T1만 사다리, MR은 차단
-                if _role_pdef != "CORE_MR_HEDGE" or _dca_lv_pdef != 1:
-                    continue
+                continue
             _role = _role_pdef
             _amt = float(p.get("amt", 0) or 0)
             if _amt <= 0:
@@ -1837,16 +1908,16 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
             worst = float(p.get("worst_roi", 0) or 0)
             max_r = float(p.get("max_roi_seen", 0) or 0)
 
-            # 사다리 액션 결정
-            action = calc_t2_defense_action(worst, max_r)
+            # 사다리 액션 결정 (동적 선택)
+            action = _calc_action(worst, max_r)
             if action is None:
                 continue
             mode, exit_roi = action
 
-            # 중복 발동 방지: 같은 단계는 한 번만
-            _last_step = float(p.get("_t2_def_v2_last_step", 0) or 0)
+            # 중복 발동 방지: 같은 단계는 한 번만 (_step_key 동적)
+            _last_step = float(p.get(_step_key, 0) or 0)
             _curr_step_worst = None
-            for w_enter, _ex, _md in T2_DEFENSE_LADDER:
+            for w_enter, _ex, _md in _active_ladder:
                 if worst <= w_enter:
                     _curr_step_worst = w_enter
                 else:
@@ -1875,7 +1946,7 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
             if not _fire:
                 continue
 
-            p["_t2_def_v2_last_step"] = _curr_step_worst
+            p[_step_key] = _curr_step_worst
 
             _bal = float(getattr(snapshot, "real_balance_usdt", 0) or 0)
             _min_qty = SYM_MIN_QTY.get(symbol, SYM_MIN_QTY_DEFAULT)
