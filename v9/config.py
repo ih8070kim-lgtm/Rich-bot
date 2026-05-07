@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.5"  # ★ V14.5 [05-06]: TREND/NOSLOT 절대 임계(_TR_MIN/_TC_MIN=0.5) 폐기 → 상대 평가 (사용자 결정)
+VERSION = "14.6"  # ★ V14.6 [05-06]: TREND_COMP OFF (사용자 결정 "처참"), NOSLOT만 유지
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -26,7 +26,7 @@ VERSION = "14.5"  # ★ V14.5 [05-06]: TREND/NOSLOT 절대 임계(_TR_MIN/_TC_MI
 #   - HEDGE는 HIGH 레짐 한정
 
 TREND_NOSLOT_ENABLED = True  # ★ V14.2 [05-06]: 활성화 — 사용자 결정. 메모리 [실측 V10.31AA EV 음수 증명] 인지하고 재시도. MR 시그널 없을 때 추세 단독 진입 (1대1 매칭이 메우지 못하는 슬롯 보충)
-HEDGE_COMP_ENABLED   = True   # ★ V13 [05-06]: TREND COMPANION 부활 — MR 풀사이즈 단일 진입 (사용자 결정)
+HEDGE_COMP_ENABLED   = False  # ★ V14.6 [05-06]: TREND_COMP OFF — 사용자 결정 "처참, NOSLOT만 유지". 메모리 [실측 V10.31u -$30, ARB -$50] + V14.5 상대평가 변경 후에도 손실 누적
 # 메모리 [실측 04-24]: HEDGE_COMP off 결정 — MR 메인 HARD_SL -29.23 vs 헷지 trim +0.63 패턴
 # V13 [05-06]: 사용자 재활성 결정 + 사이즈 MR 풀사이즈 (T1+T2+T3 합산)로 변경
 # 위험: 손실 임팩트 V11 hf 시기 대비 3배 (MR T1 33% → 풀사이즈 100%)
