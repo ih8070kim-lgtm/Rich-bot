@@ -1559,6 +1559,56 @@ def plan_open(
             else:
                 _ns_notional = _ns_grid * _ns_size_mult
                 _ns_size_tag = "FULL" if _ns_size_mult == 1.0 else "HALF"
+                
+                # ★ V14.11 [05-06]: NOSLOT 총 노출 ≤ MR × 70% 가드 — 사용자 결정
+                #   목적: NOSLOT은 hedge 도구, MR보다 노출 크면 알파 정의 깨짐
+                #   계산: notional (현재가 × qty) 기준, role 기반 분리
+                _mr_notional_total = 0.0
+                _noslot_notional_active = 0.0
+                try:
+                    for _x_sym, _x_st in st.items():
+                        if not isinstance(_x_st, dict):
+                            continue
+                        for _x_side, _x_p in iter_positions(_x_st):
+                            if not isinstance(_x_p, dict):
+                                continue
+                            _x_amt = float(_x_p.get("amt", 0) or 0)
+                            if _x_amt <= 0:
+                                continue
+                            _x_role = _x_p.get("role", "")
+                            _x_curr = float(_ns_prices.get(_x_sym, 0) or 0)
+                            if _x_curr <= 0:
+                                continue
+                            _x_notional = _x_amt * _x_curr
+                            if _x_role == "CORE_MR":
+                                _mr_notional_total += _x_notional
+                            elif _x_role == "CORE_MR_HEDGE":
+                                _noslot_notional_active += _x_notional
+                except Exception:
+                    pass
+                
+                _new_noslot_total = _noslot_notional_active + _ns_notional
+                _max_allowed = _mr_notional_total * 0.7
+                
+                if _mr_notional_total <= 0:
+                    # MR 활성 0 → NOSLOT 발동 차단 (이론상 V14.8 가드에서 막힘, double-check)
+                    print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → MR 활성 0")
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("NOSLOT_SKIP_LIMIT", f"{_ns['sym']} {_ns['side']} MR 활성 0")
+                    except Exception: pass
+                    _noslot_best = None
+                elif _new_noslot_total > _max_allowed:
+                    print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → "
+                          f"노출 ${_new_noslot_total:.0f} > MR×0.7 ${_max_allowed:.0f} "
+                          f"(MR=${_mr_notional_total:.0f}, NOSLOT_active=${_noslot_notional_active:.0f}, 신규=${_ns_notional:.0f})")
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("NOSLOT_SKIP_LIMIT",
+                                   f"{_ns['sym']} {_ns['side']} new_total=${_new_noslot_total:.0f} max=${_max_allowed:.0f} "
+                                   f"MR=${_mr_notional_total:.0f}")
+                    except Exception: pass
+                    _noslot_best = None
             # ★ V14.8: 차단 시 _noslot_best=None이라 아래 if _noslot_best 분기 진입 X
             if _noslot_best:
                 _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0

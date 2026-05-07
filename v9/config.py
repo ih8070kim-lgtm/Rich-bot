@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.10"  # ★ V14.10 [05-06]: NOSLOT trail+hard 조합 — max≥+1.0% trail 활성/retrace 0.3%, 그 외 worst≤-1.0% hard SL (사용자 데이터 분석 +13× EV 개선)
+VERSION = "14.11"  # ★ V14.11 [05-06]: NOSLOT 총 노출 ≤ MR × 70% 가드 (자본 보호 + hedge 본질 강화)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
