@@ -1935,10 +1935,87 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                 _calc_action = calc_t1_hedge_action
                 _step_key = "_t1_hedge_last_step"
             elif _role_pdef == "CORE_MR_HEDGE" and _dca_lv_pdef == 1:
-                # V13/V14: HEDGE_COMP/TREND_COMP T1
-                _active_ladder = T1_HEDGE_LADDER
-                _calc_action = calc_t1_hedge_action
-                _step_key = "_t1_hedge_last_step"
+                # ★ V14.10 [05-06]: NOSLOT 청산 직접 처리 (사다리 폐기) — 사용자 데이터 분석 결과
+                #   기존 V14.7: T1_HEDGE_LADDER (-1.5/-1.7/-1.9) 사다리
+                #   변경: trail + hard SL 조합 (옵션 3, 데이터 시뮬 13× 개선)
+                #   alpha: max ≥ +1.0% 도달 시 trail 활성, max - 0.3% 회귀 시 익절
+                #          그 외엔 worst ≤ -1.0% 도달 시 hard SL
+                _amt_ns = float(p.get("amt", 0) or 0)
+                if _amt_ns <= 0:
+                    continue
+                _ep_ns = float(p.get("ep", 0) or 0)
+                _curr_p_ns = float((snapshot.all_prices or {}).get(symbol, 0) or 0)
+                if _ep_ns <= 0 or _curr_p_ns <= 0:
+                    continue
+                _side_ns = p.get("side", "")
+                _is_long_ns = (_side_ns == "buy")
+                
+                # ROI 계산
+                if _is_long_ns:
+                    _roi_ns = (_curr_p_ns - _ep_ns) / _ep_ns * 100 * LEVERAGE
+                else:
+                    _roi_ns = (_ep_ns - _curr_p_ns) / _ep_ns * 100 * LEVERAGE
+                
+                # max/worst 추적
+                _max_ns = float(p.get("max_roi", 0) or 0)
+                _worst_ns = float(p.get("worst_roi", 0) or 0)
+                if _roi_ns > _max_ns:
+                    p["max_roi"] = _roi_ns
+                    _max_ns = _roi_ns
+                if _roi_ns < _worst_ns:
+                    p["worst_roi"] = _roi_ns
+                    _worst_ns = _roi_ns
+                
+                # trail 활성 체크 (max ≥ +1.0% 처음 도달 시)
+                _trail_active_ns = bool(p.get("noslot_trail_active", False))
+                if not _trail_active_ns and _max_ns >= 1.0:
+                    p["noslot_trail_active"] = True
+                    p["noslot_trail_max"] = _max_ns
+                    _trail_active_ns = True
+                    print(f"[NOSLOT_TRAIL_ARM] {symbol} {_side_ns} max={_max_ns:.2f}% trail 활성")
+                
+                # 청산 결정
+                _fire_ns = False
+                _reason_ns = ""
+                if _trail_active_ns:
+                    # trail max 갱신 (= max_roi와 동기화)
+                    _trail_max_ns = float(p.get("noslot_trail_max", 0) or 0)
+                    if _max_ns > _trail_max_ns:
+                        p["noslot_trail_max"] = _max_ns
+                        _trail_max_ns = _max_ns
+                    # retrace 0.3% 도달 시 cut
+                    if _roi_ns <= _trail_max_ns - 0.3:
+                        _fire_ns = True
+                        _reason_ns = f"NOSLOT_TRAIL(peak={_trail_max_ns:.2f},roi={_roi_ns:.2f})"
+                else:
+                    # hard SL -1.0%
+                    if _worst_ns <= -1.0:
+                        _fire_ns = True
+                        _reason_ns = f"NOSLOT_HARD_SL(worst={_worst_ns:.2f},roi={_roi_ns:.2f})"
+                
+                if not _fire_ns:
+                    continue
+                
+                # 시장가 cut 발사
+                intents.append(Intent(
+                    trace_id=_tid(),
+                    intent_type=IntentType.TP1,
+                    symbol=symbol,
+                    side="sell" if _is_long_ns else "buy",
+                    qty=_amt_ns,
+                    price=None,
+                    reason=_reason_ns,
+                    metadata={
+                        "force_market": True,
+                        "is_force_close": True,
+                        "_expected_role": "CORE_MR_HEDGE",
+                    },
+                ))
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("NOSLOT_CUT", f"{symbol} {_side_ns} {_reason_ns}")
+                except Exception: pass
+                continue  # 다음 포지션
             elif _role_pdef == "CORE_MR" and _dca_lv_pdef == 2:
                 # V14: MR T2 trim 사다리
                 _active_ladder = T2_DEFENSE_LADDER

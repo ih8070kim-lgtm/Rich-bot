@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.8"  # ★ V14.8 [05-06]: NOSLOT 조건부 발동 — 반대편 worst ROI ≤-1% 50%, ≤-2% 100%, 그 외 차단 (사용자 결정, MR 위기 hedge 알파)
+VERSION = "14.10"  # ★ V14.10 [05-06]: NOSLOT trail+hard 조합 — max≥+1.0% trail 활성/retrace 0.3%, 그 외 worst≤-1.0% hard SL (사용자 데이터 분석 +13× EV 개선)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -945,7 +945,7 @@ TREND_COOLDOWN_SEC   = 0       # ★ V10.30: 쿨다운 제거. V10.31d-3에서 _
 # ═══════════════════════════════════════════════════════════════
 # Beta Cycle (v10.29d — 1h Signal, Short-Only)
 # ═══════════════════════════════════════════════════════════════
-BC_ENABLED          = True
+BC_ENABLED          = False  # ★ V14.9 [05-06]: BC 알파 폐기 — 사용자 결정 "BC도 지워버려". 진입 차단, 활성 BC 포지션은 TP/SL/trail로 자연 청산 후 종료. CB는 별도 결정 (CB_ENABLED 그대로)
 CB_ENABLED          = True    # ★ V10.29b: Crash Bounce 알파
 BC_ARM_THRESH       = 0.10      # ★ V10.31b: excess return ≥ 10% → ARMED (진짜 과잉만)
 BC_BASELINE_WINDOW  = 72        # ★ V10.30: baseline 계산 구간 (72h)

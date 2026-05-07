@@ -86,7 +86,24 @@ def bc_on_daily_close(snapshot, st: Dict, system_state: Dict) -> List[Intent]:
 # ═══════════════════════════════════════════════════════════════
 def bc_on_tick(snapshot, st: Dict) -> List[Intent]:
     """매 틱: 1h 봉 업데이트 → 시그널 체크 → 포지션 관리."""
+    # ★ V14.9 [05-06]: BC OFF 시 활성 포지션 청산은 유지, 신규 진입만 차단
+    #   사용자 결정 [05-06]: "BC도 지워버려"
+    #   기존 V10.29: BC_ENABLED False면 즉시 return → 활성 BC 좀비 위험
+    #   변경: 활성 BC 포지션 1건 이상 있으면 _manage_positions만 호출 (TP/SL/trail 작동)
     if not getattr(CFG, 'BC_ENABLED', False):
+        # 활성 BC 포지션 유무 체크
+        _has_active_bc = False
+        for _sym, _sym_st in st.items():
+            if not isinstance(_sym_st, dict):
+                continue
+            for _side, _p in iter_positions(_sym_st):
+                if isinstance(_p, dict) and _p.get("role") == "BC" and float(_p.get("amt", 0) or 0) > 0:
+                    _has_active_bc = True
+                    break
+            if _has_active_bc:
+                break
+        if _has_active_bc:
+            return _manage_positions(snapshot, st)
         return []
 
     intents: List[Intent] = []
