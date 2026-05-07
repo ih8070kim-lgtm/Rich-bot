@@ -984,101 +984,126 @@ def plan_open(
                     _e30_tag = "MR"
                     reason = f"HF_{_e30_tag}_5mRSI({rsi5_now:.0f}/{adj_rsi5_os})_ATR({atr_mult:.1f}x)_R({_cur_regime[0]})_VS({_mr_vol_surge:.1f})_MTF({_mtf_rsi:.0f})"
 
-        if trigger_side is None:
-            # ★ V10.29e: MR 슬롯 블록이어도 TREND 시그널 → 최고 score 1개만 진입
-            if _trend_signal_side:
-                _tr_opp_side = "sell" if _trend_signal_side == "buy" else "buy"
-                # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
-                _tr_opp_slots = _core_short if _tr_opp_side == "sell" else _core_long
-                _sig_side_slots = _core_long if _trend_signal_side == "buy" else _core_short
-                # ★ V10.31k: 같은 틱 내 새 MR intent 슬롯 반영
-                _tr_opp_slots += (_tick_new_short if _tr_opp_side == "sell" else _tick_new_long)
-                _sig_side_slots += (_tick_new_long if _trend_signal_side == "buy" else _tick_new_short)
-                # ★ V10.31h: A 조건 — NOSLOT은 "비대칭 해소" 목적. 발사 후에도 비대칭 유지될 때만 의미.
-                #   (_tr_opp_slots + 1) < _sig_side_slots 이어야 1개 추가 후에도 시그널 방향이 더 많음.
-                #   같거나 역전이면 발사 의미 없음 — 누적 발사 양산 차단 (04/20 TIA 5건 다발 패턴).
-                _a_ok = (_tr_opp_slots + 1) < _sig_side_slots
-                if _tr_opp_slots < MAX_MR_PER_SIDE and _a_ok:
-                    _tr_best_sym = None
-                    _tr_best_score = 0
-                    _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
-                    _tr_prices = snapshot.all_prices or {}
-                    _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
-                                for _, p in iter_positions(ss)
-                                if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
-                    _tr_entered = {i.symbol for i in intents}
-                    # ★ V10.31q: TREND_COMP universe 필터링 (NOSLOT과 동일)
-                    _tr_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
-                    _tr_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
-                    _tr_allowed_pool = _tr_long_pool if _tr_opp_side == "buy" else _tr_short_pool
+        # ★ V14.13 [05-06]: NOSLOT 알파 명확화 — 사용자 결정 [05-06]
+        #   알파: "한쪽 방향 슬롯풀 + 총 노출 ROI 음수 = 반대 방향 추세 진행 중"
+        #   진입: 풀인 방향의 반대 방향, 다른 sym
+        #   사이즈: 총노출 ROI -1%~-2% → 50%, ≤-2% → 100%
+        #   예: LONG 4/4 + 총노출 ROI -2.3% → SHORT 추세 → NOSLOT SHORT 100% 진입
+        # 두 방향 각각 체크 (long 풀 또는 short 풀)
+        for _check_dir in ("buy", "sell"):
+            _ns_dir_slots = _core_long if _check_dir == "buy" else _core_short
+            _ns_dir_slots += (_tick_new_long if _check_dir == "buy" else _tick_new_short)
+            if _ns_dir_slots < MAX_MR_PER_SIDE:
+                continue  # 슬롯 안 풀
+            
+            # 풀인 방향 활성 MR 총 노출 ROI 계산 (notional 가중 평균)
+            # = Σ(unrealized_pnl) / Σ(margin) = Σ(roi × notional) / Σ(notional)
+            _full_total_pnl_roi = 0.0
+            _full_total_notional = 0.0
+            try:
+                from v9.engines.hedge_engine import calc_roi_pct as _calc_roi_v1413
+                for _f_sym, _f_st in st.items():
+                    if not isinstance(_f_st, dict):
+                        continue
+                    for _f_side, _f_p in iter_positions(_f_st):
+                        if not isinstance(_f_p, dict):
+                            continue
+                        if _f_side != _check_dir:
+                            continue
+                        if float(_f_p.get("amt", 0) or 0) <= 0:
+                            continue
+                        if _f_p.get("role") not in ("CORE_MR", "CORE_BREAKOUT"):
+                            continue  # CORE_MR_HEDGE/BC/CB 제외
+                        _f_ep = float(_f_p.get("ep", 0) or 0)
+                        _f_curr = float((snapshot.all_prices or {}).get(_f_sym, 0) or 0)
+                        _f_amt = float(_f_p.get("amt", 0) or 0)
+                        if _f_ep <= 0 or _f_curr <= 0:
+                            continue
+                        _f_roi = _calc_roi_v1413(_f_ep, _f_curr, _f_side, LEVERAGE)
+                        _f_notional = _f_amt * _f_curr
+                        _full_total_pnl_roi += _f_roi * _f_notional
+                        _full_total_notional += _f_notional
+            except Exception:
+                pass
+            
+            if _full_total_notional <= 0:
+                continue
+            _exposure_roi = _full_total_pnl_roi / _full_total_notional
+            
+            # 사이즈 결정 (V14.8 사양 부활)
+            _ns13_size_mult = None
+            if _exposure_roi <= -2.0:
+                _ns13_size_mult = 1.0   # FULL
+            elif _exposure_roi <= -1.0:
+                _ns13_size_mult = 0.5   # HALF
+            
+            if _ns13_size_mult is None:
+                continue  # 발동 차단 (총노출 ROI > -1%)
+            
+            # ★ NOSLOT 진입: 반대 방향, 다른 sym 추세 score 최대
+            _tr_entry_side = "sell" if _check_dir == "buy" else "buy"
+            _tr_best_sym = None
+            _tr_best_score = 0
+            _tr_ohlcv_pool = snapshot.ohlcv_pool or {}
+            _tr_prices = snapshot.all_prices or {}
+            _tr_held = {s for s, ss in st.items() if isinstance(ss, dict)
+                        for _, p in iter_positions(ss)
+                        if isinstance(p, dict) and float(p.get("amt", 0) or 0) > 0}
+            _tr_entered = {i.symbol for i in intents}
+            _tr_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
+            _tr_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
+            _tr_allowed_pool = _tr_long_pool if _tr_entry_side == "buy" else _tr_short_pool
 
-                    for _tr_sym in _tr_ohlcv_pool:
-                        if _tr_sym == symbol or _tr_sym in _tr_held or _tr_sym in _tr_entered:
-                            continue
-                        if _tr_sym == "BTC/USDT":
-                            continue
-                        # ★ V10.31q: universe 풀 (side별) 외부 차단
-                        if _tr_sym not in _tr_allowed_pool:
-                            continue
-                        if _trend_cooldown.get(_tr_sym, 0) > now_ts:
-                            continue
-                        # ★ V10.31e: 심볼 실적 쿨다운
-                        try:
-                            from v9.strategy.symbol_stats import is_symbol_cooldown as _sc
-                            if _sc(_tr_sym):
-                                continue
-                        except Exception:
-                            pass
-                        _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
-                        if _tr_corr < OPEN_CORR_MIN:
-                            continue
-                        _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
-                        _tr_15m = _tr_pool.get("15m", [])
-                        if len(_tr_15m) < 35:
-                            continue
-                        _tr_cp = float(_tr_prices.get(_tr_sym, 0))
-                        if _tr_cp <= 0:
-                            continue
-                        _tr_score = _calc_trend_score(_tr_15m)
-                        # ★ V14.5 [05-06]: _TR_MIN 절대 임계 폐기 — 사용자 결정 "상대 평가"
-                        #   기존 V10.31c: _TR_MIN=0.5 (방향성 0인 sym 차단 + 약한 추세도 차단)
-                        #   변경 V14.5: 방향만 일치(score 부호) + 절댓값 최대 sym 선정
-                        #   평탄 시기에도 \"덜 평탄한\" sym으로 컴프 hedge 진입 가능
-                        # ★ V10.30: score 상한 (과열 역전 방지)
-                        if abs(_tr_score) > TREND_MAX_SCORE:
-                            continue
-                        if _tr_opp_side == "sell" and _tr_score < 0:
-                            if abs(_tr_score) > _tr_best_score:
-                                _tr_best_score = abs(_tr_score)
-                                _tr_best_sym = _tr_sym
-                        elif _tr_opp_side == "buy" and _tr_score > 0:
-                            if _tr_score > _tr_best_score:
-                                _tr_best_score = _tr_score
-                                _tr_best_sym = _tr_sym
-                    # ★ 글로벌 최고 score 비교 — 이전 심볼의 후보보다 높을 때만 갱신
-                    if _tr_best_sym and (_noslot_best is None or _tr_best_score > _noslot_best["score"]):
-                        _noslot_best = {
-                            "sym": _tr_best_sym, "side": _tr_opp_side,
-                            "score": _tr_best_score, "sig_sym": symbol,
-                            "sig_side": _trend_signal_side,
-                        }
-                else:
-                    if _tr_opp_slots >= MAX_MR_PER_SIDE:
-                        print(f"[TREND_SKIP] {symbol} (MR블록) → COMP {_tr_opp_side} 슬롯풀({_tr_opp_slots}/{MAX_MR_PER_SIDE})")
-                    elif not _a_ok:
-                        # ★ V10.31h: A 조건 위반 — 발사 후 균형/역전. 5분 1회 cooldown 로그.
-                        _akey = f"NOSLOT_A:{_trend_signal_side}_{_sig_side_slots}_{_tr_opp_slots}"
-                        _now_t = time.time()
-                        if _now_t - _TREND_SKIP_LOG_CD.get(_akey, 0) > _TREND_SKIP_LOG_CD_SEC:
-                            _TREND_SKIP_LOG_CD[_akey] = _now_t
-                            print(f"[NOSLOT_SKIP_A] sig={_trend_signal_side} sig_slots={_sig_side_slots} "
-                                  f"opp_slots={_tr_opp_slots} (발사 후 균형/역전 → 누적양산 차단)")
-                            try:
-                                from v9.logging.logger_csv import log_system
-                                log_system("NOSLOT_SKIP_A",
-                                           f"sig={_trend_signal_side} sig={_sig_side_slots} opp={_tr_opp_slots}")
-                            except Exception: pass
-            # ★ V10.30 FIX: trigger_side=None → MR 진입 코드 도달 차단
+            for _tr_sym in _tr_ohlcv_pool:
+                if _tr_sym in _tr_held or _tr_sym in _tr_entered:
+                    continue
+                if _tr_sym == "BTC/USDT":
+                    continue
+                if _tr_sym not in _tr_allowed_pool:
+                    continue
+                if _trend_cooldown.get(_tr_sym, 0) > now_ts:
+                    continue
+                try:
+                    from v9.strategy.symbol_stats import is_symbol_cooldown as _sc
+                    if _sc(_tr_sym):
+                        continue
+                except Exception:
+                    pass
+                _tr_corr = (getattr(snapshot, "correlations", None) or {}).get(_tr_sym, 0)
+                if _tr_corr < OPEN_CORR_MIN:
+                    continue
+                _tr_pool = _tr_ohlcv_pool.get(_tr_sym, {})
+                _tr_15m = _tr_pool.get("15m", [])
+                if len(_tr_15m) < 35:
+                    continue
+                _tr_cp = float(_tr_prices.get(_tr_sym, 0))
+                if _tr_cp <= 0:
+                    continue
+                _tr_score = _calc_trend_score(_tr_15m)
+                # V14.5 상대 평가 (절대 임계 폐기), 과열 차단만 유지
+                if abs(_tr_score) > TREND_MAX_SCORE:
+                    continue
+                if _tr_entry_side == "sell" and _tr_score < 0:
+                    if abs(_tr_score) > _tr_best_score:
+                        _tr_best_score = abs(_tr_score)
+                        _tr_best_sym = _tr_sym
+                elif _tr_entry_side == "buy" and _tr_score > 0:
+                    if _tr_score > _tr_best_score:
+                        _tr_best_score = _tr_score
+                        _tr_best_sym = _tr_sym
+            # 글로벌 최고 score 비교 (두 방향 체크 중 더 강한 후보 채택)
+            if _tr_best_sym and (_noslot_best is None or _tr_best_score > _noslot_best.get("score", 0)):
+                _noslot_best = {
+                    "sym": _tr_best_sym,
+                    "side": _tr_entry_side,
+                    "score": _tr_best_score,
+                    "sig_sym": f"FULL_DIR_{_check_dir}",
+                    "size_mult": _ns13_size_mult,
+                    "exposure_roi": _exposure_roi,
+                }
+        # NOSLOT 분기 끝 — for _check_dir 루프 종료, 일반 MR 진입 코드로 흘러감
+        # (단 trigger_side가 None이면 일반 MR 진입도 안 함)
+        if trigger_side is None:
             continue
         # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
         # ★ V10.17 Rule A: Slot Balance Gate — 반대=0 AND 이쪽≥3 → 차단
@@ -1504,112 +1529,54 @@ def plan_open(
             _ns_total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 차감
             _ns_grid = _ns_total_cap / GRID_DIVISOR * LEVERAGE
             
-            # ★ V14.8 [05-06]: 조건부 NOSLOT — 반대편 활성 포지션 worst ROI 기반
-            #   사용자 결정: "-1이상일때만 50프로 발동 -2이상일때 100프로 발동"
-            #   알파 재정의: "추세 단독" → "활성 MR 위기 시점 hedge 강화"
-            #   메모리 [실측 V10.31AA NOSLOT EV 음수] 영역 = 평탄 시기 진입 차단으로 해결 시도
-            _opp_dir = "buy" if _ns["side"] == "sell" else "sell"
-            _worst_opp_roi = 0.0
-            _has_opp = False
+            # ★ V14.13 [05-06]: 후보 선정 시 결정된 size_mult 사용 (FULL/HALF)
+            #   슬롯풀+ROI 조건에서 -1%~-2%면 0.5, ≤-2%면 1.0
+            _ns13_mult = _ns.get("size_mult", 0.5)
+            _ns_notional = _ns_grid * _ns13_mult
+            _ns_size_tag = "FULL" if _ns13_mult >= 1.0 else "HALF"
+            
+            # ★ V14.13 [05-06]: 70% 노출 한도 가드 부활 (V14.11 의도 유지)
+            #   목적: NOSLOT은 hedge 도구, MR 노출의 70% 초과 차단
+            _mr_notional_total = 0.0
+            _noslot_notional_active = 0.0
             try:
-                from v9.engines.hedge_engine import calc_roi_pct as _calc_roi_v148
-                for _o_sym, _o_st in st.items():
-                    if not isinstance(_o_st, dict):
+                for _x_sym, _x_st in st.items():
+                    if not isinstance(_x_st, dict):
                         continue
-                    for _o_side, _o_p in iter_positions(_o_st):
-                        if not isinstance(_o_p, dict):
+                    for _x_side, _x_p in iter_positions(_x_st):
+                        if not isinstance(_x_p, dict):
                             continue
-                        if float(_o_p.get("amt", 0) or 0) <= 0:
+                        _x_amt = float(_x_p.get("amt", 0) or 0)
+                        if _x_amt <= 0:
                             continue
-                        if _o_side != _opp_dir:
+                        _x_role = _x_p.get("role", "")
+                        _x_curr = float(_ns_prices.get(_x_sym, 0) or 0)
+                        if _x_curr <= 0:
                             continue
-                        # role 무관 (CORE_MR/CORE_MR_HEDGE/CORE_BREAKOUT 모두 카운트)
-                        # BC/CB는 별개 알파라 제외
-                        if _o_p.get("role") in ("BC", "CB"):
-                            continue
-                        _o_ep = float(_o_p.get("ep", 0) or 0)
-                        _o_curr = float(_ns_prices.get(_o_sym, 0))
-                        if _o_ep <= 0 or _o_curr <= 0:
-                            continue
-                        _o_roi = _calc_roi_v148(_o_ep, _o_curr, _o_side, LEVERAGE)
-                        if _o_roi < _worst_opp_roi:
-                            _worst_opp_roi = _o_roi
-                        _has_opp = True
+                        _x_notional = _x_amt * _x_curr
+                        if _x_role == "CORE_MR":
+                            _mr_notional_total += _x_notional
+                        elif _x_role == "CORE_MR_HEDGE":
+                            _noslot_notional_active += _x_notional
             except Exception:
-                _has_opp = False
+                pass
             
-            _ns_size_mult = None
-            if _has_opp:
-                if _worst_opp_roi <= -2.0:
-                    _ns_size_mult = 1.0   # 풀사이즈 hedge 강화
-                elif _worst_opp_roi <= -1.0:
-                    _ns_size_mult = 0.5   # 보수 hedge
+            _new_noslot_total = _noslot_notional_active + _ns_notional
+            _max_allowed = _mr_notional_total * 0.7
             
-            if _ns_size_mult is None:
-                # 발동 차단 — 반대편 평탄 또는 활성 0
-                _skip_reason = (f"활성 0" if not _has_opp 
-                                else f"worst ROI={_worst_opp_roi:.2f}% > -1%")
-                print(f"[NOSLOT_SKIP_HEDGE] {_ns['sym']} {_ns['side']} → {_skip_reason}")
+            if _mr_notional_total <= 0:
+                print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → MR 활성 0")
+                _noslot_best = None
+            elif _new_noslot_total > _max_allowed:
+                print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → "
+                      f"노출 ${_new_noslot_total:.0f} > MR×0.7 ${_max_allowed:.0f}")
                 try:
                     from v9.logging.logger_csv import log_system
-                    log_system("NOSLOT_SKIP_HEDGE",
-                               f"{_ns['sym']} {_ns['side']} sig={_ns['sig_sym']} ({_skip_reason})")
+                    log_system("NOSLOT_SKIP_LIMIT",
+                               f"{_ns['sym']} {_ns['side']} new=${_new_noslot_total:.0f} max=${_max_allowed:.0f}")
                 except Exception: pass
                 _noslot_best = None
-            else:
-                _ns_notional = _ns_grid * _ns_size_mult
-                _ns_size_tag = "FULL" if _ns_size_mult == 1.0 else "HALF"
-                
-                # ★ V14.11 [05-06]: NOSLOT 총 노출 ≤ MR × 70% 가드 — 사용자 결정
-                #   목적: NOSLOT은 hedge 도구, MR보다 노출 크면 알파 정의 깨짐
-                #   계산: notional (현재가 × qty) 기준, role 기반 분리
-                _mr_notional_total = 0.0
-                _noslot_notional_active = 0.0
-                try:
-                    for _x_sym, _x_st in st.items():
-                        if not isinstance(_x_st, dict):
-                            continue
-                        for _x_side, _x_p in iter_positions(_x_st):
-                            if not isinstance(_x_p, dict):
-                                continue
-                            _x_amt = float(_x_p.get("amt", 0) or 0)
-                            if _x_amt <= 0:
-                                continue
-                            _x_role = _x_p.get("role", "")
-                            _x_curr = float(_ns_prices.get(_x_sym, 0) or 0)
-                            if _x_curr <= 0:
-                                continue
-                            _x_notional = _x_amt * _x_curr
-                            if _x_role == "CORE_MR":
-                                _mr_notional_total += _x_notional
-                            elif _x_role == "CORE_MR_HEDGE":
-                                _noslot_notional_active += _x_notional
-                except Exception:
-                    pass
-                
-                _new_noslot_total = _noslot_notional_active + _ns_notional
-                _max_allowed = _mr_notional_total * 0.7
-                
-                if _mr_notional_total <= 0:
-                    # MR 활성 0 → NOSLOT 발동 차단 (이론상 V14.8 가드에서 막힘, double-check)
-                    print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → MR 활성 0")
-                    try:
-                        from v9.logging.logger_csv import log_system
-                        log_system("NOSLOT_SKIP_LIMIT", f"{_ns['sym']} {_ns['side']} MR 활성 0")
-                    except Exception: pass
-                    _noslot_best = None
-                elif _new_noslot_total > _max_allowed:
-                    print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → "
-                          f"노출 ${_new_noslot_total:.0f} > MR×0.7 ${_max_allowed:.0f} "
-                          f"(MR=${_mr_notional_total:.0f}, NOSLOT_active=${_noslot_notional_active:.0f}, 신규=${_ns_notional:.0f})")
-                    try:
-                        from v9.logging.logger_csv import log_system
-                        log_system("NOSLOT_SKIP_LIMIT",
-                                   f"{_ns['sym']} {_ns['side']} new_total=${_new_noslot_total:.0f} max=${_max_allowed:.0f} "
-                                   f"MR=${_mr_notional_total:.0f}")
-                    except Exception: pass
-                    _noslot_best = None
-            # ★ V14.8: 차단 시 _noslot_best=None이라 아래 if _noslot_best 분기 진입 X
+            
             if _noslot_best:
                 _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
             else:
@@ -1624,7 +1591,7 @@ def plan_open(
                     side=_ns["side"],
                     qty=_ns_qty,
                     price=None,
-                    reason=f"TREND_NOSLOT_{_ns_size_tag}(sig={_ns['sig_sym']},score={_ns['score']:.1f},opp_roi={_worst_opp_roi:.2f})",
+                    reason=f"TREND_NOSLOT_{_ns_size_tag}(score={_ns['score']:.1f},dir={_ns['side']},exp_roi={_ns.get('exposure_roi',0):.2f})",
                     metadata={
                         "atr": 0.0, "dca_targets": _ns_dca,
                         # ★ V14.2: role=CORE_MR_HEDGE (TREND_COMP와 동일 — 슬롯 분리, DCA 차단)
