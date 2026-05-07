@@ -1503,8 +1503,67 @@ def plan_open(
             # 변경: 풀사이즈 (_ns_grid 통째) + DCA targets 빈 리스트 (entry_type=TREND가 _place_dca_preorders 차단)
             _ns_total_cap = _mr_available_balance(snapshot, st)  # ★ V10.31b: BC 차감
             _ns_grid = _ns_total_cap / GRID_DIVISOR * LEVERAGE
-            _ns_notional = _ns_grid  # ★ V14.2: 풀사이즈
-            _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
+            
+            # ★ V14.8 [05-06]: 조건부 NOSLOT — 반대편 활성 포지션 worst ROI 기반
+            #   사용자 결정: "-1이상일때만 50프로 발동 -2이상일때 100프로 발동"
+            #   알파 재정의: "추세 단독" → "활성 MR 위기 시점 hedge 강화"
+            #   메모리 [실측 V10.31AA NOSLOT EV 음수] 영역 = 평탄 시기 진입 차단으로 해결 시도
+            _opp_dir = "buy" if _ns["side"] == "sell" else "sell"
+            _worst_opp_roi = 0.0
+            _has_opp = False
+            try:
+                from v9.engines.hedge_engine import calc_roi_pct as _calc_roi_v148
+                for _o_sym, _o_st in st.items():
+                    if not isinstance(_o_st, dict):
+                        continue
+                    for _o_side, _o_p in iter_positions(_o_st):
+                        if not isinstance(_o_p, dict):
+                            continue
+                        if float(_o_p.get("amt", 0) or 0) <= 0:
+                            continue
+                        if _o_side != _opp_dir:
+                            continue
+                        # role 무관 (CORE_MR/CORE_MR_HEDGE/CORE_BREAKOUT 모두 카운트)
+                        # BC/CB는 별개 알파라 제외
+                        if _o_p.get("role") in ("BC", "CB"):
+                            continue
+                        _o_ep = float(_o_p.get("ep", 0) or 0)
+                        _o_curr = float(_ns_prices.get(_o_sym, 0))
+                        if _o_ep <= 0 or _o_curr <= 0:
+                            continue
+                        _o_roi = _calc_roi_v148(_o_ep, _o_curr, _o_side, LEVERAGE)
+                        if _o_roi < _worst_opp_roi:
+                            _worst_opp_roi = _o_roi
+                        _has_opp = True
+            except Exception:
+                _has_opp = False
+            
+            _ns_size_mult = None
+            if _has_opp:
+                if _worst_opp_roi <= -2.0:
+                    _ns_size_mult = 1.0   # 풀사이즈 hedge 강화
+                elif _worst_opp_roi <= -1.0:
+                    _ns_size_mult = 0.5   # 보수 hedge
+            
+            if _ns_size_mult is None:
+                # 발동 차단 — 반대편 평탄 또는 활성 0
+                _skip_reason = (f"활성 0" if not _has_opp 
+                                else f"worst ROI={_worst_opp_roi:.2f}% > -1%")
+                print(f"[NOSLOT_SKIP_HEDGE] {_ns['sym']} {_ns['side']} → {_skip_reason}")
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("NOSLOT_SKIP_HEDGE",
+                               f"{_ns['sym']} {_ns['side']} sig={_ns['sig_sym']} ({_skip_reason})")
+                except Exception: pass
+                _noslot_best = None
+            else:
+                _ns_notional = _ns_grid * _ns_size_mult
+                _ns_size_tag = "FULL" if _ns_size_mult == 1.0 else "HALF"
+            # ★ V14.8: 차단 시 _noslot_best=None이라 아래 if _noslot_best 분기 진입 X
+            if _noslot_best:
+                _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
+            else:
+                _ns_qty = 0
             if _ns_qty > 0:
                 _ns_dca = []  # ★ V14.2: 1단 진입, DCA targets 비활성
                 _trend_cooldown[_ns["sym"]] = time.time() + TREND_COOLDOWN_SEC
@@ -1515,7 +1574,7 @@ def plan_open(
                     side=_ns["side"],
                     qty=_ns_qty,
                     price=None,
-                    reason=f"TREND_NOSLOT(sig={_ns['sig_sym']},score={_ns['score']:.1f})",
+                    reason=f"TREND_NOSLOT_{_ns_size_tag}(sig={_ns['sig_sym']},score={_ns['score']:.1f},opp_roi={_worst_opp_roi:.2f})",
                     metadata={
                         "atr": 0.0, "dca_targets": _ns_dca,
                         # ★ V14.2: role=CORE_MR_HEDGE (TREND_COMP와 동일 — 슬롯 분리, DCA 차단)

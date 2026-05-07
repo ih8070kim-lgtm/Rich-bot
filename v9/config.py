@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.6"  # ★ V14.6 [05-06]: TREND_COMP OFF (사용자 결정 "처참"), NOSLOT만 유지
+VERSION = "14.8"  # ★ V14.8 [05-06]: NOSLOT 조건부 발동 — 반대편 worst ROI ≤-1% 50%, ≤-2% 100%, 그 외 차단 (사용자 결정, MR 위기 hedge 알파)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)
@@ -190,12 +190,12 @@ DCA_ENTRY_ROI_BY_TIER = {2: -1.8, 3: -3.0}  # ★ V14.2 [05-06]: T3 trigger -3.6
 #   - 사다리2 (MR T2 dca_level=2): -2.5%에 trim 0.5% (사용자 V14 사양)
 #   - 사다리3 (MR T3 dca_level=3): T3_DEFENSE_LADDER (별도 함수)
 T1_HEDGE_LADDER = [
-    # HEDGE_COMP/TREND_COMP T1 전용 사다리 (V13.1)
-    # 사용자 통찰 [실측 V11]: T1 worst -0.5~-1.0 영역 89% 회복
-    # plan_t2_defense_v2 분기: role=CORE_MR_HEDGE + dca_level=1만 처리
-    (-1.0, -0.5, "SL"),
-    (-1.2, -0.9, "SL"),
-    (-1.4, None, "HARD_SL"),
+    # ★ V14.7 [05-06]: 0.5 뒤로 — NOSLOT만 영향 (TREND_COMP V14.6 OFF)
+    #   사용자 결정: 비중 50% 변경과 패키지로 SL 윈도 ↑
+    #   plan_t2_defense_v2 분기: role=CORE_MR_HEDGE + dca_level=1 (NOSLOT)
+    (-1.5, -1.0, "SL"),
+    (-1.7, -1.4, "SL"),
+    (-1.9, None, "HARD_SL"),
 ]
 
 T2_DEFENSE_LADDER = [

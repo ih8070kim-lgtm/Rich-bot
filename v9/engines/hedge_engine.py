@@ -378,6 +378,11 @@ def plan_force_close(
                     except Exception:
                         pass
                     _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
+                    # ★ V14.7 [05-06]: NOSLOT (role=CORE_MR_HEDGE + dca_level=1) → -3.0% 적용
+                    #   사용자 결정: 사다리 0.5 뒤로 밀기와 패키지
+                    #   MR T1 (CORE_MR)은 HARD_SL_BY_TIER[1]=-2.5% 그대로 (V13.1 결정 유지)
+                    if p.get("role") == "CORE_MR_HEDGE" and _dca_lv_sl == 1:
+                        _sl_thresh = -3.0
                     _sl_ep = get_sl_entry(p, _dca_lv_sl)
 
                     if _sl_ep > 0:
