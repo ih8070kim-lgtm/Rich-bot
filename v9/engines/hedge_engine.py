@@ -378,11 +378,10 @@ def plan_force_close(
                     except Exception:
                         pass
                     _sl_thresh = HARD_SL_BY_TIER.get(_dca_lv_sl, -4.0)
-                    # ★ V14.10 [05-06]: NOSLOT (CORE_MR_HEDGE + dca_level=1) → -1.0% (V14.7 -3.0%에서 변경)
-                    #   plan_t2_defense_v2의 NOSLOT trail/hard 로직이 1차, 이건 backup
-                    #   사용자 데이터: 익절 케이스 worst 모두 -1.0% 안. -1.0% 도달 = 회복 못 함 시그널
+                    # ★ V14.14 [05-06]: NOSLOT/TREND_DIRECT (CORE_MR_HEDGE + dca_level=1) → -1.5%
+                    #   사용자 결정 + 데이터: TREND COUNTER 알파 hard SL -1.5%가 최적
                     if p.get("role") == "CORE_MR_HEDGE" and _dca_lv_sl == 1:
-                        _sl_thresh = -1.0
+                        _sl_thresh = -1.5
                     _sl_ep = get_sl_entry(p, _dca_lv_sl)
 
                     if _sl_ep > 0:
