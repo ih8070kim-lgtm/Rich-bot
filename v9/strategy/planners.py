@@ -1956,6 +1956,8 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                     continue
                 
                 # 시장가 cut 발사
+                # ★ V14.15: hsl_preorder 등록된 경우 cancel 신호 (runner가 처리)
+                _hsl_oid = (p.get("noslot_hsl_preorder", {}) or {}).get("oid", "")
                 intents.append(Intent(
                     trace_id=_tid(),
                     intent_type=IntentType.TP1,
@@ -1968,6 +1970,7 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                         "force_market": True,
                         "is_force_close": True,
                         "_expected_role": "CORE_MR_HEDGE",
+                        "cancel_noslot_hsl_oid": _hsl_oid,  # ★ V14.15: cancel 신호
                     },
                 ))
                 try:

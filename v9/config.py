@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.14"  # ★ V14.14 [05-06]: MR 진입 폐기 + TREND_DIRECT 단독 (RSI 65+/35- + TREND 반대 → 1회 즉시), trail 0.5/0.3, hard -1.5
+VERSION = "14.15"  # ★ V14.15 [05-06]: NOSLOT Hard SL Limit Preorder — 슬리피지 절감 (-1.5% reduceOnly limit, trail 시 cancel, 시장가 backup)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

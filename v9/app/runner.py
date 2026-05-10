@@ -2704,6 +2704,140 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
 
 
 # ═════════════════════════════════════════════════════════════════
+# ★ V14.15 [05-06]: NOSLOT/TREND_DIRECT Hard SL Limit Preorder
+# ═════════════════════════════════════════════════════════════════
+async def _place_noslot_hsl_preorder(ex, st, snapshot, system_state=None):
+    """★ V14.15: NOSLOT (CORE_MR_HEDGE) hard SL limit preorder
+    
+    동작:
+      1. 활성 NOSLOT 포지션 순회
+      2. trail 미활성 + hsl_preorder 미등록 → -1.5% 가격에 reduceOnly limit 등록
+      3. trail 활성 시 → 등록된 preorder cancel (trail로 cut될 거니까)
+      4. 이미 등록된 preorder 있으면 skip
+    
+    이점:
+      - hard SL 발동 시 maker fee (taker -> maker)
+      - 가격 -1.5% 도달 시 limit 자동 fill = 슬리피지 0
+      - 미체결 시: plan_force_close NOSLOT backup (-1.5%) 시장가 fallback
+    """
+    from v9.execution.position_book import iter_positions
+    from v9.execution.order_router import _PENDING_LIMITS
+    from v9.config import SYM_MIN_QTY, SYM_MIN_QTY_DEFAULT, LEVERAGE
+    import asyncio, time
+    
+    prices = (snapshot.all_prices or {}) if snapshot else {}
+    
+    for sym, sym_st in st.items():
+        if not isinstance(sym_st, dict):
+            continue
+        for side, p in iter_positions(sym_st):
+            if not isinstance(p, dict):
+                continue
+            # NOSLOT (CORE_MR_HEDGE) + T1만
+            if p.get("role") != "CORE_MR_HEDGE":
+                continue
+            if int(p.get("dca_level", 1) or 1) != 1:
+                continue
+            amt = float(p.get("amt", 0) or 0)
+            if amt <= 0:
+                continue
+            ep = float(p.get("ep", 0) or 0)
+            if ep <= 0:
+                continue
+            
+            cur_price = float(prices.get(sym, 0) or 0)
+            if cur_price <= 0:
+                continue
+            
+            # trail 활성 시 기존 preorder cancel
+            trail_active = bool(p.get("noslot_trail_active", False))
+            existing_oid = (p.get("noslot_hsl_preorder", {}) or {}).get("oid", "")
+            
+            if trail_active and existing_oid:
+                # trail 활성 → preorder cancel (trail로 cut)
+                try:
+                    await asyncio.to_thread(ex.cancel_order, existing_oid, sym)
+                    _PENDING_LIMITS.pop(existing_oid, None)
+                    p["noslot_hsl_preorder"] = {}
+                    print(f"[NOSLOT_HSL_CANCEL] {sym} {side} trail 활성 → preorder oid={existing_oid[:12]} cancel")
+                except Exception as e:
+                    print(f"[NOSLOT_HSL_CANCEL_ERR] {sym}: {str(e)[:80]}")
+                continue
+            
+            if trail_active:
+                continue  # trail 활성이면 preorder 등록 X
+            if existing_oid:
+                # 메모리에 등록됨 — 거래소 존재 검증
+                try:
+                    _oo = await asyncio.to_thread(ex.fetch_order, existing_oid, sym)
+                    _stat = (_oo.get("status") or "").lower()
+                    if _stat in ("open", "new", "partiallyfilled", ""):
+                        continue  # 거래소 잔존 OK, skip
+                    # closed/canceled → 메모리 정리 후 재등록
+                    p["noslot_hsl_preorder"] = {}
+                    _PENDING_LIMITS.pop(existing_oid, None)
+                except Exception:
+                    # fetch 실패 → 보수적으로 skip (다음 cycle 재시도)
+                    continue
+            
+            # -1.5% 가격 계산 (마진당 ROI 기준 = 가격 변화 0.5% × LEV 3)
+            # ROI = (price - ep)/ep × LEV × (1 for long, -1 for short)
+            # -1.5% = (price - ep)/ep × 3 × dir → (price - ep)/ep = -0.5% × dir
+            # long: price = ep × (1 - 0.005)
+            # short: price = ep × (1 + 0.005)
+            price_change = 0.005  # 0.5% 가격 변동 = -1.5% ROI (LEV 3)
+            if side == "buy":
+                sl_price = ep * (1 - price_change)
+                cancel_side = "sell"
+                ps = "LONG"
+            else:
+                sl_price = ep * (1 + price_change)
+                cancel_side = "buy"
+                ps = "SHORT"
+            
+            # 현재가가 이미 SL 가격 통과한 경우 skip (plan_force_close가 시장가 처리)
+            if (side == "buy" and cur_price <= sl_price) or (side == "sell" and cur_price >= sl_price):
+                continue
+            
+            min_qty = SYM_MIN_QTY.get(sym, SYM_MIN_QTY_DEFAULT)
+            if amt < min_qty:
+                continue
+            
+            try:
+                safe_qty = float(ex.amount_to_precision(sym, amt))
+                safe_price = float(ex.price_to_precision(sym, sl_price))
+                if safe_qty <= 0 or safe_price <= 0:
+                    continue
+                
+                order = await asyncio.to_thread(
+                    ex.create_order,
+                    sym, "limit", cancel_side, safe_qty, safe_price,
+                    params={"positionSide": ps, "reduceOnly": True}
+                )
+                oid = str(order.get("id", ""))
+                if oid:
+                    _PENDING_LIMITS[oid] = {
+                        "sym": sym, "side": cancel_side,
+                        "qty": safe_qty, "price": safe_price,
+                        "trace_id": f"noslot_hsl_{sym}",
+                        "tag": f"V14.15_NOSLOT_HSL_{sym}",
+                        "placed_at": time.time(),
+                        "intent_type": "NOSLOT_HSL",
+                        "positionSide": ps,
+                        "role": "CORE_MR_HEDGE",
+                        "tier": 1,
+                        "is_noslot_hsl": True,
+                        "_expected_role": "CORE_MR_HEDGE",
+                    }
+                    p["noslot_hsl_preorder"] = {
+                        "oid": oid, "price": safe_price, "qty": safe_qty
+                    }
+                    print(f"[NOSLOT_HSL_ARM] {sym} {side} EP={ep:.4f} SL=@{safe_price:.4f} (-1.5% ROI) oid={oid[:12]}")
+            except Exception as e:
+                print(f"[NOSLOT_HSL_ERR] {sym}: {str(e)[:80]}")
+
+
+# ═════════════════════════════════════════════════════════════════
 # ★ V10.31e-6: HEDGE_SIM 중간형 시뮬 — 매 틱 가격 추적 + DCA/종료 판정
 # ═════════════════════════════════════════════════════════════════
 def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
@@ -2747,6 +2881,11 @@ def _tick_register_stop_sl(ex, system_state: dict, st: dict, snapshot):
                 _info_type = str(_oo.get("info", {}).get("type", "") or "").upper()
                 _is_stop = ("STOP" in _top) or ("STOP" in _info_type)
                 _oo_reduce = _oo.get("reduceOnly") or _oo.get("info", {}).get("reduceOnly", False)
+                # V12 cleanup: STOP+reduceOnly만 (보수적, 기존 동작 보존)
+                # ★ V14.15: NOSLOT HSL preorder는 reduceOnly limit. 부팅 시 메모리 비어 좀비 위험 있으나,
+                #   TP1/TRIM preorder도 reduceOnly limit이라 함부로 cancel하면 익절 박탈.
+                #   타협: V12 cleanup은 STOP+reduceOnly만 유지, V14.15 좀비는 cycle 진행 중 _PENDING_LIMITS 동기화로 처리
+                #   (다음 cycle에서 fetch_open_orders로 미관리 발견 시 자동 처리, 별도 구현 필요)
                 if not _is_stop or not _oo_reduce:
                     continue
                 _oo_id = _oo.get("id")
@@ -4353,6 +4492,11 @@ async def _main_loop(ex_init, dry_run: bool):
 
             # ★ V10.30: DCA 선주문 — 봇 감시 + plain LIMIT (activation ROI 도달 시만)
             await _place_dca_preorders(ex, st, snapshot, system_state=system_state)
+
+            # ★ V14.15 [05-06]: NOSLOT/TREND_DIRECT Hard SL Limit Preorder
+            #   사용자 결정 "B" — 슬리피지 절감을 위해 hard SL을 -1.5% limit으로 미리 등록
+            #   trail 활성 시 자동 cancel, 미체결 시 plan_force_close 시장가 backup
+            await _place_noslot_hsl_preorder(ex, st, snapshot, system_state=system_state)
 
             # ★ V10.31AO-hf10 [05-02]: HEDGE_SIM 비활성 — V10.31AO에서 헷지(CORE_HEDGE/INSURANCE_SH) 제거
             #   log_hedge_sim.csv 활용 X. 함수 본체는 보존 (BC/CB 등 향후 활용 여지).

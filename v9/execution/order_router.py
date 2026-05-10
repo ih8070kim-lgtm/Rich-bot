@@ -258,6 +258,18 @@ async def route_order(
     )
     order_type = 'market' if (_force_market or not price) else 'limit'
 
+    # ★ V14.15 [05-06]: NOSLOT cut 발사 직전 hsl_preorder limit cancel
+    #   plan_t2_defense_v2 NOSLOT 분기에서 cut intent에 cancel_noslot_hsl_oid 메타 전달
+    #   시장가 cut + limit 잔존 시 의도치 않은 fill 차단
+    _hsl_cancel_oid = _meta.get("cancel_noslot_hsl_oid", "") if _meta else ""
+    if _hsl_cancel_oid:
+        try:
+            exchange.cancel_order(_hsl_cancel_oid, sym)
+            _PENDING_LIMITS.pop(_hsl_cancel_oid, None)
+            print(f"[NOSLOT_HSL_PRECUT_CANCEL] {sym} oid={_hsl_cancel_oid[:12]} (cut 발사 전 cancel)")
+        except Exception as _hcce:
+            print(f"[NOSLOT_HSL_PRECUT_CANCEL_ERR] {sym} oid={_hsl_cancel_oid[:12]}: {str(_hcce)[:80]}")
+
     # ── Idempotency Key 중복주문 방지 ──────────────────────────
     tier = intent.metadata.get('tier', 0) if intent.metadata else 0
     side_key  = str(getattr(intent, "side", "") or "")
