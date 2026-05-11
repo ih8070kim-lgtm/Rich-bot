@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.15"  # ★ V14.15 [05-06]: NOSLOT Hard SL Limit Preorder — 슬리피지 절감 (-1.5% reduceOnly limit, trail 시 cancel, 시장가 backup)
+VERSION = "14.15-hf1"  # ★ V14.15-hf1 [05-12]: TREND_DIRECT universe pool 체크 완화 (entry_side 방향만 → 양방향 OR) — 발동 0건 버그 수정
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

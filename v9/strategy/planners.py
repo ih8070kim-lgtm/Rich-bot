@@ -1022,10 +1022,13 @@ def plan_open(
             elif _trend_cooldown.get(symbol, 0) > now_ts:
                 pass  # 쿨다운
             else:
-                # universe 풀 체크 (entry_side 기준)
+                # ★ V14.14-hf1 [05-12]: universe pool 체크 완화
+                #   기존: entry_side 방향 pool 체크 → SHORT 시그널 sym이 LONG pool에 없으면 차단 → 발동 0건
+                #   변경: long OR short pool 둘 중 하나에 있으면 OK
+                #   시그널 잡힌 sym = 이미 universe 통과한 sym → pool 매칭 보장
                 _td_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
                 _td_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
-                _td_allowed = _td_long_pool if _td_entry_side == "buy" else _td_short_pool
+                _td_allowed = _td_long_pool | _td_short_pool  # 합집합 (OR)
                 if symbol in _td_allowed:
                     # _noslot_best 세팅 (기존 NOSLOT 발사 로직 재사용)
                     if _noslot_best is None:
