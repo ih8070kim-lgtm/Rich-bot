@@ -1022,26 +1022,62 @@ def plan_open(
             elif _trend_cooldown.get(symbol, 0) > now_ts:
                 pass  # 쿨다운
             else:
-                # ★ V14.14-hf1 [05-12]: universe pool 체크 완화
-                #   기존: entry_side 방향 pool 체크 → SHORT 시그널 sym이 LONG pool에 없으면 차단 → 발동 0건
-                #   변경: long OR short pool 둘 중 하나에 있으면 OK
-                #   시그널 잡힌 sym = 이미 universe 통과한 sym → pool 매칭 보장
+                # ★ V14.14-hf1 [05-12]: universe pool 체크 완화 (양방향 OR)
                 _td_long_pool = set(getattr(snapshot, "global_targets_long", None) or [])
                 _td_short_pool = set(getattr(snapshot, "global_targets_short", None) or [])
                 _td_allowed = _td_long_pool | _td_short_pool  # 합집합 (OR)
-                if symbol in _td_allowed:
+                
+                # ★ V14.15-hf3 [05-12]: corr/score 필터 추가 — 사용자 결정 [05-12]
+                #   문제: V14.14 진입 시점 분석 — score=0.0, corr 0.24~0.50 (BTC 무관 노이즈)
+                #   해결: corr ≥ 0.6 (BTC 동조) + |score| ≥ 0.5 (추세 강도)
+                #   어제 시뮬 (+471%) 조건과 일치 (corr 0.6+ universe)
+                _td_corr = (getattr(snapshot, "correlations", None) or {}).get(symbol, 0)
+                _td_pool = snapshot.ohlcv_pool.get(symbol, {}) if snapshot.ohlcv_pool else {}
+                _td_15m = _td_pool.get("15m", [])
+                _td_score = 0.0
+                if len(_td_15m) >= 35:
+                    try:
+                        _td_score = _calc_trend_score(_td_15m)
+                    except Exception:
+                        _td_score = 0.0
+                
+                # 필터 1: corr ≥ 0.6 (사용자 결정 — config OPEN_CORR_MIN=0.50과 별개)
+                _td_corr_ok = _td_corr >= 0.6
+                # 필터 2: score 방향 일치 + |score| ≥ 0.5
+                _td_score_ok = False
+                if _td_entry_side == "buy" and _td_score >= 0.5:
+                    _td_score_ok = True
+                elif _td_entry_side == "sell" and _td_score <= -0.5:
+                    _td_score_ok = True
+                
+                if not _td_corr_ok:
+                    # corr 부족 → skip
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("TREND_DIRECT_SKIP", 
+                                   f"{symbol} {_td_entry_side} corr={_td_corr:.2f} < 0.6")
+                    except Exception: pass
+                elif not _td_score_ok:
+                    # score 부족 → skip
+                    try:
+                        from v9.logging.logger_csv import log_system
+                        log_system("TREND_DIRECT_SKIP", 
+                                   f"{symbol} {_td_entry_side} |score|={abs(_td_score):.2f} < 0.5 (score={_td_score:.2f})")
+                    except Exception: pass
+                elif symbol in _td_allowed:
                     # _noslot_best 세팅 (기존 NOSLOT 발사 로직 재사용)
                     if _noslot_best is None:
                         _noslot_best = {
                             "sym": symbol,
                             "side": _td_entry_side,
-                            "score": 0.0,  # 같은 sym 진입이라 score 무관
+                            "score": abs(_td_score),  # ★ V14.15-hf3: 진짜 score 기록
                             "sig_sym": symbol,
                             "size_mult": 1.0,  # ★ V14.14: T1 풀사이즈 (그리드 100%)
                             "exposure_roi": 0.0,
                             "trigger_type": "TREND_DIRECT",
                             "td_trend": _td_trend,
                             "td_rsi": rsi5_now,
+                            "td_corr": _td_corr,
                         }
         # ★ V14.14 [05-06]: V14.13 슬롯풀+ROI 트리거 모두 폐기 (위 V14.14 TREND_DIRECT 분기로 대체)
         # ★ V14.14 [05-06]: MR 진입 영구 차단 — 사용자 결정 "MR 폐기"
