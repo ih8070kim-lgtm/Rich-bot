@@ -1480,48 +1480,12 @@ def plan_open(
             _ns_notional = _ns_grid * _ns13_mult
             _ns_size_tag = "FULL" if _ns13_mult >= 1.0 else "HALF"
             
-            # ★ V14.13 [05-06]: 70% 노출 한도 가드 부활 (V14.11 의도 유지)
-            #   목적: NOSLOT은 hedge 도구, MR 노출의 70% 초과 차단
-            _mr_notional_total = 0.0
-            _noslot_notional_active = 0.0
-            try:
-                for _x_sym, _x_st in st.items():
-                    if not isinstance(_x_st, dict):
-                        continue
-                    for _x_side, _x_p in iter_positions(_x_st):
-                        if not isinstance(_x_p, dict):
-                            continue
-                        _x_amt = float(_x_p.get("amt", 0) or 0)
-                        if _x_amt <= 0:
-                            continue
-                        _x_role = _x_p.get("role", "")
-                        _x_curr = float(_ns_prices.get(_x_sym, 0) or 0)
-                        if _x_curr <= 0:
-                            continue
-                        _x_notional = _x_amt * _x_curr
-                        if _x_role == "CORE_MR":
-                            _mr_notional_total += _x_notional
-                        elif _x_role == "CORE_MR_HEDGE":
-                            _noslot_notional_active += _x_notional
-            except Exception:
-                pass
-            
-            _new_noslot_total = _noslot_notional_active + _ns_notional
-            _max_allowed = _mr_notional_total * 0.7
-            
-            if _mr_notional_total <= 0:
-                print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → MR 활성 0")
-                _noslot_best = None
-            elif _new_noslot_total > _max_allowed:
-                print(f"[NOSLOT_SKIP_LIMIT] {_ns['sym']} {_ns['side']} → "
-                      f"노출 ${_new_noslot_total:.0f} > MR×0.7 ${_max_allowed:.0f}")
-                try:
-                    from v9.logging.logger_csv import log_system
-                    log_system("NOSLOT_SKIP_LIMIT",
-                               f"{_ns['sym']} {_ns['side']} new=${_new_noslot_total:.0f} max=${_max_allowed:.0f}")
-                except Exception: pass
-                _noslot_best = None
-            
+            # ★ V14.15-hf2 [05-12]: V14.11 70% 가드 폐기 — MR 폐기(V14.14)와 충돌
+            #   기존: NOSLOT 노출 ≤ MR 노출 × 70% (MR이 baseline)
+            #   문제: V14.14 MR 폐기 → MR 활성 0 → baseline 0 → 모든 NOSLOT 차단 → 진입 0건
+            #   해결: 사용자 결정 "자본 100% 슬랏 100%" 일관성 위해 가드 제거
+            #   자본 한도는 잔고 × LEV로 거래소가 자동 제한 (마진 부족 시 reject)
+            # (V14.11 가드 코드 전체 폐기)
             if _noslot_best:
                 _ns_qty = _ns_notional / _ns_cp if _ns_notional >= 10 else 0
             else:
