@@ -999,14 +999,22 @@ def plan_open(
             _td_trend = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
         else:
             _td_trend = "FLAT"
-        # SHORT 시그널 + UP 추세 → BUY 진입
+        # ★ V14.16 [05-12]: BTC 1h ±0.5% 필터 — 사용자 결정 [05-12]
+        #   "추세 필터 ON" = BTC 1h ≥ ±0.5% (사용자 1% 결정 → 0건 발동, 데이터 0.5% 추천)
+        #   데이터 검증: V14.14 BUY + BTC 1h ≥ +0.5% = 21건 +4.36% WR 81%
+        _btc_1h = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
+        _btc_up_ok = _btc_1h >= 0.005   # BTC 1h ≥ +0.5%
+        _btc_down_ok = _btc_1h <= -0.005  # BTC 1h ≤ -0.5%
+        # SHORT 시그널 + UP 추세 + BTC UP → BUY 진입
         if (_mr_signal_short and short_trig and micro_short_ok 
-                and rsi5_now >= 65 and _td_trend == "UP"):
+                and rsi5_now >= 65 and _td_trend == "UP"
+                and _btc_up_ok):  # ★ V14.16: BTC 1h 필터
             _td_trigger = True
             _td_entry_side = "buy"
-        # LONG 시그널 + DOWN 추세 → SELL 진입
+        # LONG 시그널 + DOWN 추세 + BTC DOWN → SELL 진입
         elif (_mr_signal_long and long_trig and micro_long_ok 
-                and rsi5_now <= 35 and _td_trend == "DOWN"):
+                and rsi5_now <= 35 and _td_trend == "DOWN"
+                and _btc_down_ok):  # ★ V14.16: BTC 1h 필터
             _td_trigger = True
             _td_entry_side = "sell"
         
@@ -1080,11 +1088,29 @@ def plan_open(
                             "td_corr": _td_corr,
                         }
         # ★ V14.14 [05-06]: V14.13 슬롯풀+ROI 트리거 모두 폐기 (위 V14.14 TREND_DIRECT 분기로 대체)
-        # ★ V14.14 [05-06]: MR 진입 영구 차단 — 사용자 결정 "MR 폐기"
-        #   trigger_side 잡혔어도 일반 MR 진입 코드 도달 X
-        #   _noslot_best (V14.14 TREND_DIRECT)만 발사
+        # ★ V14.16 [05-12]: MR 부활 — BTC 1h 방향 일치 시기만 (사용자 결정)
+        #   기존 V14.14: MR 진입 영구 차단
+        #   변경 V14.16: BTC 1h ≥ +0.5% + LONG 시그널 → MR LONG 허용
+        #               BTC 1h ≤ -0.5% + SHORT 시그널 → MR SHORT 허용
+        #               그 외: MR 차단 (V14.14 정책 유지)
         if trigger_side is not None:
-            continue  # MR 진입 분기 진입 차단
+            # MR 진입 시도 — BTC 방향 일치 체크
+            _mr_btc_ok = False
+            if trigger_side == "buy" and _btc_up_ok:
+                _mr_btc_ok = True  # BTC UP + MR LONG
+            elif trigger_side == "sell" and _btc_down_ok:
+                _mr_btc_ok = True  # BTC DOWN + MR SHORT
+            
+            if not _mr_btc_ok:
+                # BTC 방향 불일치 → MR 차단 (V14.14 정책)
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("MR_SKIP_BTC", 
+                               f"{symbol} {trigger_side} btc_1h={_btc_1h*100:.2f}% (방향 불일치)")
+                except Exception: pass
+                continue
+            # BTC 방향 일치 → MR 진입 허용 (V14.16 신규)
+            # 아래 일반 MR 진입 코드로 흘러감
         # 일반 MR 진입 코드로 도달 X (위 continue로 차단)
         # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
         # ★ V10.17 Rule A: Slot Balance Gate — 반대=0 AND 이쪽≥3 → 차단
@@ -1930,7 +1956,7 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                 
                 # trail 활성 체크 (max ≥ +0.5% 처음 도달 시) ★ V14.14: 1.0 → 0.5
                 _trail_active_ns = bool(p.get("noslot_trail_active", False))
-                if not _trail_active_ns and _max_ns >= 0.5:
+                if not _trail_active_ns and _max_ns >= 0.7:  # ★ V14.16: 0.5 → 0.7
                     p["noslot_trail_active"] = True
                     p["noslot_trail_max"] = _max_ns
                     _trail_active_ns = True
@@ -1946,7 +1972,7 @@ def plan_t2_defense_v2(snapshot: MarketSnapshot, st: Dict,
                         p["noslot_trail_max"] = _max_ns
                         _trail_max_ns = _max_ns
                     # retrace 0.3% 도달 시 cut
-                    if _roi_ns <= _trail_max_ns - 0.3:
+                    if _roi_ns <= _trail_max_ns - 0.4:  # ★ V14.16: 0.3 → 0.4
                         _fire_ns = True
                         _reason_ns = f"NOSLOT_TRAIL(peak={_trail_max_ns:.2f},roi={_roi_ns:.2f})"
                 else:
