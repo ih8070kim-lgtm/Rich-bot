@@ -103,7 +103,7 @@ class MarketSnapshot:
     btc_price: float
     btc_1h_change: float
     btc_6h_change: float
-    btc_10m_change: float = 0.0  # ★ V14.17: 10분 변화율
+    btc_10m_change: float  # ★ V14.17: 10분 변화율 (default 제거 — dataclass 순서)
     dev_ma: dict
     real_balance_usdt: float
     free_balance_usdt: float
