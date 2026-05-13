@@ -7,7 +7,7 @@ v10.27f → v10.28 변경:
   (진입 ATR 패널티 / TP 할인 / light block은 유지)
 """
 
-VERSION = "14.17-hf1"  # ★ V14.17-hf1 [05-13]: dataclass 필드 순서 수정 (btc_10m_change default 제거)
+VERSION = "14.17-hf2"  # ★ V14.17-hf2 [05-13]: CORE_MR_HEDGE TP1 preorder 차단 (V14.14 trail 알파 일관성)
 
 # ═══════════════════════════════════════════════════════════════════
 # ★ V10.31AA: Feature Flags — MR + PTP 모드 (단순화 실험)

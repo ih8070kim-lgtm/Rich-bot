@@ -1020,7 +1020,11 @@ async def _manage_tp1_preorders(ex, st, snapshot, dry_run=False, system_state=No
                     await _cancel_tp1_preorder(ex, p, sym)
                 continue
             _role = p.get("role", "")
-            if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "BC", "CB"):
+            # ★ V14.17-hf2 [05-13]: CORE_MR_HEDGE (V14.14 TREND_DIRECT) 추가
+            #   사용자 발견 "1.5에 지정가 클로즈" — V14.14 진입이 봇 일반 흐름에서 TP1 +1.5% limit 등록됨
+            #   V14.14 의도: trail (+0.7%/retrace 0.4%)로 청산, +1.5% TP1 limit으로 제한 X
+            #   해결: CORE_MR_HEDGE도 TP1 preorder 제외 → trail이 청산 담당
+            if _role in ("INSURANCE_SH", "CORE_HEDGE", "HEDGE", "SOFT_HEDGE", "BC", "CB", "CORE_MR_HEDGE"):
                 continue
             # ★ V14.3 hotfix [05-06]: HIGH 레짐 차단 제거 — V14.2 trail 폐기 일관성
             #   사용자 보고 [05-06 14:42]: SUI TREND_COMP 진입 후 +1.5% 도달했으나
