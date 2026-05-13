@@ -165,6 +165,7 @@ async def fetch_market_snapshot(
     # ── BTC 지표 계산 ────────────────────────────────────────────
     btc_1h_change = 0.0
     btc_6h_change = 0.0
+    btc_10m_change = 0.0  # ★ V14.17 [05-13]: 10분 변화율 (5m OHLCV 2개 비교)
     dev_ma = 0.0
 
     btc_ohlcv = ohlcv_pool.get('BTC/USDT', {}).get('1h', [])
@@ -181,6 +182,17 @@ async def fetch_market_snapshot(
                 ma20 = sum(float(x[4]) for x in btc_ohlcv[-21:-1]) / 20
                 if ma20 > 0 and btc_price > 0:
                     dev_ma = (btc_price - ma20) / ma20 * 100
+        except Exception:
+            pass
+    
+    # ★ V14.17: BTC 10m 변화율 — 5m OHLCV 2개 (10분) 비교
+    btc_5m_ohlcv = ohlcv_pool.get('BTC/USDT', {}).get('5m', [])
+    if len(btc_5m_ohlcv) >= 3:
+        try:
+            c_now_5m = float(btc_5m_ohlcv[-2][4])  # 직전 완성봉
+            c_10m_ago = float(btc_5m_ohlcv[-4][4])  # 10분 전 봉
+            if c_10m_ago > 0:
+                btc_10m_change = (c_now_5m - c_10m_ago) / c_10m_ago
         except Exception:
             pass
 
@@ -202,6 +214,7 @@ async def fetch_market_snapshot(
         btc_price=btc_price,
         btc_1h_change=btc_1h_change,
         btc_6h_change=btc_6h_change,
+        btc_10m_change=btc_10m_change,  # ★ V14.17
         dev_ma=dev_ma,
         real_balance_usdt=real_balance,
         free_balance_usdt=free_balance,

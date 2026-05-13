@@ -999,22 +999,24 @@ def plan_open(
             _td_trend = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
         else:
             _td_trend = "FLAT"
-        # ★ V14.16 [05-12]: BTC 1h ±0.5% 필터 — 사용자 결정 [05-12]
-        #   "추세 필터 ON" = BTC 1h ≥ ±0.5% (사용자 1% 결정 → 0건 발동, 데이터 0.5% 추천)
-        #   데이터 검증: V14.14 BUY + BTC 1h ≥ +0.5% = 21건 +4.36% WR 81%
-        _btc_1h = float(getattr(snapshot, "btc_1h_change", 0.0) or 0.0)
-        _btc_up_ok = _btc_1h >= 0.005   # BTC 1h ≥ +0.5%
-        _btc_down_ok = _btc_1h <= -0.005  # BTC 1h ≤ -0.5%
+        # ★ V14.17 [05-13]: BTC 10m ±0.3% 필터 (사용자 결정 — 1h 0.5%에서 10m 0.3%로 빠른 반응)
+        #   기존 V14.16: btc_1h_change ≥ ±0.005 (1시간 평균 ±0.5%)
+        #   변경 V14.17: btc_10m_change ≥ ±0.003 (10분 평균 ±0.3%)
+        #   효과: 추세 시작 후 ~30분 lag → ~10분 lag (3배 빠른 반응)
+        #   위험: 노이즈 진입 ↑ (미검증 영역)
+        _btc_10m = float(getattr(snapshot, "btc_10m_change", 0.0) or 0.0)
+        _btc_up_ok = _btc_10m >= 0.003   # BTC 10m ≥ +0.3%
+        _btc_down_ok = _btc_10m <= -0.003  # BTC 10m ≤ -0.3%
         # SHORT 시그널 + UP 추세 + BTC UP → BUY 진입
         if (_mr_signal_short and short_trig and micro_short_ok 
                 and rsi5_now >= 65 and _td_trend == "UP"
-                and _btc_up_ok):  # ★ V14.16: BTC 1h 필터
+                and _btc_up_ok):  # ★ V14.17: BTC 10m 필터
             _td_trigger = True
             _td_entry_side = "buy"
         # LONG 시그널 + DOWN 추세 + BTC DOWN → SELL 진입
         elif (_mr_signal_long and long_trig and micro_long_ok 
                 and rsi5_now <= 35 and _td_trend == "DOWN"
-                and _btc_down_ok):  # ★ V14.16: BTC 1h 필터
+                and _btc_down_ok):  # ★ V14.17: BTC 10m 필터
             _td_trigger = True
             _td_entry_side = "sell"
         
@@ -1088,28 +1090,53 @@ def plan_open(
                             "td_corr": _td_corr,
                         }
         # ★ V14.14 [05-06]: V14.13 슬롯풀+ROI 트리거 모두 폐기 (위 V14.14 TREND_DIRECT 분기로 대체)
-        # ★ V14.16 [05-12]: MR 부활 — BTC 1h 방향 일치 시기만 (사용자 결정)
-        #   기존 V14.14: MR 진입 영구 차단
-        #   변경 V14.16: BTC 1h ≥ +0.5% + LONG 시그널 → MR LONG 허용
-        #               BTC 1h ≤ -0.5% + SHORT 시그널 → MR SHORT 허용
-        #               그 외: MR 차단 (V14.14 정책 유지)
+        # ★ V14.17 [05-13]: MR hedge 알파 — 사용자 결정
+        #   알파 정의: "BTC 추세 시기 + V14.14 진입 반대 방향 MR 시그널만 진입"
+        #     BTC UP 시기 (V14.14 BUY 가능) → MR은 SHORT 시그널(RSI 65+)만 받음 → 시그널대로 SELL 진입
+        #     BTC DOWN 시기 (V14.14 SELL 가능) → MR은 LONG 시그널(RSI 35-)만 받음 → 시그널대로 BUY 진입
+        #   "각자 유리한 시점에 진입" — 동시 진입 X (같은 sym 충돌 시 V14.14 우선)
+        #   진입 방향: MR 시그널대로 (V14.16 사양 유지, V14.14의 반대 방향 컨셉 아님)
+        #   데이터 비판: BTC UP + SELL 시그널대로 = -2.77% (5/6 데이터 174건, 명백한 음수)
+        #               단 사용자 결정 받음. 1주 운영 데이터로 진짜 EV 측정.
         if trigger_side is not None:
-            # MR 진입 시도 — BTC 방향 일치 체크
-            _mr_btc_ok = False
-            if trigger_side == "buy" and _btc_up_ok:
-                _mr_btc_ok = True  # BTC UP + MR LONG
-            elif trigger_side == "sell" and _btc_down_ok:
-                _mr_btc_ok = True  # BTC DOWN + MR SHORT
-            
-            if not _mr_btc_ok:
-                # BTC 방향 불일치 → MR 차단 (V14.14 정책)
+            # 트렌드 시기 확인 (BTC 10m ≥ ±0.3%)
+            if not (_btc_up_ok or _btc_down_ok):
+                # BTC 평탄 시기 → MR 차단
                 try:
                     from v9.logging.logger_csv import log_system
                     log_system("MR_SKIP_BTC", 
-                               f"{symbol} {trigger_side} btc_1h={_btc_1h*100:.2f}% (방향 불일치)")
+                               f"{symbol} {trigger_side} btc_10m={_btc_10m*100:.2f}% (트렌드 없음)")
                 except Exception: pass
                 continue
-            # BTC 방향 일치 → MR 진입 허용 (V14.16 신규)
+            
+            # BTC 방향과 시그널 방향 매칭
+            # BTC UP → SHORT 시그널(trigger_side=sell)만 허용 (V14.14는 BUY 진입)
+            # BTC DOWN → LONG 시그널(trigger_side=buy)만 허용 (V14.14는 SELL 진입)
+            _mr_ok = False
+            if _btc_up_ok and trigger_side == "sell":
+                _mr_ok = True
+            elif _btc_down_ok and trigger_side == "buy":
+                _mr_ok = True
+            
+            if not _mr_ok:
+                # BTC 방향과 일치하는 시그널 (V14.14가 잡을 영역) → MR skip
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("MR_SKIP_BTC", 
+                               f"{symbol} {trigger_side} btc_10m={_btc_10m*100:.2f}% (V14.14 영역)")
+                except Exception: pass
+                continue
+            
+            # V14.14가 같은 sym에 발사 중이면 MR skip (충돌 방지)
+            if _noslot_best is not None and _noslot_best.get("sym") == symbol:
+                try:
+                    from v9.logging.logger_csv import log_system
+                    log_system("MR_SKIP_BTC", 
+                               f"{symbol} {trigger_side} (V14.14 같은 sym 우선)")
+                except Exception: pass
+                continue
+            
+            # MR 진입 허용 (시그널대로, trigger_side 유지)
             # 아래 일반 MR 진입 코드로 흘러감
         # 일반 MR 진입 코드로 도달 X (위 continue로 차단)
         # ★ V10.31d-3: _open_dir_cd 쿨다운 체크 제거
