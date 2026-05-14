@@ -322,7 +322,7 @@ OPEN_PENDING_TTL_SEC     = 5 * 60
 # 이전 주석(V10.27~V10.31d) 기록은 CLAUDE.md 히스토리 참조.
 
 # ★ V10.27: 통합 ATR base + slot 불균형 ±패널티
-_ATR_BASE = 3.0           # ★ V10.29b: 백테스트 최적 (2.4→3.0)
+_ATR_BASE = 3.5           # ★ V14.19 [05-14]: 3.0 → 3.5 (사용자 결정 — 진입 빈도 ↓, 변동성 큰 sym만)
 _ATR_SLOT_STEP = 0.2      # 슬롯 차이 1개당 heavy +0.2 / light -0.2
 
 
@@ -856,10 +856,10 @@ def plan_open(
 
         # ★ v10.7: TDECAY 제거 — ZOMBIE로 통합
 
-        # ── (4-b) RSI 트리거 (5m RSI14 기준)
+        # ── (4-b) RSI 트리거 (5m RSI6 기준) ★ V14.19: 14 → 6 (사용자 결정 — 빠른 진입)
         closes_5m_rsi = [float(x[4]) for x in ohlcv_5m]
-        rsi5_now  = calc_rsi(closes_5m_rsi, period=14) if len(closes_5m_rsi) >= 15 else 50.0
-        rsi5_prev = calc_rsi(closes_5m_rsi[:-1], period=14) if len(closes_5m_rsi) >= 16 else 50.0
+        rsi5_now  = calc_rsi(closes_5m_rsi, period=6) if len(closes_5m_rsi) >= 7 else 50.0
+        rsi5_prev = calc_rsi(closes_5m_rsi[:-1], period=6) if len(closes_5m_rsi) >= 8 else 50.0
         long_trig  = (rsi5_now <= adj_rsi5_os) or (rsi5_now > rsi5_prev and rsi5_prev <= adj_rsi5_os)
         short_trig = (rsi5_now >= adj_rsi5_ob) or (rsi5_now < rsi5_prev and rsi5_prev >= adj_rsi5_ob)
 
@@ -1346,9 +1346,17 @@ def plan_open(
                 "atr":              atr,
                 "dca_targets":      dca_targets,
                 "positionSide":     "LONG" if trigger_side == "buy" else "SHORT",
-                "entry_type":       entry_type_tag,
-                # ★ V10.26: E30/MR_E30도 CORE_MR (CORE_BREAKOUT 제거)
-                "role":             "CORE_MR",
+                # ★ V14.19 [05-14]: MR 진입을 V14.14 청산 로직으로 통합 — 사용자 결정
+                #   기존: role=CORE_MR + entry_type="MR" → DCA preorder 자동 등록, TP1 +1.5% limit
+                #   변경: role=CORE_MR_HEDGE + entry_type="TREND" → V14.14처럼 단발 진입 + trail
+                #     DCA 차단 (entry_type=TREND, V14.2)
+                #     TP1 limit 차단 (CORE_MR_HEDGE, V14.17-hf2)
+                #     Trail trigger +0.7% / retrace 0.4% (V14.16 청산)
+                #     Hard SL -1.5% limit preorder (V14.15 NOSLOT_HSL)
+                #   MR 슬롯 카운트 (count_slots role=CORE_MR)에서 빠짐 → MR 슬롯 한도 우회
+                #   V14.14와 동일한 단발 진입 흐름
+                "entry_type":       "TREND",
+                "role":             "CORE_MR_HEDGE",
                 # ★ v10.6: 진입 시 레짐 잠금 (이후 좁아지지 않음)
                 "locked_regime":    _btc_regime,
             },

@@ -2490,6 +2490,11 @@ async def _place_dca_preorders(ex, st, snapshot, system_state=None):
             #   role=CORE_MR_HEDGE는 entry_type=TREND로 들어옴 (planners.py)
             if str(p.get("entry_type", "MR")) == "TREND":
                 continue
+            # ★ V14.19 [05-14]: CORE_MR (V14.18 MR 부활)도 DCA 차단 — 사용자 결정 "DCA 없이"
+            #   V14.18에서 MR 부활 시 entry_type="MR" → DCA preorder 자동 등록되던 결함
+            #   사용자 발견 "DCA 없이 mr 구성해달라고 했는데 반영 안 됨" — 책임 인정
+            if p.get("role", "") == "CORE_MR":
+                continue
             if p.get("pending_dca") or int(p.get("step", 0) or 0) >= 1:
                 continue
             # ★ V10.31b: 미장전 정리 중 DCA 차단
