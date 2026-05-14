@@ -18,6 +18,12 @@ import uuid
 from typing import List, Dict, Optional
 
 from v9.types import Intent, IntentType, MarketSnapshot
+
+# ★ V14.18 [05-14]: BTC 추세 윈도우 추적 (모듈 글로벌)
+#   BTC 10m ≥ ±0.3% 발동 시점 + 20분간 추세 ON 유지
+#   사용자 결정: "MR 진입은 BTC 트렌드 ON 시점 이후 20분간 기회 부여"
+_BTC_TREND_WINDOW_UNTIL = 0.0
+_BTC_TREND_WINDOW_DIRECTION = ""  # "up" | "down" | ""
 from v9.risk.slot_manager import count_slots
 from v9.execution.position_book import (
     get_p, set_p, iter_positions, is_active,
@@ -999,24 +1005,35 @@ def plan_open(
             _td_trend = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
         else:
             _td_trend = "FLAT"
-        # ★ V14.17 [05-13]: BTC 10m ±0.3% 필터 (사용자 결정 — 1h 0.5%에서 10m 0.3%로 빠른 반응)
-        #   기존 V14.16: btc_1h_change ≥ ±0.005 (1시간 평균 ±0.5%)
-        #   변경 V14.17: btc_10m_change ≥ ±0.003 (10분 평균 ±0.3%)
-        #   효과: 추세 시작 후 ~30분 lag → ~10분 lag (3배 빠른 반응)
-        #   위험: 노이즈 진입 ↑ (미검증 영역)
+        # ★ V14.18 [05-14]: BTC 추세 윈도우 — 사용자 결정 "20분 윈도우"
+        #   기존 V14.17: 매 cycle 즉시 btc_10m_change 비교 (시점 매칭, 매우 좁음)
+        #   변경 V14.18: BTC 10m ≥ ±0.3% 발동 후 20분 유지
+        #     발동 시: 윈도우 만료 시각 = now + 20분, 방향 기록
+        #     20분 내 BTC 평탄으로 reverse해도 윈도우 유지
+        #     20분 후 자동 종료
+        #   효과: 진입 매칭 시기 확장 (5분 → 25분, ~5배)
         _btc_10m = float(getattr(snapshot, "btc_10m_change", 0.0) or 0.0)
-        _btc_up_ok = _btc_10m >= 0.003   # BTC 10m ≥ +0.3%
-        _btc_down_ok = _btc_10m <= -0.003  # BTC 10m ≤ -0.3%
+        global _BTC_TREND_WINDOW_UNTIL, _BTC_TREND_WINDOW_DIRECTION
+        _now_ts_btc = time.time()
+        if _btc_10m >= 0.003:
+            _BTC_TREND_WINDOW_UNTIL = _now_ts_btc + 1200  # 20분
+            _BTC_TREND_WINDOW_DIRECTION = "up"
+        elif _btc_10m <= -0.003:
+            _BTC_TREND_WINDOW_UNTIL = _now_ts_btc + 1200
+            _BTC_TREND_WINDOW_DIRECTION = "down"
+        _btc_window_active = _now_ts_btc < _BTC_TREND_WINDOW_UNTIL
+        _btc_up_ok = _btc_window_active and _BTC_TREND_WINDOW_DIRECTION == "up"
+        _btc_down_ok = _btc_window_active and _BTC_TREND_WINDOW_DIRECTION == "down"
         # SHORT 시그널 + UP 추세 + BTC UP → BUY 진입
         if (_mr_signal_short and short_trig and micro_short_ok 
                 and rsi5_now >= 65 and _td_trend == "UP"
-                and _btc_up_ok):  # ★ V14.17: BTC 10m 필터
+                and _btc_up_ok):  # ★ V14.18: 윈도우 기반
             _td_trigger = True
             _td_entry_side = "buy"
         # LONG 시그널 + DOWN 추세 + BTC DOWN → SELL 진입
         elif (_mr_signal_long and long_trig and micro_long_ok 
                 and rsi5_now <= 35 and _td_trend == "DOWN"
-                and _btc_down_ok):  # ★ V14.17: BTC 10m 필터
+                and _btc_down_ok):  # ★ V14.18: 윈도우 기반
             _td_trigger = True
             _td_entry_side = "sell"
         
@@ -1099,13 +1116,14 @@ def plan_open(
         #   데이터 비판: BTC UP + SELL 시그널대로 = -2.77% (5/6 데이터 174건, 명백한 음수)
         #               단 사용자 결정 받음. 1주 운영 데이터로 진짜 EV 측정.
         if trigger_side is not None:
-            # 트렌드 시기 확인 (BTC 10m ≥ ±0.3%)
+            # 트렌드 시기 확인 (BTC 10m 윈도우 활성)
             if not (_btc_up_ok or _btc_down_ok):
-                # BTC 평탄 시기 → MR 차단
+                # 윈도우 만료 또는 미발동 → MR 차단
+                _remaining = max(0, _BTC_TREND_WINDOW_UNTIL - _now_ts_btc)
                 try:
                     from v9.logging.logger_csv import log_system
                     log_system("MR_SKIP_BTC", 
-                               f"{symbol} {trigger_side} btc_10m={_btc_10m*100:.2f}% (트렌드 없음)")
+                               f"{symbol} {trigger_side} btc_10m={_btc_10m*100:.2f}% (윈도우 만료, 남은:{int(_remaining)}s)")
                 except Exception: pass
                 continue
             
