@@ -1002,7 +1002,7 @@ def plan_open(
         _td_entry_side = None
         # TREND 라벨 직접 계산 (line 1159와 동일 로직, NOSLOT 분기 시점에 미세팅이라)
         if ema_20_5m > 0 and ema_20_15m > 0:
-            _td_trend = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
+            _td_trend = "UP" if ema_20_5m > ema_20_15m * 1.001 else ("DOWN" if ema_20_5m < ema_20_15m * 0.999 else "FLAT")
         else:
             _td_trend = "FLAT"
         # ★ V14.18 [05-14]: BTC 추세 윈도우 — 사용자 결정 "20분 윈도우"
@@ -1208,7 +1208,7 @@ def plan_open(
 
         # 추세 방향 태깅 (역방향 MR 추적용)
         if ema_20_5m > 0 and ema_20_15m > 0:
-            _trend_tag = "UP" if ema_20_5m > ema_20_15m * 1.002 else ("DOWN" if ema_20_5m < ema_20_15m * 0.998 else "FLAT")
+            _trend_tag = "UP" if ema_20_5m > ema_20_15m * 1.001 else ("DOWN" if ema_20_5m < ema_20_15m * 0.999 else "FLAT")
             _ema_gap_pct = (ema_20_5m - ema_20_15m) / ema_20_15m  # 기울기 정량화
         else:
             _trend_tag = "FLAT"
